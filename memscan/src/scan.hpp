@@ -46,6 +46,10 @@ struct Match {
     std::size_t before_bytes = 0;
     std::size_t after_bytes = 0;
     std::size_t scanned_bytes = 0;
+    // How strongly this location looks like the caret's composition: the
+    // quality of the text in front plus a bonus for terminal screen grids,
+    // which are where a terminal actually shows the composition.
+    int confidence = 0;
     bool truncated = false;
 };
 

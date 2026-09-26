@@ -298,12 +298,48 @@ int main() {
         ScanError error;
         std::vector<Match> candidates;
         const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
-        (void)scan_pid(holder.pid, *anchor, 256, 0, limits, hints, error, &candidates);
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
         check(std::ranges::any_of(candidates, [&](const Match& item) {
                   return item.encoding == Encoding::Utf32Cell12Le &&
                          item.address == holder.address + 9 * 12 &&
-                         item.before.ends_with("doc text ");
+                         item.before.ends_with("doc text ") && item.confidence >= 32;
               }), "a 12-byte cell grid is found with the text before the composition");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // A prefix of a longer word in a path or message must not become a
+        // candidate: the composition sits at the caret, followed by a
+        // boundary, not by more of the same word.
+        const Holder holder = spawn_holder(std::string("doc prefix ") + kAnchor + "續", false);
+        const auto anchor_address = holder.address + std::string_view("doc prefix ").size();
+        ScanError error;
+        ScanStats stats;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 256}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates,
+                       nullptr, &stats);
+        // The forked child inherits the parent's heap, so other copies exist;
+        // only the holder's own location must be rejected.
+        check(stats.hits > 0 &&
+                  std::ranges::none_of(candidates, [&](const Match& item) {
+                      return item.address == anchor_address;
+                  }),
+              "a match continuing as a longer word is not a caret candidate");
+        stop_holder(holder.pid);
+    }
+
+    {
+        const Holder holder = spawn_holder(std::string("doc prefix ") + kAnchor + " 續", false);
+        const auto anchor_address = holder.address + std::string_view("doc prefix ").size();
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 256}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == anchor_address && item.encoding == Encoding::Utf8 &&
+                         item.confidence < 32;
+              }), "a match at a word boundary stays a candidate without the grid bonus");
         stop_holder(holder.pid);
     }
 

@@ -246,6 +246,7 @@ private:
         std::uintptr_t address = 0;
         std::string encoding;
         std::string before;
+        int confidence = 0;
         unsigned observations = 1;
         bool operator==(const Candidate& other) const {
             return pid == other.pid && address == other.address && encoding == other.encoding;
@@ -318,7 +319,8 @@ private:
                     Candidate candidate{item.at("pid").get<int>(),
                                         item.at("address").get<std::uintptr_t>(),
                                         item.at("encoding").get<std::string>(),
-                                        item.at("before").get<std::string>()};
+                                        item.at("before").get<std::string>(),
+                                        item.value("confidence", 0)};
                     // A few printable bytes in heap metadata are not useful
                     // document context. Very short real documents safely
                     // fall back to the other context sources.
@@ -340,6 +342,7 @@ private:
                 const bool current_job = !pending_.has_value() && job.anchor == last_anchor_;
                 const bool changed = job.anchor != observed_anchor_;
                 observed_anchor_ = job.anchor;
+                int verified_score = -1;
                 for (auto& candidate : current) {
                     // The preedit *changed* between requests, but the same
                     // location and its preceding text did not. An arbitrary
@@ -347,13 +350,18 @@ private:
                     const auto previous = std::ranges::find(candidates_, candidate);
                     if (changed && previous != candidates_.end() &&
                         previous->before == candidate.before && !candidate.before.empty()) {
-                        // Three different natural composition states (two
-                        // transitions) are required to establish a location.
-                        candidate.observations = std::min(3u, previous->observations + 1);
+                        // Every further natural composition state at the same
+                        // location raises confidence; three (two transitions)
+                        // are required to establish it.
+                        candidate.observations = std::min(8u, previous->observations + 1);
                     }
                     if (candidate.observations >= 3) {
-                        verified = candidate;
-                        break;
+                        const int score = static_cast<int>(candidate.observations) * 64 +
+                                          candidate.confidence;
+                        if (score > verified_score) {
+                            verified_score = score;
+                            verified = candidate;
+                        }
                     }
                 }
                 if (current.empty()) {
@@ -387,9 +395,10 @@ private:
                     ++failures_;
                 }
                 if (verified && current_job) {
-                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx candidates=%zu",
+                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx observations=%u confidence=%d candidates=%zu",
                                      job.anchor.c_str(), verified->pid,
-                                     static_cast<unsigned long>(verified->address), candidates_.size());
+                                     static_cast<unsigned long>(verified->address),
+                                     verified->observations, verified->confidence, candidates_.size());
                     try {
                         hooks_.publish(utf16_tail(utf8_to_u16(verified->before), hooks_.max_code_units()), true);
                         published_usable_ = true;

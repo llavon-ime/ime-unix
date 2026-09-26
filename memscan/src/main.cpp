@@ -162,7 +162,9 @@ void serve() {
                 std::vector<Match> candidates;
                 // Enough context for the model: 1024 bytes is 85 terminal
                 // grid cells, or 1024/512/256 units in the byte encodings.
-                (void)llavon::memscan::scan_pid(pid, *anchor, 1024, 0, limits, hints,
+                // A small window after the match tells the scanner whether
+                // the hit continues as a longer word (not the caret).
+                (void)llavon::memscan::scan_pid(pid, *anchor, 1024, 16, limits, hints,
                                                 error, &candidates, &next_address[pid], &stats);
                 progress.push_back({{"pid", pid}, {"next_address", next_address[pid]},
                                     {"hits", stats.hits}, {"qualified", stats.qualified}});
@@ -175,6 +177,8 @@ void serve() {
                     const bool right_hint = right.pid == hint_pid && right.address == hint_address &&
                                             right.before == hint_before && !hint_before.empty();
                     if (left_hint != right_hint) return left_hint;
+                    if (left.confidence != right.confidence)
+                        return left.confidence > right.confidence;
                     return left.before.size() > right.before.size();
                 });
                 std::size_t selected = 0;
@@ -183,6 +187,7 @@ void serve() {
                     ++selected;
                     matches.push_back({{"pid", match.pid}, {"address", match.address},
                                        {"encoding", llavon::memscan::encoding_name(match.encoding)},
+                                       {"confidence", match.confidence},
                                        {"before", match.before}});
                 }
                 if (!error.code.empty()) error_code = error.code;

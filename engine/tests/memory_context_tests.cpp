@@ -56,6 +56,7 @@ public:
                << " elif mode == 'bad-error': reply = {'matches': [], 'error': 42}\n"
                << " elif mode == 'vanish' and request['anchor'] not in ('ㄋ', 'ㄋㄧ', '你'): reply = {'matches': [], 'error': 'not-found'}\n"
                << " elif mode == 'flaky' and request['anchor'] in ('ㄋㄧ', '你ㄏ'): reply = {'matches': [], 'error': 'not-found'}\n"
+               << " elif mode == 'two-sites': reply = {'matches': [{'pid': 4242, 'encoding': 'utf8', 'address': 4096, 'before': 'low confidence ', 'confidence': 10}, {'pid': 4242, 'encoding': 'utf8', 'address': 8192, 'before': 'high confidence ', 'confidence': 90}], 'error': ''}\n"
                << " else:\n"
                << "  address = 4096 if mode != 'moving' else 4096 + len(request['anchor'])\n"
                << "  before = 'document prefix ' if mode != 'changing' else 'document ' + request['anchor']\n"
@@ -274,6 +275,23 @@ bool test_sensitive_transition_forgets_context() {
     return ok;
 }
 
+bool test_higher_confidence_location_wins() {
+    FakeHelper helper("two-sites");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(wait_for([&] {
+                    const auto sample = provider.latest();
+                    return sample && sample->usable && sample->text == u"high confidence ";
+                }), "the candidate with the higher confidence is published");
+    provider.stop();
+    return ok;
+}
+
 bool test_observation_chain_survives_missed_states() {
     FakeHelper helper("flaky");
     ProbeState state;
@@ -482,6 +500,7 @@ int run_memory_context_tests() {
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();
     ok &= test_sensitive_transition_forgets_context();
+    ok &= test_higher_confidence_location_wins();
     ok &= test_observation_chain_survives_missed_states();
     ok &= test_transient_miss_keeps_confirmed_context();
     ok &= test_bad_helper_response_does_not_crash_worker();

@@ -267,18 +267,20 @@ constexpr std::size_t kCellBytes = 12;
 // A terminal grid stores each character in a 12-byte cell. A wide character
 // duplicates its code point in the next cell, so the walk advances two cells
 // whenever the following cell repeats the current code point. This verifies
-// the characters after the first one, whose cell supplied the byte pattern.
-bool verify_cell12(pid_t pid, std::uintptr_t address, const std::vector<char32_t>& codepoints) {
-    if (codepoints.empty()) return false;
+// the characters after the first one, whose cell supplied the byte pattern,
+// and returns how many cells the whole composition occupies.
+std::optional<std::size_t> verify_cell12(pid_t pid, std::uintptr_t address,
+                                         const std::vector<char32_t>& codepoints) {
+    if (codepoints.empty()) return std::nullopt;
     const std::size_t needed = (codepoints.size() * 2 + 1) * kCellBytes;
     const auto bytes = read_memory(pid, address, needed);
     std::size_t offset = 0;
     for (const char32_t codepoint : codepoints) {
-        if (offset + 4 > bytes.size()) return false;
+        if (offset + 4 > bytes.size()) return std::nullopt;
         const auto* raw = reinterpret_cast<const unsigned char*>(bytes.data() + offset);
         const char32_t value = static_cast<char32_t>(raw[0] | (raw[1] << 8) | (raw[2] << 16) |
                                                      (static_cast<char32_t>(raw[3]) << 24));
-        if (value != codepoint) return false;
+        if (value != codepoint) return std::nullopt;
         bool wide = false;
         if (offset + kCellBytes + 4 <= bytes.size()) {
             const auto* next =
@@ -289,7 +291,7 @@ bool verify_cell12(pid_t pid, std::uintptr_t address, const std::vector<char32_t
         }
         offset += wide ? 2 * kCellBytes : kCellBytes;
     }
-    return true;
+    return offset / kCellBytes;
 }
 
 // Decodes a window and trims the heap metadata a partially readable area can
@@ -354,6 +356,25 @@ std::string decode_after_window(std::vector<std::byte> raw, Encoding encoding) {
     std::string decoded = decode(raw, encoding);
     if (const auto nul = decoded.find('\0'); nul != std::string::npos) decoded.resize(nul);
     return decoded;
+}
+
+// The composition sits at the caret, so what follows it is a boundary (a
+// blank cell, space, punctuation) or the text after the caret. A match whose
+// next code point continues the same word is a prefix of a longer string
+// elsewhere in the process (a path, a message, a URL), never the caret.
+bool continues_word(const std::string& text) {
+    std::vector<char32_t> codepoints;
+    if (!decode_text(text, codepoints) || codepoints.empty()) return false;
+    const char32_t next = codepoints.front();
+    if ((next >= U'0' && next <= U'9') || (next >= U'A' && next <= U'Z') ||
+        (next >= U'a' && next <= U'z') || next == U'_') {
+        return true;
+    }
+    if (next >= 0x3040 && next <= 0x30FF) return true;  // kana
+    if (next >= 0x3100 && next <= 0x312F) return true;  // bopomofo
+    if (next >= 0x3400 && next <= 0x9FFF) return true;  // CJK
+    if (next >= 0xF900 && next <= 0xFAFF) return true;  // CJK compatibility
+    return false;
 }
 
 }  // namespace
@@ -460,8 +481,14 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 // in unrelated GUI processes) must not consume candidate
                 // slots or be treated as document text.
                 if (address % unit != 0) continue;
-                if (encoding == Encoding::Utf32Cell12Le &&
-                    !verify_cell12(pid, address, anchor.codepoints)) continue;
+                // The cell pattern covers only the first character, so the
+                // verified walk determines where the composition ends.
+                std::size_t match_bytes = pattern.size();
+                if (encoding == Encoding::Utf32Cell12Le) {
+                    const auto cells = verify_cell12(pid, address, anchor.codepoints);
+                    if (!cells) continue;
+                    match_bytes = *cells * kCellBytes;
+                }
                 if (stats != nullptr) ++stats->hits;
 
                 // Cell grids are read as whole 12-byte cells so the decoder
@@ -473,13 +500,13 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 const std::uintptr_t left_edge = std::max<std::uintptr_t>(
                     region.start, address >= before_window ? address - before_window : 0);
                 const std::uintptr_t right_edge = std::min<std::uintptr_t>(
-                    region.end, address + pattern.size() + after_window);
+                    region.end, address + match_bytes + after_window);
                 auto before_raw = address > left_edge
                                       ? read_memory(pid, left_edge, address - left_edge)
                                       : std::vector<std::byte>{};
-                auto after_raw = right_edge > address + pattern.size()
-                                     ? read_memory(pid, address + pattern.size(),
-                                                   right_edge - address - pattern.size())
+                auto after_raw = right_edge > address + match_bytes
+                                     ? read_memory(pid, address + match_bytes,
+                                                   right_edge - address - match_bytes)
                                      : std::vector<std::byte>{};
                 // Keep the windows aligned to the encoding unit so the decoder
                 // starts at a code unit boundary.
@@ -509,14 +536,22 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 match.before = decode_window(std::move(before_raw), encoding);
                 match.after = decode_after_window(std::move(after_raw), encoding);
                 const int score = trailing_text_run(match.before);
-                if (stats != nullptr && score >= kGoodTextRun) ++stats->qualified;
+                const bool word_continuation = continues_word(match.after);
+                // Screen grids show the composition itself, so they are the
+                // strongest lead; plain string copies can be paths, messages
+                // or protocol buffers.
+                match.confidence = std::min(score, 32) +
+                                   (encoding == Encoding::Utf32Cell12Le ? 32 : 0);
+                if (stats != nullptr && score >= kGoodTextRun && !word_continuation) {
+                    ++stats->qualified;
+                }
                 if (candidates != nullptr) {
                     // The provider must verify a location across two distinct
                     // natural preedit states; never turn a single nice-looking
                     // copy into a trusted result. Bound memory and scan time.
                     // Weak matches cannot become useful candidates and must
                     // not fill the list before the document buffer is read.
-                    if (score < kGoodTextRun) continue;
+                    if (score < kGoodTextRun || word_continuation) continue;
                     if (candidate_region == 0 && region_index >= hints.size())
                         candidate_region = region.start;
                     if (candidates->size() < 32) {
