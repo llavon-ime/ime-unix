@@ -371,7 +371,7 @@ private:
                 } else if (current_job) {
                     const auto progress = result && result->contains("progress")
                                               ? (*result)["progress"].dump() : std::string{};
-                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified raw=%zu accepted=%zu error=%s progress=%s",
+                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified matches=%zu accepted=%zu error=%s progress=%s",
                                      job.anchor.c_str(), matches.size(), candidates_.size(),
                                      error_code.c_str(), progress.c_str());
                     hooks_.publish({}, false);

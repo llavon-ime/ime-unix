@@ -216,6 +216,23 @@ int main() {
     }
 
     {
+        const std::string bare = std::string("\x01\x02", 2) + kAnchor;
+        const Holder holder = spawn_holder(bare, false);
+        ScanError error;
+        ScanStats stats;
+        ScanLimits bounded = limits;
+        bounded.max_bytes_per_pid = bare.size();
+        std::vector<Match> candidates;
+        const std::vector<Hint> hint{{holder.pid, holder.address,
+                                      holder.address + bare.size()}};
+        (void)scan_pid(holder.pid, *anchor, 64, 0, bounded, hint, error,
+                       &candidates, nullptr, &stats);
+        check(stats.hits > 0 && stats.qualified == 0 && candidates.empty(),
+              "a byte hit without a readable prefix is reported but not accepted");
+        stop_holder(holder.pid);
+    }
+
+    {
         const Holder holder = spawn_misaligned_utf16_holder(kAnchor);
         check(holder.address % 2 == 1, "test UTF-16 bytes really start at an odd address");
         ScanError error;

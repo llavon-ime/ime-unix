@@ -158,10 +158,12 @@ void serve() {
                 if (remaining.count() <= 0 || matches.size() >= 16) break;
                 limits.timeout = std::min(remaining, std::chrono::milliseconds(600));
                 ScanError error;
+                llavon::memscan::ScanStats stats;
                 std::vector<Match> candidates;
                 (void)llavon::memscan::scan_pid(pid, *anchor, 256, 0, limits, hints,
-                                                error, &candidates, &next_address[pid]);
-                progress.push_back({{"pid", pid}, {"next_address", next_address[pid]}});
+                                                error, &candidates, &next_address[pid], &stats);
+                progress.push_back({{"pid", pid}, {"next_address", next_address[pid]},
+                                    {"hits", stats.hits}, {"qualified", stats.qualified}});
                 // One process may hold many display/protocol copies. Keep a
                 // bounded share from each named PID so another client process
                 // with the real document buffer can still be considered.

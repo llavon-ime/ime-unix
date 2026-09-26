@@ -54,6 +54,11 @@ struct ScanError {
     std::string detail;
 };
 
+struct ScanStats {
+    std::size_t hits = 0;       // Aligned byte-pattern matches, before prefix filtering.
+    std::size_t qualified = 0;  // Matches with a readable prefix; may exceed the returned cap.
+};
+
 // True when /proc/<pid> is owned by the calling user.
 bool same_uid(pid_t pid);
 
@@ -72,6 +77,7 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                               std::size_t after_bytes, const ScanLimits& limits,
                               const std::vector<Hint>& hints, ScanError& error,
                               std::vector<Match>* candidates = nullptr,
-                              std::uintptr_t* next_address = nullptr);
+                              std::uintptr_t* next_address = nullptr,
+                              ScanStats* stats = nullptr);
 
 }  // namespace llavon::memscan

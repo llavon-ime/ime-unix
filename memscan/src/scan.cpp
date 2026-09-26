@@ -322,7 +322,8 @@ bool same_uid(pid_t pid) {
 std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t before_bytes,
                               std::size_t after_bytes, const ScanLimits& limits,
                               const std::vector<Hint>& hints, ScanError& error,
-                              std::vector<Match>* candidates, std::uintptr_t* next_address) {
+                              std::vector<Match>* candidates, std::uintptr_t* next_address,
+                              ScanStats* stats) {
     if (!same_uid(pid)) {
         error = {"foreign-pid", "process " + std::to_string(pid) + " is not owned by this user"};
         return std::nullopt;
@@ -412,6 +413,7 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 // in unrelated GUI processes) must not consume candidate
                 // slots or be treated as document text.
                 if (address % unit != 0) continue;
+                if (stats != nullptr) ++stats->hits;
 
                 const std::uintptr_t left_edge = std::max<std::uintptr_t>(region.start,
                                                                           address >= before_bytes
@@ -454,6 +456,7 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 match.before = decode_window(std::move(before_raw), encoding);
                 match.after = decode_after_window(std::move(after_raw), encoding);
                 const int score = trailing_text_run(match.before);
+                if (stats != nullptr && score >= kGoodTextRun) ++stats->qualified;
                 if (candidates != nullptr) {
                     // The provider must verify a location across two distinct
                     // natural preedit states; never turn a single nice-looking
