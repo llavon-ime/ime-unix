@@ -40,12 +40,13 @@ public:
         log_ = path_.string() + ".log";
         std::ofstream script(path_);
         script << "#!/usr/bin/env python3\n"
-               << "import json, sys\n"
+               << "import json, sys, time\n"
                << "with open(" << nlohmann_quote(log_) << ", 'a') as log: log.write('start\\n')\n"
                << "for line in sys.stdin:\n"
                << " request = json.loads(line)\n"
                << " with open(" << nlohmann_quote(log_) << ", 'a') as log: log.write(request['anchor'] + '\\n')\n"
                << " mode = " << nlohmann_quote(mode) << "\n"
+               << " if mode == 'slow': time.sleep(0.15)\n"
                << " if mode == 'denied': reply = {'matches': [], 'error': 'denied'}\n"
                << " elif mode == 'miss': reply = {'matches': [], 'error': 'not-found'}\n"
                << " elif mode == 'bad-error': reply = {'matches': [], 'error': 42}\n"
@@ -153,6 +154,29 @@ bool test_wrong_location_never_publishes() {
         ok &= check(!provider.latest()->usable, "moving or unrelated copies are rejected");
         provider.stop();
     }
+    return ok;
+}
+
+bool test_superseded_probe_never_publishes() {
+    FakeHelper helper("slow");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "slow provider starts");
+    provider.set_active(true);
+    state.set("ㄋ");
+    provider.refresh();
+    ok &= check(wait_for([&] { return provider.probe_count() >= 1; }),
+                "first slow probe begins");
+    state.set("ㄋㄧ");
+    provider.refresh();
+    state.set("你");
+    provider.refresh();
+    ok &= check(wait_for([&] { return provider.probe_count() >= 2; }),
+                "newest preedit is probed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    ok &= check(provider.latest() && !provider.latest()->usable,
+                "superseded result cannot publish a verified context");
+    provider.stop();
     return ok;
 }
 
@@ -267,6 +291,7 @@ int run_memory_context_tests() {
     bool ok = true;
     ok &= test_natural_changes_confirm_and_reuse_helper();
     ok &= test_wrong_location_never_publishes();
+    ok &= test_superseded_probe_never_publishes();
     ok &= test_focus_discards_cache();
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();

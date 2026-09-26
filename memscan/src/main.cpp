@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -106,6 +108,9 @@ void print_match(const Match& match) {
 // A private, newline-delimited protocol for the IME-owned child. The normal
 // one-shot CLI above stays compatible with existing callers.
 void serve() {
+    std::unordered_map<int, std::uintptr_t> next_address;
+    std::uint64_t epoch = 0;
+    std::size_t next_pid_index = 0;
     std::string line;
     while (std::getline(std::cin, line)) {
         nlohmann::json response;
@@ -118,6 +123,16 @@ void serve() {
             if (!anchor) throw std::runtime_error(anchor_error.detail);
             const auto pids = request.at("pids").get<std::vector<int>>();
             if (pids.empty() || pids.size() > 16) throw std::runtime_error("invalid pids");
+            const auto request_epoch = request.value("epoch", std::uint64_t{0});
+            if (request_epoch != epoch) {
+                next_address.clear();
+                next_pid_index = 0;
+                epoch = request_epoch;
+            }
+            for (auto it = next_address.begin(); it != next_address.end();) {
+                if (std::ranges::find(pids, it->first) == pids.end()) it = next_address.erase(it);
+                else ++it;
+            }
             const int hint_pid = request.value("hint_pid", 0);
             const auto hint_address = request.value("hint_address", std::uintptr_t{0});
             const auto hint_before = request.value("hint_before", std::string{});
@@ -129,19 +144,24 @@ void serve() {
                                  hint_address, hint_before});
             }
             ScanLimits limits;
-            limits.max_bytes_per_pid = 128ull * 1024 * 1024;
+            limits.max_bytes_per_pid = 512ull * 1024 * 1024;
             nlohmann::json matches = nlohmann::json::array();
+            nlohmann::json progress = nlohmann::json::array();
             std::string error_code = "not-found";
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
-            for (const int pid : pids) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+            const auto start_pid = next_pid_index % pids.size();
+            next_pid_index = (start_pid + 1) % pids.size();
+            for (std::size_t index = 0; index < pids.size(); ++index) {
+                const int pid = pids[(start_pid + index) % pids.size()];
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now());
                 if (remaining.count() <= 0 || matches.size() >= 16) break;
-                limits.timeout = std::min(remaining, std::chrono::milliseconds(120));
+                limits.timeout = std::min(remaining, std::chrono::milliseconds(600));
                 ScanError error;
                 std::vector<Match> candidates;
                 (void)llavon::memscan::scan_pid(pid, *anchor, 256, 0, limits, hints,
-                                                error, &candidates);
+                                                error, &candidates, &next_address[pid]);
+                progress.push_back({{"pid", pid}, {"next_address", next_address[pid]}});
                 // One process may hold many display/protocol copies. Keep a
                 // bounded share from each named PID so another client process
                 // with the real document buffer can still be considered.
@@ -164,7 +184,8 @@ void serve() {
                 if (!error.code.empty()) error_code = error.code;
             }
             if (!matches.empty()) error_code.clear();
-            response = {{"matches", std::move(matches)}, {"error", error_code}};
+            response = {{"matches", std::move(matches)}, {"error", error_code},
+                        {"progress", std::move(progress)}};
         } catch (const std::exception& exception) {
             response = {{"matches", nlohmann::json::array()}, {"error", "invalid-request"}};
         }

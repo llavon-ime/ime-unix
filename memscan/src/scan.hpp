@@ -71,6 +71,7 @@ struct Region {
 std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t before_bytes,
                               std::size_t after_bytes, const ScanLimits& limits,
                               const std::vector<Hint>& hints, ScanError& error,
-                              std::vector<Match>* candidates = nullptr);
+                              std::vector<Match>* candidates = nullptr,
+                              std::uintptr_t* next_address = nullptr);
 
 }  // namespace llavon::memscan

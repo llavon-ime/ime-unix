@@ -60,7 +60,7 @@ public:
             offset += static_cast<std::size_t>(count);
         }
         std::string output;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1750);
         while (output.size() < 65536 && std::chrono::steady_clock::now() < deadline) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now());
@@ -195,6 +195,7 @@ public:
         pending_.reset();
         candidates_.clear();
         last_anchor_.clear();
+        observed_anchor_.clear();
         failures_ = 0;
         hint_pid_ = 0;
         hint_address_ = 0;
@@ -282,6 +283,7 @@ private:
             ++probes_;
 #if defined(__linux__)
             const auto result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
+                                                {"epoch", job.revision},
                                                 {"hint_pid", hint_pid},
                                                 {"hint_address", hint_address},
                                                 {"hint_before", hint_before}});
@@ -312,15 +314,20 @@ private:
             {
                 std::lock_guard lock(mutex_);
                 if (stopping_ || job.revision != revision_ ||
-                    job.generation != hooks_.generation() || !hooks_.active() ||
-                    pending_.has_value()) continue;
+                    job.generation != hooks_.generation() || !hooks_.active()) continue;
+                // Typing may outrun a cold scan. Keep its candidate evidence
+                // for the next natural state, but never publish a result for
+                // an already superseded preedit.
+                const bool current_job = !pending_.has_value() && job.anchor == last_anchor_;
+                const bool changed = job.anchor != observed_anchor_;
+                observed_anchor_ = job.anchor;
                 for (auto& candidate : current) {
                     // The preedit *changed* between requests, but the same
                     // location and its preceding text did not. An arbitrary
                     // copy of a common word is never enough to publish.
                     const auto previous = std::ranges::find(candidates_, candidate);
-                    if (previous != candidates_.end() && previous->before == candidate.before &&
-                        !candidate.before.empty()) {
+                    if (changed && previous != candidates_.end() &&
+                        previous->before == candidate.before && !candidate.before.empty()) {
                         // Three different natural composition states (two
                         // transitions) are required to establish a location.
                         candidate.observations = std::min(3u, previous->observations + 1);
@@ -331,7 +338,7 @@ private:
                     }
                 }
                 candidates_ = std::move(current);
-                if (verified) {
+                if (verified && current_job) {
                     hint_pid_ = verified->pid;
                     hint_address_ = verified->address;
                     hint_before_ = verified->before;
@@ -345,13 +352,13 @@ private:
                     hint_address_ = 0;
                     hint_before_.clear();
                     failures_ = 0;
-                } else {
+                } else if (current_job) {
                     hint_pid_ = 0;
                     hint_address_ = 0;
                     hint_before_.clear();
                     ++failures_;
                 }
-                if (verified) {
+                if (verified && current_job) {
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx candidates=%zu",
                                      job.anchor.c_str(), verified->pid,
                                      static_cast<unsigned long>(verified->address), candidates_.size());
@@ -361,10 +368,12 @@ private:
                     } catch (const std::exception&) {
                         hooks_.publish({}, false);
                     }
-                } else {
-                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified raw=%zu accepted=%zu error=%s",
+                } else if (current_job) {
+                    const auto progress = result && result->contains("progress")
+                                              ? (*result)["progress"].dump() : std::string{};
+                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified raw=%zu accepted=%zu error=%s progress=%s",
                                      job.anchor.c_str(), matches.size(), candidates_.size(),
-                                     error_code.c_str());
+                                     error_code.c_str(), progress.c_str());
                     hooks_.publish({}, false);
                     if (!result)
                         hooks_.availability(AccessibilityAvailability::Unavailable, "helper-failed");
@@ -386,6 +395,7 @@ private:
     std::optional<Job> pending_;
     std::vector<Candidate> candidates_;
     std::string last_anchor_;
+    std::string observed_anchor_;
     std::thread worker_;
     std::atomic<bool> running_{false};
     std::atomic<std::size_t> probes_{0};

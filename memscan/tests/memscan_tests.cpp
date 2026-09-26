@@ -102,6 +102,27 @@ Holder spawn_misaligned_utf16_holder(std::string_view text) {
     return {pid, address};
 }
 
+Holder spawn_large_holder(std::string_view text) {
+    int ready[2];
+    if (::pipe(ready) != 0) return {};
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(ready[0]);
+        constexpr std::size_t kOffset = 20 * 1024 * 1024;
+        [[maybe_unused]] auto* buffer = new std::string(24 * 1024 * 1024, 'x');
+        buffer->replace(kOffset, text.size(), text);
+        const auto address = reinterpret_cast<std::uintptr_t>(buffer->data() + kOffset);
+        (void)::write(ready[1], &address, sizeof(address));
+        ::pause();
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    std::uintptr_t address = 0;
+    [[maybe_unused]] const auto got = ::read(ready[0], &address, sizeof(address));
+    ::close(ready[0]);
+    return {pid, address};
+}
+
 void stop_holder(pid_t pid) {
     ::kill(pid, SIGKILL);
     int status = 0;
@@ -204,6 +225,25 @@ int main() {
         check(std::ranges::none_of(candidates, [&](const Match& item) {
                   return item.encoding == Encoding::Utf16Le && item.address == holder.address;
               }), "unaligned UTF-16 byte coincidences are rejected");
+        stop_holder(holder.pid);
+    }
+
+    {
+        const Holder holder = spawn_large_holder(std::string("document prefix ") + kAnchor);
+        ScanLimits incremental = limits;
+        incremental.max_bytes_per_pid = 4 * 1024 * 1024;
+        std::uintptr_t cursor = 0;
+        bool found = false, advanced = false;
+        for (int attempt = 0; attempt < 16 && !found; ++attempt) {
+            ScanError error;
+            std::vector<Match> candidates;
+            (void)scan_pid(holder.pid, *anchor, 64, 0, incremental, {}, error, &candidates, &cursor);
+            advanced |= cursor != 0;
+            found = std::ranges::any_of(candidates, [&](const Match& match) {
+                return match.address == holder.address + std::string("document prefix ").size();
+            });
+        }
+        check(advanced && found, "bounded scans resume instead of rereading the first region");
         stop_holder(holder.pid);
     }
 

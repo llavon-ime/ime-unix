@@ -52,7 +52,7 @@ std::optional<std::uintptr_t> parse_hex(std::string_view text) {
     return value;
 }
 
-std::vector<Region> read_regions(pid_t pid) {
+std::vector<Region> read_regions(pid_t pid, std::uintptr_t resume_address = 0) {
     std::vector<Region> regions;
     std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
     std::string line;
@@ -91,6 +91,20 @@ std::vector<Region> read_regions(pid_t pid) {
         if (left.writable != right.writable) return left.writable;
         return left.start > right.start;
     });
+    if (resume_address != 0) {
+        const auto found = std::ranges::find_if(regions, [=](const Region& region) {
+            return region.start <= resume_address && resume_address < region.end;
+        });
+        if (found != regions.end()) {
+            // Resume after the previous bounded scan, then wrap once through
+            // the remaining mappings. Keep the skipped prefix for last so a
+            // long-lived process is eventually scanned in its entirety.
+            const Region prefix{found->start, resume_address, found->writable};
+            std::rotate(regions.begin(), found, regions.end());
+            regions.front().start = resume_address;
+            if (prefix.end > prefix.start) regions.push_back(prefix);
+        }
+    }
     return regions;
 }
 
@@ -308,7 +322,7 @@ bool same_uid(pid_t pid) {
 std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t before_bytes,
                               std::size_t after_bytes, const ScanLimits& limits,
                               const std::vector<Hint>& hints, ScanError& error,
-                              std::vector<Match>* candidates) {
+                              std::vector<Match>* candidates, std::uintptr_t* next_address) {
     if (!same_uid(pid)) {
         error = {"foreign-pid", "process " + std::to_string(pid) + " is not owned by this user"};
         return std::nullopt;
@@ -330,26 +344,38 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
     }
     // Do not even parse /proc/<pid>/maps on the common validated-hint path.
     // Mappings are discovered only after the small hinted window missed.
-    if (regions.empty()) regions = read_regions(pid);
-    bool full_scan_added = hints.empty();
+    const bool has_pid_hint = !regions.empty();
+    if (!has_pid_hint) regions = read_regions(pid, next_address ? *next_address : 0);
+    bool full_scan_added = !has_pid_hint;
 
     std::optional<Match> best;
     int best_score = -1;
+    std::uintptr_t candidate_region = 0;
 
     for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
         const auto& region = regions[region_index];
+        const auto resume_at = [&](std::uintptr_t address) {
+            if (next_address == nullptr) return;
+            if (address < region.end) *next_address = address;
+            else if (region_index + 1 < regions.size()) *next_address = regions[region_index + 1].start;
+            else *next_address = 0;
+        };
         std::vector<std::byte> tail;
         std::uintptr_t position = region.start;
         while (position < region.end) {
             if (deadline.expired()) {
+                resume_at(position);
+                if (next_address != nullptr && candidate_region != 0) *next_address = candidate_region;
                 error = {"timeout", "scan budget exhausted"};
                 return std::nullopt;
             }
             if (scanned >= limits.max_bytes_per_pid) {
+                resume_at(position);
                 truncated = true;
                 break;
             }
-            const std::size_t request = std::min(kChunkBytes, region.end - position);
+            const std::size_t request = std::min({kChunkBytes, static_cast<std::size_t>(region.end - position),
+                                                  limits.max_bytes_per_pid - scanned});
             int read_error = 0;
             auto chunk = read_memory(pid, position, request, &read_error);
             if (chunk.empty()) {
@@ -435,6 +461,8 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                     // Weak matches cannot become useful candidates and must
                     // not fill the list before the document buffer is read.
                     if (score < kGoodTextRun) continue;
+                    if (candidate_region == 0 && region_index >= hints.size())
+                        candidate_region = region.start;
                     if (candidates->size() < 16) {
                         candidates->push_back(match);
                     } else if (region_index < hints.size() &&
@@ -445,7 +473,12 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                         // before the validated address; reserve a slot for it.
                         candidates->back() = match;
                     }
-                    if (candidates->size() == 16 && region_index >= hints.size()) return std::nullopt;
+                    if (candidates->size() == 16 && region_index >= hints.size()) {
+                        resume_at(position + request);
+                        if (next_address != nullptr && candidate_region != 0)
+                            *next_address = candidate_region;
+                        return std::nullopt;
+                    }
                 } else if (score >= kGoodTextRun) {
                     return match;
                 }
@@ -479,10 +512,15 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
         if (candidates != nullptr && region_index + 1 == hints.size()) candidates->clear();
         if (region_index + 1 == regions.size() && !full_scan_added) {
             full_scan_added = true;
-            const auto heuristic = read_regions(pid);
+            const auto heuristic = read_regions(pid, next_address ? *next_address : 0);
             regions.insert(regions.end(), heuristic.begin(), heuristic.end());
         }
     }
+    // A candidate is useful only if the next natural preedit state can be
+    // checked at the same location. Revisit this map rather than advancing
+    // past it; still fall back to the cursor when no candidate was seen.
+    if (next_address != nullptr && candidate_region != 0) *next_address = candidate_region;
+    else if (!truncated && next_address != nullptr) *next_address = 0;
     if (best) return best;
     if (denied) {
         error = {"denied", "process memory read denied; grant CAP_SYS_PTRACE to the helper "
