@@ -1,6 +1,7 @@
 #include "anchor.hpp"
 #include "scan.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -65,6 +66,32 @@ Holder spawn_holder(const std::string& text, bool utf16) {
             address = reinterpret_cast<std::uintptr_t>(buffer->data());
         }
         [[maybe_unused]] const auto written = ::write(ready[1], &address, sizeof(address));
+        ::pause();
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    std::uintptr_t address = 0;
+    [[maybe_unused]] const auto got = ::read(ready[0], &address, sizeof(address));
+    ::close(ready[0]);
+    return {pid, address};
+}
+
+Holder spawn_misaligned_utf16_holder(std::string_view text) {
+    int ready[2];
+    if (::pipe(ready) != 0) return {};
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(ready[0]);
+        std::string buffer;
+        buffer.reserve(256);
+        const std::size_t padding = reinterpret_cast<std::uintptr_t>(buffer.data()) % 2 == 0 ? 1 : 2;
+        buffer.append(padding, 'x');
+        for (const char16_t unit : to_utf16(text)) {
+            buffer.push_back(static_cast<char>(unit & 0xff));
+            buffer.push_back(static_cast<char>(unit >> 8));
+        }
+        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data() + padding);
+        (void)::write(ready[1], &address, sizeof(address));
         ::pause();
         ::_exit(0);
     }
@@ -168,6 +195,19 @@ int main() {
     }
 
     {
+        const Holder holder = spawn_misaligned_utf16_holder(kAnchor);
+        check(holder.address % 2 == 1, "test UTF-16 bytes really start at an odd address");
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address - 16, holder.address + 64}};
+        (void)scan_pid(holder.pid, *anchor, 64, 0, limits, hints, error, &candidates);
+        check(std::ranges::none_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::Utf16Le && item.address == holder.address;
+              }), "unaligned UTF-16 byte coincidences are rejected");
+        stop_holder(holder.pid);
+    }
+
+    {
         const ChangingHolder changing = spawn_changing_holder();
         check(changing.holder.address != 0, "mutable client string has a stable address");
         std::uintptr_t previous = 0;
@@ -211,9 +251,32 @@ int main() {
         bool has_readable = false, has_other = false;
         for (const auto& candidate : candidates) {
             has_readable |= candidate.before.ends_with("readable run before the anchor ");
-            has_other |= candidate.address != (match ? match->address : 0);
+            has_other |= candidate.address == holder.address + repeated.find(kAnchor);
         }
-        check(has_readable && has_other, "candidate scan retains competing copies for temporal verification");
+        check(has_readable && !has_other, "binary-adjacent matches do not exhaust candidate slots");
+        stop_holder(holder.pid);
+    }
+
+    {
+        const std::string competing = std::string("display copy before ") + kAnchor +
+                                      std::string("\x01\x02", 2) +
+                                      "readable run before the anchor " + kAnchor;
+        const Holder holder = spawn_holder(competing, false);
+        std::vector<Match> candidates;
+        ScanError error;
+        // A cached range can contain a stale/formatting copy while the real
+        // document copy lives elsewhere. A nearby hit is not sufficient to
+        // skip the full scan unless both address and prefix still match.
+        const auto first_offset = competing.find(kAnchor);
+        const auto second_offset = competing.find(kAnchor, first_offset + 1);
+        const Hint misleading{holder.pid, holder.address,
+                              holder.address + first_offset + std::string(kAnchor).size(),
+                              holder.address + first_offset, "unrelated prefix"};
+        (void)scan_pid(holder.pid, *anchor, 64, 0, limits, {misleading}, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == holder.address + second_offset &&
+                         item.before.ends_with("readable run before the anchor ");
+              }), "a misleading hinted copy falls back to the document copy");
         stop_holder(holder.pid);
     }
 

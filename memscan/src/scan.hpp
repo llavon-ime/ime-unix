@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <sys/types.h>
+#include <utility>
 #include <vector>
 
 namespace llavon::memscan {
@@ -15,9 +16,19 @@ namespace llavon::memscan {
 // A previously successful region for a PID; tried before the full scan so a
 // repeat probe is fast.
 struct Hint {
+    Hint() = default;
+    Hint(pid_t process, std::uintptr_t begin, std::uintptr_t finish,
+         std::uintptr_t expected_address = 0, std::string expected_before = {})
+        : pid(process), start(begin), end(finish), match_address(expected_address),
+          before(std::move(expected_before)) {}
+
     pid_t pid = -1;
     std::uintptr_t start = 0;
     std::uintptr_t end = 0;
+    // A nearby copy is not enough: only an exact, previously verified match
+    // with the same prefix may bypass a full scan.
+    std::uintptr_t match_address = 0;
+    std::string before;
 };
 
 struct ScanLimits {

@@ -110,6 +110,7 @@ private:
     void apply_effect(ContextId context, InputSession& session, const InputEffect& effect);
 
     void request_prediction(ContextId context, InputSession& session);
+    bool should_probe_memory(ContextId context, const InputSession& session) const;
     void open_prediction_session(ContextId context, std::uint64_t generation);
     void send_prediction(ContextId context, InputSession& session, std::uint64_t generation);
     void handle_prediction_response(ContextId context, std::uint64_t generation, protocol::Message response);

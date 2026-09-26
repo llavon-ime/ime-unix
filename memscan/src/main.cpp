@@ -120,30 +120,50 @@ void serve() {
             if (pids.empty() || pids.size() > 16) throw std::runtime_error("invalid pids");
             const int hint_pid = request.value("hint_pid", 0);
             const auto hint_address = request.value("hint_address", std::uintptr_t{0});
+            const auto hint_before = request.value("hint_before", std::string{});
             std::vector<Hint> hints;
             if (hint_pid > 1 && hint_address > 0 &&
                 hint_address < std::numeric_limits<std::uintptr_t>::max() - 32768) {
                 const auto start = hint_address > 32768 ? hint_address - 32768 : 0;
-                hints.push_back({hint_pid, start, hint_address + 32768});
+                hints.push_back({hint_pid, start, hint_address + 32768,
+                                 hint_address, hint_before});
             }
             ScanLimits limits;
-            limits.timeout = std::chrono::milliseconds(250);
             limits.max_bytes_per_pid = 128ull * 1024 * 1024;
             nlohmann::json matches = nlohmann::json::array();
             std::string error_code = "not-found";
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
             for (const int pid : pids) {
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+                if (remaining.count() <= 0 || matches.size() >= 16) break;
+                limits.timeout = std::min(remaining, std::chrono::milliseconds(120));
                 ScanError error;
                 std::vector<Match> candidates;
                 (void)llavon::memscan::scan_pid(pid, *anchor, 256, 0, limits, hints,
                                                 error, &candidates);
+                // One process may hold many display/protocol copies. Keep a
+                // bounded share from each named PID so another client process
+                // with the real document buffer can still be considered.
+                std::ranges::stable_sort(candidates, [&](const Match& left, const Match& right) {
+                    const bool left_hint = left.pid == hint_pid && left.address == hint_address &&
+                                           left.before == hint_before && !hint_before.empty();
+                    const bool right_hint = right.pid == hint_pid && right.address == hint_address &&
+                                            right.before == hint_before && !hint_before.empty();
+                    if (left_hint != right_hint) return left_hint;
+                    return left.before.size() > right.before.size();
+                });
+                std::size_t selected = 0;
                 for (const auto& match : candidates) {
+                    if (selected == 4 || matches.size() >= 16) break;
+                    ++selected;
                     matches.push_back({{"pid", match.pid}, {"address", match.address},
                                        {"encoding", llavon::memscan::encoding_name(match.encoding)},
                                        {"before", match.before}});
                 }
-                if (!candidates.empty()) break;
                 if (!error.code.empty()) error_code = error.code;
             }
+            if (!matches.empty()) error_code.clear();
             response = {{"matches", std::move(matches)}, {"error", error_code}};
         } catch (const std::exception& exception) {
             response = {{"matches", nlohmann::json::array()}, {"error", "invalid-request"}};

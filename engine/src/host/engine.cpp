@@ -67,6 +67,9 @@ Engine::Engine(EngineOptions options, Host& host)
         } else if (next == InputStateKind::Empty) {
             accessibility_composition_base_ = 0;
             memory_composition_base_ = 0;
+            // A completed/cancelled preedit no longer identifies the same
+            // client memory. In-flight scans must not publish it afterwards.
+            if (memory_context_) memory_context_->invalidate();
         }
     });
     apply_context_sources();
@@ -116,9 +119,7 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
         // from the text the memory probe would locate; a paste or undo may
         // also have changed the context, so probe again.
         if (memory_context_) memory_context_->invalidate();
-        if (memory_context_ && session.context_source != ContextSource::Client &&
-            session.context_source != ContextSource::Accessibility &&
-            !client_reports_text(host_, context)) {
+        if (should_probe_memory(context, session)) {
             memory_context_->refresh();
         }
     }
@@ -222,7 +223,11 @@ void Engine::reload_phrase_overrides() {
 
 void Engine::clear_context_text(ContextId context) {
     auto* session = find(context);
-    if (session != nullptr) session->context_text.clear();
+    if (session != nullptr) {
+        session->context_text.clear();
+        session->context_source = ContextSource::None;
+    }
+    if (memory_probe_context_ == context && memory_context_) memory_context_->invalidate();
 }
 
 AccessibilityContextState Engine::accessibility_state() const {
@@ -285,6 +290,13 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         }
     }
     if (effect.redraw) host_.update_ui(context);
+    // Incomplete Bopomofo readings redraw without requesting a prediction.
+    // Those intermediate states are precisely what lets the memory probe
+    // validate the same location across natural preedit changes.
+    if (effect.redraw && !InputProcessor::composition_empty(session) &&
+        should_probe_memory(context, session)) {
+        memory_context_->refresh();
+    }
     // Memory probing observes the client's natural preedit; publish the new
     // preedit before the prediction path schedules its memory scan.
     if (effect.request_prediction) request_prediction(context, session);
@@ -325,13 +337,25 @@ void Engine::withdraw_recent_commit(ContextId context) {
     else transport_.discard_commit(pending.event_id);
 }
 
+bool Engine::should_probe_memory(ContextId context, const InputSession& session) const {
+    if (!memory_context_ || client_reports_text(host_, context)) return false;
+    if (accessibility_context_) {
+        const auto sample = accessibility_context_->latest();
+        if (sample) {
+            const auto context_text = adopt_context_sample(session, *sample,
+                                                           accessibility_base_sequence_,
+                                                           accessibility_composition_base_);
+            if (context_text && !context_text->empty()) return false;
+        }
+    }
+    return true;
+}
+
 void Engine::request_prediction(ContextId context, InputSession& session) {
     processor_.apply_phrase_override(session);
     // A naturally changing composition is the probe signal. The worker keeps
     // only the newest pending state when typing outruns the memory scan.
-    if (memory_context_ && session.context_source != ContextSource::Client &&
-        session.context_source != ContextSource::Accessibility &&
-        !client_reports_text(host_, context)) {
+    if (should_probe_memory(context, session)) {
         memory_context_->refresh();
     }
     resync_context(context, session);

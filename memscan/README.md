@@ -3,7 +3,8 @@
 A deliberately small helper that finds a text in the memory of the user's own
 processes and returns the text in front of it. It is the last context source
 of the input method for applications that expose neither client surrounding
-text nor AT-SPI (for example Chromium, CEF, terminals, Tk).
+text nor AT-SPI. Whether a particular client yields context depends on how it
+stores its document and preedit.
 
 The input method passes the natural composition it is showing. The private
 resident mode returns bounded candidate locations; the engine only trusts a
@@ -16,9 +17,10 @@ The helper is intentionally *not* a generic memory reader:
 * the anchor has to be valid UTF-8 with 1..64 code points and no control
   characters (the input method passes its composition);
 * only PIDs owned by the calling user are accepted (the caller names them);
-* only a bounded window (at most 64 KiB each side, default 4 KiB before) in
-  front of the anchor is returned, trimmed to the trailing run of plausible
-  document text so heap metadata never reaches the model;
+* only a bounded window (at most 64 KiB each side, default 4 KiB before in
+  one-shot mode, 256 bytes before in resident mode) is decoded; implausible
+  heap bytes are trimmed, and a candidate is not published without temporal
+  validation;
 * scanning is bounded in bytes and wall-clock time.
 
 ## Build and test
@@ -42,14 +44,15 @@ The one-shot CLI still returns the best matching window. The IME's private
 `--serve` mode reads one JSON request per line from stdin and replies with a
 bounded list of candidate matches. It is a child process owned by the IME,
 not a system service. Requests name explicit PIDs and may include a cached
-`hint_pid`/`hint_address`; the previous match is checked before a full scan.
+`hint_pid`/`hint_address`/`hint_before` only after a location is confirmed.
+A nearby but different copy does not prevent the fallback full scan.
 
 Output is one JSON object on stdout:
 
 ```json
 {"found":true,"pid":1234,"encoding":"utf16le","address":"0x5555a1b2c3d4",
  "before":"hello magic ","after":"seed line\n",
- "before_bytes":12,"after_bytes":11,"scanned_bytes":4194304,"elapsed_ms":7}
+ "before_bytes":12,"after_bytes":11,"scanned_bytes":4194304,"truncated":false}
 ```
 
 Exit codes: `0` found, `1` not found, `2` usage/anchor error, `3` permission
@@ -57,12 +60,13 @@ denied or foreign PID, `4` timeout/byte budget. A permission failure is
 reported as `{"found":false,"error":"denied"}`, which the engine surfaces as
 "memory context unavailable" instead of pretending the anchor was absent.
 
-`--hint <pid>:<start>-<end>` points the scanner at a region that contained the
-anchor during the previous probe (the engine caches it), so repeat probes stay
-fast.
+`--hint <pid>:<start>-<end>` points the one-shot scanner at a region to try
+first. The resident mode only uses a previously confirmed location as a hint.
 
-Setting `MEMSCAN_DEBUG=1` prints the raw window bytes of a hit to stderr; it is
-meant for development only.
+Building the fcitx5 addon with `-DLLAVON_IME_DEBUG=ON` enables `[CTX]` and
+`[MEMCTX]` lines on fcitx5 stderr. Setting `MEMSCAN_DEBUG=1` in fcitx5's
+environment also prints raw bytes around scanner hits to that same stderr;
+those bytes may include private document text.
 
 ## Permission
 

@@ -514,14 +514,15 @@ std::vector<int> ImeEngine::probe_processes(ContextId context) {
     if (program.empty()) return {};
 
     const auto matches = [](std::string_view candidate, std::string_view needle) {
+        if (candidate.empty() || needle.empty()) return false;
         std::string lowered;
         lowered.reserve(candidate.size());
         for (const char value : candidate) {
             lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(value))));
         }
-        // Linux truncates comm to 15 characters, so accept either direction of
-        // the prefix relationship.
-        return lowered == needle || lowered.starts_with(needle) || needle.starts_with(lowered);
+        // Linux truncates comm to 15 characters. A short or unreadable comm
+        // must never match an unrelated application by a loose prefix.
+        return lowered == needle || (lowered.size() == 15 && needle.starts_with(lowered));
     };
 
     std::string needle;

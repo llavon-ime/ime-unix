@@ -381,6 +381,11 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                     static_cast<const std::byte*>(found) - area.data());
                 search_from = offset + 1;
                 const auto address = area_start + offset;
+                // Genuine char16_t/char32_t buffers are aligned to their
+                // code-unit width. Misaligned byte coincidences (observed
+                // in unrelated GUI processes) must not consume candidate
+                // slots or be treated as document text.
+                if (address % unit != 0) continue;
 
                 const std::uintptr_t left_edge = std::max<std::uintptr_t>(region.start,
                                                                           address >= before_bytes
@@ -427,8 +432,20 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                     // The provider must verify a location across two distinct
                     // natural preedit states; never turn a single nice-looking
                     // copy into a trusted result. Bound memory and scan time.
-                    if (candidates->size() < 16) candidates->push_back(match);
-                    if (candidates->size() == 16) return std::nullopt;
+                    // Weak matches cannot become useful candidates and must
+                    // not fill the list before the document buffer is read.
+                    if (score < kGoodTextRun) continue;
+                    if (candidates->size() < 16) {
+                        candidates->push_back(match);
+                    } else if (region_index < hints.size() &&
+                               std::ranges::any_of(hints, [&](const Hint& hint) {
+                                   return hint.pid == pid && hint.match_address == match.address;
+                               })) {
+                        // The hinted range can contain 16 unrelated copies
+                        // before the validated address; reserve a slot for it.
+                        candidates->back() = match;
+                    }
+                    if (candidates->size() == 16 && region_index >= hints.size()) return std::nullopt;
                 } else if (score >= kGoodTextRun) {
                     return match;
                 }
@@ -450,8 +467,16 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
         if (truncated) break;
         // A validated address is a much better lead than a full-process
         // search. Return the nearby candidates without scanning every map.
-        if (candidates != nullptr && !candidates->empty() && region_index < hints.size())
-            return std::nullopt;
+        if (candidates != nullptr && region_index < hints.size() &&
+            std::ranges::any_of(*candidates, [&](const Match& match) {
+                return std::ranges::any_of(hints, [&](const Hint& hint) {
+                    return hint.pid == pid && hint.match_address == match.address &&
+                           !hint.before.empty() && hint.before == match.before;
+                });
+            })) return std::nullopt;
+        // None of the hinted copies was the verified one. Their positions
+        // must not consume the candidate budget of the fallback full scan.
+        if (candidates != nullptr && region_index + 1 == hints.size()) candidates->clear();
         if (region_index + 1 == regions.size() && !full_scan_added) {
             full_scan_added = true;
             const auto heuristic = read_regions(pid);

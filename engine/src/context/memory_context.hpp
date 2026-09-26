@@ -41,8 +41,8 @@ public:
     void stop() override;
     bool running() const noexcept override;
 
-    // Main thread. Schedules a scan for the composition; throttled and skipped
-    // while inactive, sensitive, backed off, or without a composition.
+    // Main thread. Schedules a scan for each changed composition, except while
+    // inactive, sensitive, backed off, or without a composition.
     void refresh() override;
 
     // A focus change or a forwarded edit invalidates the previously verified

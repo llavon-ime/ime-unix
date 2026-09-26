@@ -1,5 +1,6 @@
 #include "context/memory_context.hpp"
 
+#include "debug/debug_log.hpp"
 #include "text/utf.hpp"
 
 #include <algorithm>
@@ -197,16 +198,24 @@ public:
         failures_ = 0;
         hint_pid_ = 0;
         hint_address_ = 0;
+        hint_before_.clear();
         last_probe_ = {};
         hooks_.publish({}, false);
     }
 
     void refresh() {
-        if (!running_ || !hooks_.active() || (callbacks_.sensitive && callbacks_.sensitive())) return;
+        if (!running_ || !hooks_.active()) return;
+        if (callbacks_.sensitive && callbacks_.sensitive()) {
+            invalidate();
+            return;
+        }
         const std::string preedit = callbacks_.preedit ? callbacks_.preedit() : std::string{};
         if (preedit.empty()) return;
         std::vector<int> pids = callbacks_.processes ? callbacks_.processes() : std::vector<int>{};
-        if (pids.empty()) return;
+        if (pids.empty()) {
+            LLAVON_DEBUG_LOG("MEMCTX", "skip: focused client has no named process");
+            return;
+        }
         if (pids.size() > 16) pids.resize(16);
 
         std::string anchor;
@@ -259,6 +268,7 @@ private:
             Job job;
             int hint_pid = 0;
             std::uintptr_t hint_address = 0;
+            std::string hint_before;
             {
                 std::unique_lock lock(mutex_);
                 condition_.wait(lock, [this] { return stopping_ || pending_.has_value(); });
@@ -267,12 +277,18 @@ private:
                 pending_.reset();
                 hint_pid = hint_pid_;
                 hint_address = hint_address_;
+                hint_before = hint_before_;
             }
             ++probes_;
 #if defined(__linux__)
             const auto result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
                                                 {"hint_pid", hint_pid},
-                                                {"hint_address", hint_address}});
+                                                {"hint_address", hint_address},
+                                                {"hint_before", hint_before}});
+            const std::string error_code = result && result->contains("error") &&
+                                                   (*result)["error"].is_string()
+                                               ? (*result)["error"].get<std::string>()
+                                               : "helper-failed";
             const auto matches = result && result->contains("matches") && (*result)["matches"].is_array()
                                      ? (*result)["matches"] : nlohmann::json::array();
             std::vector<Candidate> current;
@@ -318,17 +334,27 @@ private:
                 if (verified) {
                     hint_pid_ = verified->pid;
                     hint_address_ = verified->address;
+                    hint_before_ = verified->before;
                     failures_ = 0;
                 } else if (!candidates_.empty()) {
-                    hint_pid_ = candidates_.front().pid;
-                    hint_address_ = candidates_.front().address;
+                    // A copy of the composition in a protocol/layout buffer
+                    // is not a document location. Until the transitions
+                    // confirm one address, do not let the first arbitrary
+                    // match constrain the next search to its neighbourhood.
+                    hint_pid_ = 0;
+                    hint_address_ = 0;
+                    hint_before_.clear();
                     failures_ = 0;
                 } else {
                     hint_pid_ = 0;
                     hint_address_ = 0;
+                    hint_before_.clear();
                     ++failures_;
                 }
                 if (verified) {
+                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx candidates=%zu",
+                                     job.anchor.c_str(), verified->pid,
+                                     static_cast<unsigned long>(verified->address), candidates_.size());
                     try {
                         hooks_.publish(utf16_tail(utf8_to_u16(verified->before), hooks_.max_code_units()), true);
                         hooks_.availability(AccessibilityAvailability::Available, "memscan");
@@ -336,10 +362,13 @@ private:
                         hooks_.publish({}, false);
                     }
                 } else {
+                    LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified raw=%zu accepted=%zu error=%s",
+                                     job.anchor.c_str(), matches.size(), candidates_.size(),
+                                     error_code.c_str());
                     hooks_.publish({}, false);
                     if (!result)
                         hooks_.availability(AccessibilityAvailability::Unavailable, "helper-failed");
-                    else if (result->value("error", std::string{}) == "denied")
+                    else if (error_code == "denied")
                         hooks_.availability(AccessibilityAvailability::Unavailable, "permission-denied");
                 }
             }
@@ -364,6 +393,7 @@ private:
     std::size_t failures_ = 0;
     int hint_pid_ = 0;
     std::uintptr_t hint_address_ = 0;
+    std::string hint_before_;
     std::uint64_t revision_ = 0;
     std::chrono::steady_clock::time_point last_probe_{};
 };

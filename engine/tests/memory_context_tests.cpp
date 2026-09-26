@@ -48,6 +48,7 @@ public:
                << " mode = " << nlohmann_quote(mode) << "\n"
                << " if mode == 'denied': reply = {'matches': [], 'error': 'denied'}\n"
                << " elif mode == 'miss': reply = {'matches': [], 'error': 'not-found'}\n"
+               << " elif mode == 'bad-error': reply = {'matches': [], 'error': 42}\n"
                << " else:\n"
                << "  address = 4096 if mode != 'moving' else 4096 + len(request['anchor'])\n"
                << "  before = 'document prefix ' if mode != 'changing' else 'document ' + request['anchor']\n"
@@ -216,6 +217,47 @@ bool test_skip_and_denied() {
     return ok;
 }
 
+bool test_sensitive_transition_forgets_context() {
+    FakeHelper helper;
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(provider.latest() && provider.latest()->usable, "sample established before sensitive field");
+    {
+        std::lock_guard lock(state.mutex);
+        state.sensitive = true;
+    }
+    provider.refresh();
+    ok &= check(provider.latest() && !provider.latest()->usable,
+                "entering a sensitive field discards the cached document context");
+    {
+        std::lock_guard lock(state.mutex);
+        state.sensitive = false;
+    }
+    ok &= step(provider, state, "他", 4);
+    ok &= check(!provider.latest()->usable, "old context is not reused after sensitive input");
+    provider.stop();
+    return ok;
+}
+
+bool test_bad_helper_response_does_not_crash_worker() {
+    FakeHelper helper("bad-error");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= check(provider.latest() && !provider.latest()->usable,
+                "malformed helper error is handled without publishing context");
+    provider.stop();
+    return ok;
+}
+
 }  // namespace
 }  // namespace llavon::ime
 
@@ -228,6 +270,8 @@ int run_memory_context_tests() {
     ok &= test_focus_discards_cache();
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();
+    ok &= test_sensitive_transition_forgets_context();
+    ok &= test_bad_helper_response_does_not_crash_worker();
     if (ok) std::printf("memory context tests passed\n");
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }
