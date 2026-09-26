@@ -155,12 +155,14 @@ void serve() {
                 const int pid = pids[(start_pid + index) % pids.size()];
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now());
-                if (remaining.count() <= 0 || matches.size() >= 16) break;
+                if (remaining.count() <= 0 || matches.size() >= 32) break;
                 limits.timeout = std::min(remaining, std::chrono::milliseconds(600));
                 ScanError error;
                 llavon::memscan::ScanStats stats;
                 std::vector<Match> candidates;
-                (void)llavon::memscan::scan_pid(pid, *anchor, 256, 0, limits, hints,
+                // Enough context for the model: 1024 bytes is 85 terminal
+                // grid cells, or 1024/512/256 units in the byte encodings.
+                (void)llavon::memscan::scan_pid(pid, *anchor, 1024, 0, limits, hints,
                                                 error, &candidates, &next_address[pid], &stats);
                 progress.push_back({{"pid", pid}, {"next_address", next_address[pid]},
                                     {"hits", stats.hits}, {"qualified", stats.qualified}});
@@ -177,7 +179,7 @@ void serve() {
                 });
                 std::size_t selected = 0;
                 for (const auto& match : candidates) {
-                    if (selected == 4 || matches.size() >= 16) break;
+                    if (selected == 8 || matches.size() >= 32) break;
                     ++selected;
                     matches.push_back({{"pid", match.pid}, {"address", match.address},
                                        {"encoding", llavon::memscan::encoding_name(match.encoding)},

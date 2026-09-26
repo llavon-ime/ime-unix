@@ -54,11 +54,12 @@ public:
                << " if mode == 'denied': reply = {'matches': [], 'error': 'denied'}\n"
                << " elif mode == 'miss': reply = {'matches': [], 'error': 'not-found'}\n"
                << " elif mode == 'bad-error': reply = {'matches': [], 'error': 42}\n"
-               << " elif mode == 'vanish' and count > 3: reply = {'matches': [], 'error': 'not-found'}\n"
+               << " elif mode == 'vanish' and request['anchor'] not in ('ㄋ', 'ㄋㄧ', '你'): reply = {'matches': [], 'error': 'not-found'}\n"
+               << " elif mode == 'flaky' and request['anchor'] in ('ㄋㄧ', '你ㄏ'): reply = {'matches': [], 'error': 'not-found'}\n"
                << " else:\n"
                << "  address = 4096 if mode != 'moving' else 4096 + len(request['anchor'])\n"
                << "  before = 'document prefix ' if mode != 'changing' else 'document ' + request['anchor']\n"
-               << "  reply = {'matches': [{'pid': 4242, 'encoding': 'utf8', 'address': address, 'before': before}], 'error': 'not-found'}\n"
+               << "  reply = {'matches': [{'pid': 4242, 'encoding': 'utf8', 'address': address, 'before': before}], 'error': ''}\n"
                << " print(json.dumps(reply), flush=True)\n"
                << " if mode == 'exit': sys.exit(0)\n";
         script.close();
@@ -273,6 +274,31 @@ bool test_sensitive_transition_forgets_context() {
     return ok;
 }
 
+bool test_observation_chain_survives_missed_states() {
+    FakeHelper helper("flaky");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    auto advance_missing = [&](std::string text, std::size_t count) {
+        state.set(std::move(text));
+        std::this_thread::sleep_for(std::chrono::milliseconds(55));
+        provider.refresh();
+        return wait_for([&] { return provider.probe_count() >= count; });
+    };
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= advance_missing("ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= advance_missing("你ㄏ", 4);
+    ok &= step(provider, state, "你好", 5);
+    ok &= check(wait_for([&] {
+                    const auto sample = provider.latest();
+                    return sample && sample->usable && sample->text == u"document prefix ";
+                }), "the observation chain survives states whose scan missed");
+    provider.stop();
+    return ok;
+}
+
 bool test_transient_miss_keeps_confirmed_context() {
     FakeHelper helper("vanish");
     ProbeState state;
@@ -284,21 +310,36 @@ bool test_transient_miss_keeps_confirmed_context() {
     ok &= step(provider, state, "你", 3);
     ok &= check(wait_for([&] { return provider.latest() && provider.latest()->usable; }),
                 "location confirmed before the miss");
+    // A miss is retried once, so two helper requests for the anchor mean the
+    // state's scan is done and the next state can be fed.
+    const auto scanned = [&](const std::string& anchor) {
+        return wait_for([&] {
+            const std::string log = helper.log();
+            std::size_t count = 0, position = 0;
+            while ((position = log.find(anchor + "\n", position)) != std::string::npos) {
+                ++count;
+                position += anchor.size() + 1;
+            }
+            return count >= 2;
+        });
+    };
     state.set("他");
     provider.refresh();
-    ok &= check(wait_for([&] { return provider.probe_count() >= 4; }), "missing state probed");
+    ok &= check(scanned("他"), "missing state probed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     ok &= check(provider.latest() && provider.latest()->usable &&
                     provider.latest()->text == u"document prefix ",
                 "a transient miss keeps the confirmed location");
     state.set("他你");
     provider.refresh();
-    ok &= check(wait_for([&] { return provider.probe_count() >= 5; }), "second missing state probed");
+    ok &= check(scanned("他你"), "second missing state probed");
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     ok &= check(provider.latest() && provider.latest()->usable,
                 "a second miss still keeps the location");
     state.set("他你好");
     provider.refresh();
-    ok &= check(wait_for([&] { return provider.probe_count() >= 6; }), "third missing state probed");
-    ok &= check(provider.latest() && !provider.latest()->usable,
+    ok &= check(scanned("他你好"), "third missing state probed");
+    ok &= check(wait_for([&] { return provider.latest() && !provider.latest()->usable; }),
                 "three unverified states in a row drop the location");
     provider.stop();
     return ok;
@@ -441,6 +482,7 @@ int run_memory_context_tests() {
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();
     ok &= test_sensitive_transition_forgets_context();
+    ok &= test_observation_chain_survives_missed_states();
     ok &= test_transient_miss_keeps_confirmed_context();
     ok &= test_bad_helper_response_does_not_crash_worker();
 #if defined(__linux__)

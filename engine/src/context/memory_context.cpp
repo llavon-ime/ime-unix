@@ -203,6 +203,7 @@ public:
         last_probe_ = {};
         published_usable_ = false;
         unverified_ = 0;
+        misses_ = 0;
         hooks_.publish({}, false);
     }
 
@@ -284,15 +285,31 @@ private:
             }
             ++probes_;
 #if defined(__linux__)
-            const auto result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
-                                                {"epoch", job.revision},
-                                                {"hint_pid", hint_pid},
-                                                {"hint_address", hint_address},
-                                                {"hint_before", hint_before}});
-            const std::string error_code = result && result->contains("error") &&
-                                                   (*result)["error"].is_string()
-                                               ? (*result)["error"].get<std::string>()
-                                               : "helper-failed";
+            std::optional<nlohmann::json> result;
+            std::string error_code;
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
+                                         {"epoch", job.revision},
+                                         {"hint_pid", hint_pid},
+                                         {"hint_address", hint_address},
+                                         {"hint_before", hint_before}});
+                error_code = result && result->contains("error") && (*result)["error"].is_string()
+                                 ? (*result)["error"].get<std::string>()
+                                 : "helper-failed";
+                const bool transient = error_code == "not-found" || error_code == "timeout" ||
+                                       error_code == "budget";
+                if (!transient || attempt + 1 >= 2) break;
+                // The client may not have painted this preedit state yet, so
+                // retry once while the state is still current instead of
+                // depending on a fixed delay or on the client's redraw speed.
+                std::unique_lock lock(mutex_);
+                if (stopping_ || job.revision != revision_ || job.anchor != last_anchor_ ||
+                    pending_.has_value()) {
+                    break;
+                }
+                lock.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
             const auto matches = result && result->contains("matches") && (*result)["matches"].is_array()
                                      ? (*result)["matches"] : nlohmann::json::array();
             std::vector<Candidate> current;
@@ -307,7 +324,7 @@ private:
                     // fall back to the other context sources.
                     if (std::ranges::find(job.pids, candidate.pid) != job.pids.end() &&
                         candidate.address > 0 && utf8_to_u16(candidate.before).size() >= 8 &&
-                        current.size() < 16) current.push_back(std::move(candidate));
+                        current.size() < 32) current.push_back(std::move(candidate));
                 }
             } catch (const std::exception&) {
                 current.clear();
@@ -339,7 +356,16 @@ private:
                         break;
                     }
                 }
-                candidates_ = std::move(current);
+                if (current.empty()) {
+                    // A state whose scan missed (client redraw lag, budget)
+                    // does not move the caret, so the location observed for
+                    // the previous state is still valid. Do not reset the
+                    // observation chain; give up only after several misses.
+                    if (++misses_ >= kMaxConsecutiveFailures) candidates_.clear();
+                } else {
+                    misses_ = 0;
+                    candidates_ = std::move(current);
+                }
                 if (verified && current_job) {
                     hint_pid_ = verified->pid;
                     hint_address_ = verified->address;
@@ -420,6 +446,7 @@ private:
     std::string hint_before_;
     bool published_usable_ = false;
     std::size_t unverified_ = 0;
+    std::size_t misses_ = 0;
     std::uint64_t revision_ = 0;
     std::chrono::steady_clock::time_point last_probe_{};
 };

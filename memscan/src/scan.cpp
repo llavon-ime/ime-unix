@@ -519,7 +519,7 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                     if (score < kGoodTextRun) continue;
                     if (candidate_region == 0 && region_index >= hints.size())
                         candidate_region = region.start;
-                    if (candidates->size() < 16) {
+                    if (candidates->size() < 32) {
                         candidates->push_back(match);
                     } else if (region_index < hints.size() &&
                                std::ranges::any_of(hints, [&](const Hint& hint) {
@@ -529,7 +529,7 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                         // before the validated address; reserve a slot for it.
                         candidates->back() = match;
                     }
-                    if (candidates->size() == 16 && region_index >= hints.size()) {
+                    if (candidates->size() == 32 && region_index >= hints.size()) {
                         resume_at(position + request);
                         if (next_address != nullptr && candidate_region != 0)
                             *next_address = candidate_region;
