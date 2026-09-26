@@ -18,6 +18,13 @@ namespace llavon::ime {
 
 namespace {
 
+// True when the client itself gives the caret context, so the memory probe has
+// nothing to add and must not write anything.
+bool client_reports_text(Host& host, ContextId context) {
+    const auto surrounding = host.surrounding_text(context);
+    return surrounding.valid && surrounding.cursor > 0;
+}
+
 // The memory probe helper is resolved like the installed service: an
 // environment override first, then the path compiled in from CMake.
 std::filesystem::path memory_helper_path() {
@@ -82,6 +89,7 @@ void Engine::attach(ContextId context) {
 void Engine::detach(ContextId context) {
     const auto it = sessions_.find(context);
     if (it == sessions_.end()) return;
+    if (memory_probe_context_ == context && memory_context_) memory_context_->invalidate();
     close_prediction_session(*it->second);
     sessions_.erase(it);
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
@@ -103,6 +111,17 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
     auto& session = find_or_create(context);
     const auto effect = processor_.process(key, session, config_);
     apply_effect(context, session, effect);
+    if (!effect.handled) {
+        // The application receives this key, so the caret may have moved away
+        // from the text the memory probe would locate; a paste or undo may
+        // also have changed the context, so probe again.
+        if (memory_context_) memory_context_->invalidate();
+        if (memory_context_ && session.context_source != ContextSource::Client &&
+            session.context_source != ContextSource::Accessibility &&
+            !client_reports_text(host_, context)) {
+            memory_context_->refresh();
+        }
+    }
     return effect.handled;
 }
 
@@ -119,6 +138,7 @@ void Engine::select_symbol(ContextId context, int index, std::uint64_t epoch) {
 }
 
 void Engine::activate(ContextId context) {
+    if (memory_context_) memory_context_->invalidate();
     memory_probe_context_ = context;
     if (accessibility_context_) {
         accessibility_context_->set_active(true);
@@ -128,12 +148,12 @@ void Engine::activate(ContextId context) {
     if (memory_context_) {
         memory_context_->set_active(true);
         memory_base_sequence_ = memory_context_->sequence();
-        memory_context_->refresh();
     }
     host_.update_ui(context);
 }
 
 void Engine::deactivate(ContextId context) {
+    if (memory_context_) memory_context_->invalidate();
     if (memory_probe_context_ == context) memory_probe_context_ = 0;
     if (accessibility_context_) {
         accessibility_context_->set_active(false);
@@ -149,6 +169,7 @@ void Engine::deactivate(ContextId context) {
 void Engine::reset(ContextId context, InputResetReason reason, bool clear_context) {
     auto* session = find(context);
     if (session == nullptr) return;
+    if (memory_context_) memory_context_->invalidate();
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
     if (reason == InputResetReason::FocusOut) {
         if (memory_probe_context_ == context) memory_probe_context_ = 0;
@@ -238,10 +259,6 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         const bool allow_training = effect.training_sample && config_.collect_training_data &&
                                     !host_.is_sensitive(context);
         host_.commit(context, effect.commit);
-        last_committed_text_ = utf16_tail(effect.commit, 32);
-        // The caret sits right after the committed text: the safest moment to
-        // refresh the memory probe sample (the provider throttles this).
-        if (memory_context_) memory_context_->refresh();
         if (allow_training) {
             try {
                 protocol::RecordCommitRequest request;
@@ -267,8 +284,10 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
             }
         }
     }
-    if (effect.request_prediction) request_prediction(context, session);
     if (effect.redraw) host_.update_ui(context);
+    // Memory probing observes the client's natural preedit; publish the new
+    // preedit before the prediction path schedules its memory scan.
+    if (effect.request_prediction) request_prediction(context, session);
 }
 
 void Engine::remember_recent_commit(ContextId context, const protocol::SessionId& event_id,
@@ -308,6 +327,13 @@ void Engine::withdraw_recent_commit(ContextId context) {
 
 void Engine::request_prediction(ContextId context, InputSession& session) {
     processor_.apply_phrase_override(session);
+    // A naturally changing composition is the probe signal. The worker keeps
+    // only the newest pending state when typing outruns the memory scan.
+    if (memory_context_ && session.context_source != ContextSource::Client &&
+        session.context_source != ContextSource::Accessibility &&
+        !client_reports_text(host_, context)) {
+        memory_context_->refresh();
+    }
     resync_context(context, session);
     if (!session.prediction.begin(session.buffer.completed_segment_indices(), session.buffer.raw_composition(),
                                   session.buffer.revision())) {
@@ -422,6 +448,7 @@ void Engine::resync_context(ContextId context, InputSession& session) {
     // Context is read fresh from the current source for every prediction; it
     // is never accumulated or reused across requests.
     session.context_text.clear();
+    session.context_source = ContextSource::None;
     if (host_.is_sensitive(context)) return;
 
     const std::size_t limit = config_.context_length > 0 ? static_cast<std::size_t>(config_.context_length) : 0;
@@ -437,6 +464,7 @@ void Engine::resync_context(ContextId context, InputSession& session) {
         auto text = utf16_tail(std::u16string_view(surrounding.text).substr(0, bounded), limit);
         if (!text.empty()) {
             session.context_text = std::move(text);
+            session.context_source = ContextSource::Client;
             log_context("client-surrounding", session.context_text);
             return;
         }
@@ -454,6 +482,7 @@ void Engine::resync_context(ContextId context, InputSession& session) {
                                  : std::nullopt;
         if (text) {
             session.context_text = utf16_tail(*text, limit);
+            session.context_source = ContextSource::Accessibility;
             log_context("accessibility", session.context_text);
             return;
         }
@@ -469,10 +498,12 @@ void Engine::resync_context(ContextId context, InputSession& session) {
     if (memory_context_) {
         const auto sample = memory_context_->latest();
         const auto text = sample ? adopt_context_sample(session, *sample, memory_base_sequence_,
-                                                        memory_composition_base_)
+                                                        memory_composition_base_,
+                                                        /*strip_preedit=*/false)
                                  : std::nullopt;
         if (text && !text->empty()) {
             session.context_text = utf16_tail(*text, limit);
+            session.context_source = ContextSource::Memory;
             log_context("memory-probe", session.context_text);
             return;
         }
@@ -489,8 +520,10 @@ void Engine::resync_context(ContextId context, InputSession& session) {
 std::optional<std::u16string> Engine::adopt_context_sample(const InputSession& session,
                                                             const AccessibilityContextSample& sample,
                                                             std::uint64_t base_sequence,
-                                                            std::uint64_t composition_base) const {
+                                                            std::uint64_t composition_base,
+                                                            bool strip_preedit) const {
     if (!sample.usable || sample.sequence <= base_sequence) return std::nullopt;
+    if (!strip_preedit) return sample.text;
     // A sample published before this composition started cannot contain its
     // preedit; anything newer may, so it is only adopted after the composing
     // text is stripped from its tail.
@@ -581,17 +614,17 @@ void Engine::apply_context_sources() {
         memory_base_sequence_ = 0;
     } else if (!memory_context_) {
         MemoryProbeCallbacks callbacks;
-        callbacks.inject = [this](std::u16string_view token) {
-            if (memory_probe_context_ == 0) return false;
-            return host_.inject_probe(memory_probe_context_, token);
-        };
-        callbacks.remove = [this](std::size_t units) {
-            if (memory_probe_context_ == 0) return;
-            const ContextId context = memory_probe_context_;
-            host_.post([this, context, units] {
-                if (!*alive_) return;
-                host_.remove_probe(context, units);
-            });
+        callbacks.preedit = [this] {
+            if (memory_probe_context_ == 0) return std::string{};
+            const auto* session = find(memory_probe_context_);
+            if (session == nullptr) return std::string{};
+            const auto preedit = InputProcessor::current_preedit(*session);
+            if (preedit.empty()) return std::string{};
+            try {
+                return u16_to_utf8(preedit);
+            } catch (const std::exception&) {
+                return std::string{};
+            }
         };
         callbacks.processes = [this] {
             if (memory_probe_context_ == 0) return std::vector<int>{};
@@ -600,13 +633,6 @@ void Engine::apply_context_sources() {
         callbacks.sensitive = [this] {
             if (memory_probe_context_ == 0) return true;
             return host_.is_sensitive(memory_probe_context_);
-        };
-        callbacks.expect_suffix = [this] {
-            try {
-                return u16_to_utf8(last_committed_text_);
-            } catch (const std::exception&) {
-                return std::string{};
-            }
         };
         memory_context_ =
             std::make_unique<MemoryContextProvider>(limit, std::move(callbacks), memory_helper_path());

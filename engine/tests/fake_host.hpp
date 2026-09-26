@@ -48,40 +48,14 @@ public:
         return sensitive_;
     }
 
-    bool inject_probe(ContextId context, std::u16string_view token) override {
-        std::lock_guard lock(mutex_);
-        injected_.emplace_back(context, std::u16string(token));
-        return inject_ok_;
-    }
-
-    void remove_probe(ContextId context, std::size_t units) override {
-        std::lock_guard lock(mutex_);
-        removals_.emplace_back(context, units);
-    }
-
     std::vector<int> probe_processes(ContextId) override {
         std::lock_guard lock(mutex_);
         return probe_pids_;
     }
 
-    void set_inject_ok(bool ok) {
-        std::lock_guard lock(mutex_);
-        inject_ok_ = ok;
-    }
-
     void set_probe_pids(std::vector<int> pids) {
         std::lock_guard lock(mutex_);
         probe_pids_ = std::move(pids);
-    }
-
-    std::vector<std::pair<ContextId, std::u16string>> injected() const {
-        std::lock_guard lock(mutex_);
-        return injected_;
-    }
-
-    std::vector<std::pair<ContextId, std::size_t>> removals() const {
-        std::lock_guard lock(mutex_);
-        return removals_;
     }
 
     void set_surrounding(HostContext context) {
@@ -127,6 +101,9 @@ public:
                 std::unique_lock lock(mutex_);
                 if (queue_.empty()) {
                     if (!condition_.wait_until(lock, deadline, [&]() { return !queue_.empty(); })) {
+                        // The predicate locks the same mutex through the
+                        // accessors, so it must run without the lock held.
+                        lock.unlock();
                         return predicate();
                     }
                 }
@@ -144,10 +121,7 @@ private:
     std::vector<std::pair<ContextId, std::u16string>> commits_;
     HostContext surrounding_;
     bool sensitive_ = false;
-    bool inject_ok_ = false;
     std::vector<int> probe_pids_;
-    std::vector<std::pair<ContextId, std::u16string>> injected_;
-    std::vector<std::pair<ContextId, std::size_t>> removals_;
     int redraw_count_ = 0;
     ContextId last_redraw_context_ = 0;
 };

@@ -1,7 +1,6 @@
-#include "needle.hpp"
+#include "anchor.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <string_view>
 
@@ -9,11 +8,8 @@ namespace llavon::memscan {
 
 namespace {
 
-constexpr char32_t kPuaStart = 0xE000;
-constexpr char32_t kPuaEnd = 0xF8FF;
-constexpr std::size_t kMinPuaCodepoints = 12;
-constexpr std::size_t kMinAsciiCharacters = 16;
-constexpr std::string_view kAsciiPrefix = "LVP";
+constexpr std::size_t kMinCodepoints = 1;
+constexpr std::size_t kMaxCodepoints = 64;
 
 bool decode_utf8(std::string_view input, std::vector<char32_t>& output) {
     std::size_t index = 0;
@@ -53,29 +49,25 @@ bool decode_utf8(std::string_view input, std::vector<char32_t>& output) {
     return true;
 }
 
-void append_utf8(std::string& output, char32_t codepoint) {
-    if (codepoint <= 0x7F) {
-        output.push_back(static_cast<char>(codepoint));
-    } else if (codepoint <= 0x7FF) {
-        output.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    } else if (codepoint <= 0xFFFF) {
-        output.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    } else {
-        output.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
-        output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
-        output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        output.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    }
-}
-
 std::vector<std::byte> to_utf8_bytes(const std::vector<char32_t>& codepoints) {
-    std::string text;
-    for (const char32_t codepoint : codepoints) append_utf8(text, codepoint);
-    std::vector<std::byte> bytes(text.size());
-    std::memcpy(bytes.data(), text.data(), text.size());
+    std::vector<std::byte> bytes;
+    for (const char32_t codepoint : codepoints) {
+        if (codepoint <= 0x7F) {
+            bytes.push_back(static_cast<std::byte>(codepoint));
+        } else if (codepoint <= 0x7FF) {
+            bytes.push_back(static_cast<std::byte>(0xC0 | (codepoint >> 6)));
+            bytes.push_back(static_cast<std::byte>(0x80 | (codepoint & 0x3F)));
+        } else if (codepoint <= 0xFFFF) {
+            bytes.push_back(static_cast<std::byte>(0xE0 | (codepoint >> 12)));
+            bytes.push_back(static_cast<std::byte>(0x80 | ((codepoint >> 6) & 0x3F)));
+            bytes.push_back(static_cast<std::byte>(0x80 | (codepoint & 0x3F)));
+        } else {
+            bytes.push_back(static_cast<std::byte>(0xF0 | (codepoint >> 18)));
+            bytes.push_back(static_cast<std::byte>(0x80 | ((codepoint >> 12) & 0x3F)));
+            bytes.push_back(static_cast<std::byte>(0x80 | ((codepoint >> 6) & 0x3F)));
+            bytes.push_back(static_cast<std::byte>(0x80 | (codepoint & 0x3F)));
+        }
+    }
     return bytes;
 }
 
@@ -110,6 +102,24 @@ std::vector<std::byte> to_utf32_bytes(const std::vector<char32_t>& codepoints) {
 
 }  // namespace
 
+bool decode_text(const std::string& utf8, std::vector<char32_t>& output) {
+    return decode_utf8(utf8, output);
+}
+
+bool plausible_text_codepoint(char32_t codepoint) {
+    if (codepoint == '\n' || codepoint == '\t') return true;
+    if (codepoint >= 0x20 && codepoint <= 0x7E) return true;
+    if (codepoint >= 0xA0 && codepoint <= 0x36F) return true;    // Latin, IPA, marks
+    if (codepoint >= 0x370 && codepoint <= 0x4FF) return true;    // Greek, Cyrillic
+    if (codepoint >= 0x2000 && codepoint <= 0x206F) return true;  // punctuation
+    if (codepoint >= 0x2E80 && codepoint <= 0x9FFF) return true;  // CJK
+    if (codepoint >= 0x3000 && codepoint <= 0x303F) return true;  // CJK punctuation
+    if (codepoint >= 0x3100 && codepoint <= 0x312F) return true;  // Bopomofo
+    if (codepoint >= 0x31A0 && codepoint <= 0x31BF) return true;  // Bopomofo extended
+    if (codepoint >= 0xFF00 && codepoint <= 0xFFEF) return true;  // Fullwidth forms
+    return false;
+}
+
 const char* encoding_name(Encoding encoding) {
     switch (encoding) {
         case Encoding::Utf8: return "utf8";
@@ -119,47 +129,40 @@ const char* encoding_name(Encoding encoding) {
     return "unknown";
 }
 
-std::optional<Needle> parse_needle(const std::string& utf8, NeedleError& error) {
+std::optional<std::string> parse_anchor_text(const std::string& utf8, AnchorError& error) {
     std::vector<char32_t> codepoints;
     if (!decode_utf8(utf8, codepoints)) {
-        error = {"needle-invalid", "probe token is not valid UTF-8"};
+        error = {"anchor-invalid", "anchor is not valid UTF-8"};
         return std::nullopt;
     }
-    if (codepoints.size() < kMinPuaCodepoints || codepoints.size() > 64) {
-        error = {"needle-invalid", "probe token must have 12..64 code points"};
+    if (codepoints.size() < kMinCodepoints || codepoints.size() > kMaxCodepoints) {
+        error = {"anchor-invalid", "anchor must have 1..64 code points"};
         return std::nullopt;
     }
-
-    const bool all_pua = std::ranges::all_of(codepoints, [](char32_t codepoint) {
-        return codepoint >= kPuaStart && codepoint <= kPuaEnd;
-    });
-    const bool ascii_token = [&]() {
-        if (codepoints.size() < kMinAsciiCharacters) return false;
-        std::string text;
-        for (const char32_t codepoint : codepoints) {
-            if (codepoint > 0x7F) return false;
-            text.push_back(static_cast<char>(codepoint));
+    for (const char32_t codepoint : codepoints) {
+        if (codepoint < 0x20 || codepoint == 0x7F) {
+            error = {"anchor-invalid", "anchor must not contain control characters"};
+            return std::nullopt;
         }
-        if (!text.starts_with(kAsciiPrefix)) return false;
-        return std::ranges::all_of(text.substr(kAsciiPrefix.size()), [](unsigned char value) {
-            return std::isalnum(value) != 0;
-        });
-    }();
-    if (!all_pua && !ascii_token) {
-        error = {"needle-invalid",
-                 "probe token must be all private-use code points or LVP-prefixed ASCII"};
-        return std::nullopt;
     }
+    return utf8;
+}
 
-    Needle needle;
-    needle.text = utf8;
-    needle.encodings = {Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf32Le};
-    needle.patterns = {to_utf8_bytes(codepoints), to_utf16_bytes(codepoints),
+std::optional<Anchor> parse_anchor(const std::string& utf8, AnchorError& error) {
+    const auto text = parse_anchor_text(utf8, error);
+    if (!text) return std::nullopt;
+
+    std::vector<char32_t> codepoints;
+    decode_utf8(*text, codepoints);
+    Anchor anchor;
+    anchor.text = *text;
+    anchor.encodings = {Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf32Le};
+    anchor.patterns = {to_utf8_bytes(codepoints), to_utf16_bytes(codepoints),
                        to_utf32_bytes(codepoints)};
-    for (const auto& pattern : needle.patterns) {
-        needle.max_pattern_bytes = std::max(needle.max_pattern_bytes, pattern.size());
+    for (const auto& pattern : anchor.patterns) {
+        anchor.max_pattern_bytes = std::max(anchor.max_pattern_bytes, pattern.size());
     }
-    return needle;
+    return anchor;
 }
 
 }  // namespace llavon::memscan

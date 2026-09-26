@@ -90,6 +90,8 @@ struct HarnessOptions {
     // File backing the accessibility context source; empty keeps it off.
     std::string context_sample_path;
     bool enable_accessibility = false;
+    // Optional last-resort memory source used by raw-key integration tests.
+    std::string memory_helper_path;
 };
 
 class Harness {

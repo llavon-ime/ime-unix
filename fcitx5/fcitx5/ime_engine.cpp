@@ -507,41 +507,15 @@ bool ImeEngine::is_sensitive(ContextId context) {
     return input_context_ptr->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive);
 }
 
-bool ImeEngine::inject_probe(ContextId context, std::u16string_view token) {
-    auto* input_context_ptr = input_context(context);
-    if (input_context_ptr == nullptr) return false;
-    // Never touch password or sensitive fields.
-    if (input_context_ptr->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) {
-        return false;
-    }
-    // The probe token must be removable again. Clients that support
-    // surrounding text delete it directly; clients without it (XIM and
-    // friends) get Backspace events instead, which every frontend can forward.
-    input_context_ptr->commitString(u16_to_utf8(token));
-    return true;
-}
-
-void ImeEngine::remove_probe(ContextId context, std::size_t units) {
-    auto* input_context_ptr = input_context(context);
-    if (input_context_ptr == nullptr || units == 0) return;
-    if (input_context_ptr->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText)) {
-        input_context_ptr->deleteSurroundingText(-static_cast<int>(units),
-                                                  static_cast<unsigned int>(units));
-        return;
-    }
-    // XIM has no delete-surrounding-text: replay Backspace key events, which
-    // the toolkit or shell applies exactly like a user correction.
-    for (std::size_t index = 0; index < units; ++index) {
-        input_context_ptr->forwardKey(fcitx::Key(FcitxKey_BackSpace));
-        input_context_ptr->forwardKey(fcitx::Key(FcitxKey_BackSpace), true);
-    }
-}
-
 std::vector<int> ImeEngine::probe_processes(ContextId context) {
     auto* input_context_ptr = input_context(context);
     if (input_context_ptr == nullptr) return {};
     const std::string program = input_context_ptr->program();
     if (program.empty()) return {};
+    // Mutter's X11 decoration process is not the focused document. Some
+    // Wayland/Xwayland focus transitions report it as the program; probing
+    // its memory only finds unrelated UI copies of the composition.
+    if (program == "mutter-x11-frames") return {};
 
     const auto matches = [](std::string_view candidate, std::string_view needle) {
         std::string lowered;

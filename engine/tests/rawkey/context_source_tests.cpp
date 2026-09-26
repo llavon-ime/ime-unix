@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include <thread>
 
 using namespace llavon::ime::rawkey;
 
@@ -97,3 +99,37 @@ RAWKEY_SUITE("context source", context_source) {
     }
 #endif
 }
+
+#ifndef __APPLE__
+RAWKEY_SUITE("memory probe leaves preedit and commit untouched", natural_memory_probe) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("llavon-rawkey-memory-" + std::to_string(::getpid()) + ".sh");
+    {
+        std::ofstream file(path);
+        file << "#!/bin/sh\nwhile IFS= read -r line; do\n"
+             << "printf '%s\\n' '{\"matches\":[{\"pid\":4242,\"encoding\":\"utf8\","
+                "\"address\":4096,\"before\":\"document prefix \"}]}'\n"
+             << "done\n";
+    }
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace);
+    {
+        HarnessOptions options;
+        options.memory_helper_path = path.string();
+        Harness harness(options);
+        harness.host().set_probe_pids({4242});
+        harness.activate();
+        harness.key("s");
+        RAWKEY_ASSERT(harness.preedit() == "ㄋ");
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        harness.key("u");
+        RAWKEY_ASSERT(harness.preedit() == "ㄋㄧ");
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        harness.key("3");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        harness.expect_commit("你");
+        RAWKEY_ASSERT(harness.commits().back() == "你");
+    }
+    std::filesystem::remove(path);
+}
+#endif

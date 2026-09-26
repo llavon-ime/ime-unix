@@ -1,14 +1,15 @@
-#include "needle.hpp"
+#include "anchor.hpp"
 #include "scan.hpp"
 
 #include <chrono>
+#include <csignal>
+#include <cstdint>
 #include <cstdio>
-#include <random>
 #include <string>
 #include <string_view>
-#include <unistd.h>
-#include <csignal>
 #include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -19,20 +20,7 @@ void check(bool ok, const std::string& what) {
     if (!ok) ++failures;
 }
 
-// A private-use-area probe token, the shape the input method uses.
-std::string pua_token(std::mt19937_64& rng, std::size_t count = 16) {
-    std::uniform_int_distribution<int> distribution(0xE000, 0xF8FF);
-    std::string text;
-    for (std::size_t index = 0; index < count; ++index) {
-        const char32_t codepoint = static_cast<char32_t>(distribution(rng));
-        text.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
-        text.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
-        text.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
-    }
-    return text;
-}
-
-// Tests only use ASCII plus BMP private-use code points, so this is enough.
+// Tests only use ASCII plus BMP code points, so this is enough.
 std::u16string to_utf16(std::string_view input) {
     std::u16string output;
     std::size_t index = 0;
@@ -58,10 +46,10 @@ struct Holder {
     std::uintptr_t address = 0;
 };
 
-// The child keeps the probe text in a heap buffer and reports its address so
+// The child keeps the anchor text in a heap buffer and reports its address so
 // the scanner can be pointed at exactly that buffer (the parent also holds a
-// copy of the probe token in its own heap, which is what a real engine avoids
-// by never scanning itself).
+// copy of the anchor in its own heap, which is what a real engine avoids by
+// never scanning itself).
 Holder spawn_holder(const std::string& text, bool utf16) {
     int ready[2];
     if (::pipe(ready) != 0) return {};
@@ -93,26 +81,73 @@ void stop_holder(pid_t pid) {
     ::waitpid(pid, &status, 0);
 }
 
+struct ChangingHolder {
+    Holder holder;
+    int updates = -1;
+    int acknowledgements = -1;
+};
+
+ChangingHolder spawn_changing_holder() {
+    int commands[2], responses[2];
+    if (::pipe(commands) != 0) return {};
+    if (::pipe(responses) != 0) {
+        ::close(commands[0]); ::close(commands[1]);
+        return {};
+    }
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(commands[1]); ::close(responses[0]);
+        std::string buffer;
+        buffer.reserve(256);
+        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+        (void)::write(responses[1], &address, sizeof(address));
+        char step = 0;
+        while (::read(commands[0], &step, 1) == 1) {
+            buffer = "document prefix ";
+            if (step == '1') buffer += "ㄋ";
+            if (step == '2') buffer += "ㄋㄧ";
+            if (step == '3') buffer += "你";
+            (void)::write(responses[1], &step, 1);
+        }
+        ::_exit(0);
+    }
+    ::close(commands[0]); ::close(responses[1]);
+    std::uintptr_t address = 0;
+    if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
+    return {{pid, address}, commands[1], responses[0]};
+}
+
+bool update_holder(const ChangingHolder& holder, char step) {
+    char ack = 0;
+    return ::write(holder.updates, &step, 1) == 1 &&
+           ::read(holder.acknowledgements, &ack, 1) == 1 && ack == step;
+}
+
+const char* const kAnchor = "智慧錨點";
+
 }  // namespace
 
 int main() {
     using namespace llavon::memscan;
 
-    std::mt19937_64 rng(0x5eed);
-    const std::string token = pua_token(rng);
-    NeedleError needle_error;
-    const auto needle = parse_needle(token, needle_error);
-    check(needle.has_value(), "PUA probe token accepted");
+    AnchorError anchor_error;
+    auto parse = [&](const std::string& text) { return parse_anchor(text, anchor_error); };
+    check(parse(kAnchor).has_value(), "text anchor accepted");
+    check(parse("ab").has_value(), "two code points accepted");
+    check(parse("a").has_value(), "one natural phonetic code point accepted");
+    check(!parse(std::string("a") + '\x01' + "b").has_value(), "control character rejected");
+    check(!parse(std::string("\xff\xfe", 2)).has_value(), "invalid UTF-8 rejected");
+    check(!parse(std::string(65, 'a')).has_value(), "65 code points rejected");
 
-    check(!parse_needle("short token", needle_error).has_value(), "short token rejected");
-    check(!parse_needle("aaaaaaaaaaaaaaaaaaaaaaaa", needle_error).has_value(),
-          "plain ASCII token rejected");
-    check(parse_needle("LVPabcdefghijklmnop1234", needle_error).has_value(),
-          "LVP-prefixed ASCII token accepted");
+    const auto anchor = parse(kAnchor);
+    if (!anchor) {
+        std::printf("memscan tests failed: the anchor did not parse\n");
+        return 1;
+    }
 
     ScanLimits limits;
     limits.timeout = std::chrono::milliseconds(3000);
-    const std::string text = "hello magic " + token + " seed line\n";
+    const std::string text = std::string("hello magic ") + kAnchor + " seed line\n";
 
     for (const bool utf16 : {false, true}) {
         const Holder holder = spawn_holder(text, utf16);
@@ -120,9 +155,9 @@ int main() {
         if (holder.pid <= 0) continue;
         ScanError error;
         const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 256}};
-        const auto match = scan_pid(holder.pid, *needle, 64, 32, limits, hints, std::string{}, error);
+        const auto match = scan_pid(holder.pid, *anchor, 64, 32, limits, hints, error);
         check(match.has_value(),
-              std::string("scan finds token (") + (utf16 ? "utf16" : "utf8") + "): " + error.code);
+              std::string("scan finds the anchor (") + (utf16 ? "utf16" : "utf8") + "): " + error.code);
         if (match) {
             check(match->encoding == (utf16 ? Encoding::Utf16Le : Encoding::Utf8),
                   std::string("encoding reported: ") + llavon::memscan::encoding_name(match->encoding));
@@ -133,12 +168,52 @@ int main() {
     }
 
     {
-        const Holder holder = spawn_holder(text, false);
+        const ChangingHolder changing = spawn_changing_holder();
+        check(changing.holder.address != 0, "mutable client string has a stable address");
+        std::uintptr_t previous = 0;
+        for (const auto [key, text] : std::vector<std::pair<char, const char*>>{
+                 {'1', "ㄋ"}, {'2', "ㄋㄧ"}, {'3', "你"}}) {
+            check(update_holder(changing, key), "client changed its natural composition");
+            const auto pattern = parse(text);
+            ScanError error;
+            std::vector<Match> candidates;
+            const std::vector<Hint> hint{{changing.holder.pid, changing.holder.address,
+                                          changing.holder.address + 256}};
+            (void)scan_pid(changing.holder.pid, *pattern, 64, 0, limits, hint, error, &candidates);
+            bool found = false;
+            for (const auto& candidate : candidates) {
+                if (candidate.before.ends_with("document prefix ") &&
+                    candidate.address == changing.holder.address + std::string("document prefix ").size()) {
+                    found = true;
+                    if (previous) check(candidate.address == previous, "validated address remains stable");
+                    previous = candidate.address;
+                }
+            }
+            check(found, std::string("natural composition match: ") + text);
+        }
+        ::close(changing.updates); ::close(changing.acknowledgements);
+        stop_holder(changing.holder.pid);
+    }
+
+    {
+        // Two copies of the anchor: the first sits behind binary bytes, the
+        // second behind readable text. The scan must report the readable one.
+        const std::string repeated = std::string("\x01\x02", 2) + kAnchor + std::string("\x01\x02", 2) +
+                                     "readable run before the anchor " + kAnchor + " tail";
+        const Holder holder = spawn_holder(repeated, false);
         ScanError error;
-        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 256}};
-        const auto match = scan_pid(holder.pid, *needle, 64, 32, limits, hints, "hello magic ", error);
-        check(match.has_value() && match->before.ends_with("hello magic "),
-              "expect-suffix match is accepted");
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        const auto match = scan_pid(holder.pid, *anchor, 64, 32, limits, hints, error);
+        check(match.has_value() && match->before.ends_with("readable run before the anchor "),
+              std::string("the readable copy wins: ") + (match ? match->before : error.code));
+        std::vector<Match> candidates;
+        (void)scan_pid(holder.pid, *anchor, 64, 0, limits, hints, error, &candidates);
+        bool has_readable = false, has_other = false;
+        for (const auto& candidate : candidates) {
+            has_readable |= candidate.before.ends_with("readable run before the anchor ");
+            has_other |= candidate.address != (match ? match->address : 0);
+        }
+        check(has_readable && has_other, "candidate scan retains competing copies for temporal verification");
         stop_holder(holder.pid);
     }
 
@@ -146,7 +221,7 @@ int main() {
         const Holder holder = spawn_holder(text, false);
         ScanError error;
         const std::vector<Hint> hints{{holder.pid, 0x1000, 0x2000}};
-        const auto match = scan_pid(holder.pid, *needle, 64, 32, limits, hints, std::string{}, error);
+        const auto match = scan_pid(holder.pid, *anchor, 64, 32, limits, hints, error);
         check(match.has_value(), "bogus hint does not break the scan");
         stop_holder(holder.pid);
     }
@@ -156,14 +231,14 @@ int main() {
         ScanLimits tight = limits;
         tight.timeout = std::chrono::milliseconds(0);
         ScanError error;
-        const auto match = scan_pid(holder.pid, *needle, 64, 32, tight, {}, std::string{}, error);
+        const auto match = scan_pid(holder.pid, *anchor, 64, 32, tight, {}, error);
         check(!match.has_value() && error.code == "timeout", "timeout budget enforced");
         stop_holder(holder.pid);
     }
 
     if (::getuid() != 0) {
         ScanError error;
-        const auto match = scan_pid(1, *needle, 64, 32, limits, {}, std::string{}, error);
+        const auto match = scan_pid(1, *anchor, 64, 32, limits, {}, error);
         check(!match.has_value() && error.code == "foreign-pid", "root process refused");
         check(!same_uid(1), "same_uid rejects root");
     }

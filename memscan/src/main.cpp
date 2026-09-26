@@ -1,4 +1,4 @@
-#include "needle.hpp"
+#include "anchor.hpp"
 #include "scan.hpp"
 
 #include <algorithm>
@@ -8,6 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <iostream>
+#include <limits>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,28 +19,21 @@ namespace {
 
 using llavon::memscan::Hint;
 using llavon::memscan::Match;
-using llavon::memscan::Needle;
-using llavon::memscan::NeedleError;
+using llavon::memscan::Anchor;
+using llavon::memscan::AnchorError;
 using llavon::memscan::ScanError;
 using llavon::memscan::ScanLimits;
 
 struct Options {
-    std::string needle;
+    // Text to search for: what the input method recently committed at the
+    // caret. Nothing is ever written to the client.
+    std::string anchor;
     std::vector<pid_t> pids;
     std::vector<Hint> hints;
     std::size_t before = 4096;
     std::size_t after = 512;
     std::size_t max_bytes = 512ull * 1024 * 1024;
     long timeout_ms = 3000;
-    bool all_mappings = false;
-    bool list_mappings = false;
-    // Text the input method just committed; the document copy of the token
-    // sits right after it.
-    std::string expect_suffix;
-    // Scan every process owned by the caller instead of an explicit PID list.
-    // The caller and its parent are skipped so the input method's own copy of
-    // the probe token is never the match.
-    bool same_uid_all = false;
 };
 
 std::string json_escape(std::string_view input) {
@@ -83,10 +79,9 @@ std::optional<T> parse_number(std::string_view text) {
 
 void usage() {
     std::fprintf(stderr,
-                 "usage: llavon-ime-memscan --needle <text> --pid <pid> [--pid <pid>...]\n"
+                 "usage: llavon-ime-memscan --anchor <text> --pid <pid> [--pid <pid>...]\n"
                  "       [--before <bytes>] [--after <bytes>] [--max-bytes <bytes>]\n"
-                 "       [--timeout-ms <ms>] [--hint <pid>:<hexstart>-<hexend>]\n"
-                 "       [--all-mappings] [--list-mappings]\n");
+                 "       [--timeout-ms <ms>] [--hint <pid>:<hexstart>-<hexend>]\n");
 }
 
 void fail(const std::string& code, const std::string& detail, int status) {
@@ -108,9 +103,62 @@ void print_match(const Match& match) {
         match.after_bytes, match.scanned_bytes, match.truncated ? "true" : "false");
 }
 
+// A private, newline-delimited protocol for the IME-owned child. The normal
+// one-shot CLI above stays compatible with existing callers.
+void serve() {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        nlohmann::json response;
+        try {
+            if (line.size() > 65536) throw std::runtime_error("request too long");
+            const auto request = nlohmann::json::parse(line);
+            const auto text = request.at("anchor").get<std::string>();
+            AnchorError anchor_error;
+            const auto anchor = llavon::memscan::parse_anchor(text, anchor_error);
+            if (!anchor) throw std::runtime_error(anchor_error.detail);
+            const auto pids = request.at("pids").get<std::vector<int>>();
+            if (pids.empty() || pids.size() > 16) throw std::runtime_error("invalid pids");
+            const int hint_pid = request.value("hint_pid", 0);
+            const auto hint_address = request.value("hint_address", std::uintptr_t{0});
+            std::vector<Hint> hints;
+            if (hint_pid > 1 && hint_address > 0 &&
+                hint_address < std::numeric_limits<std::uintptr_t>::max() - 32768) {
+                const auto start = hint_address > 32768 ? hint_address - 32768 : 0;
+                hints.push_back({hint_pid, start, hint_address + 32768});
+            }
+            ScanLimits limits;
+            limits.timeout = std::chrono::milliseconds(250);
+            limits.max_bytes_per_pid = 128ull * 1024 * 1024;
+            nlohmann::json matches = nlohmann::json::array();
+            std::string error_code = "not-found";
+            for (const int pid : pids) {
+                ScanError error;
+                std::vector<Match> candidates;
+                (void)llavon::memscan::scan_pid(pid, *anchor, 256, 0, limits, hints,
+                                                error, &candidates);
+                for (const auto& match : candidates) {
+                    matches.push_back({{"pid", match.pid}, {"address", match.address},
+                                       {"encoding", llavon::memscan::encoding_name(match.encoding)},
+                                       {"before", match.before}});
+                }
+                if (!candidates.empty()) break;
+                if (!error.code.empty()) error_code = error.code;
+            }
+            response = {{"matches", std::move(matches)}, {"error", error_code}};
+        } catch (const std::exception& exception) {
+            response = {{"matches", nlohmann::json::array()}, {"error", "invalid-request"}};
+        }
+        std::cout << response.dump() << '\n' << std::flush;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--serve") {
+        serve();
+        return 0;
+    }
     Options options;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument = argv[index];
@@ -118,8 +166,8 @@ int main(int argc, char** argv) {
             if (index + 1 >= argc) fail("usage", std::string("missing value for ") + name, 2);
             return argv[++index];
         };
-        if (argument == "--needle") {
-            options.needle = std::string(next("--needle"));
+        if (argument == "--anchor") {
+            options.anchor = std::string(next("--anchor"));
         } else if (argument == "--pid") {
             const auto value = parse_number<long>(next("--pid"));
             if (!value || *value <= 1 || *value > 4194304) fail("usage", "invalid --pid", 2);
@@ -151,15 +199,6 @@ int main(int argc, char** argv) {
             const auto end = parse_hex(text.substr(dash + 1));
             if (!pid || !start || !end || *end <= *start) fail("usage", "invalid --hint", 2);
             options.hints.push_back(Hint{static_cast<pid_t>(*pid), *start, *end});
-        } else if (argument == "--all-mappings") {
-            options.all_mappings = true;
-        } else if (argument == "--expect-suffix") {
-            options.expect_suffix = std::string(next("--expect-suffix"));
-            if (options.expect_suffix.size() > 256) fail("usage", "--expect-suffix is too long", 2);
-        } else if (argument == "--same-uid-all") {
-            options.same_uid_all = true;
-        } else if (argument == "--list-mappings") {
-            options.list_mappings = true;
         } else if (argument == "--help" || argument == "-h") {
             usage();
             return 0;
@@ -168,43 +207,18 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (options.pids.empty() && !options.same_uid_all) fail("usage", "--pid is required", 2);
-    if (options.same_uid_all) {
-        for (const pid_t pid : llavon::memscan::same_uid_processes(64)) {
-            if (std::ranges::find(options.pids, pid) == options.pids.end()) options.pids.push_back(pid);
-        }
-        if (options.pids.empty()) fail("not-found", "no candidate processes", 1);
-    }
+    if (options.pids.empty()) fail("usage", "--pid is required", 2);
 
-    if (options.list_mappings) {
-        std::printf("{\"found\":false,\"mappings\":[");
-        bool first = true;
-        for (const pid_t pid : options.pids) {
-            for (const auto& region : llavon::memscan::list_regions(pid, options.all_mappings)) {
-                char start[32];
-                char end[32];
-                std::snprintf(start, sizeof(start), "0x%lx", static_cast<unsigned long>(region.start));
-                std::snprintf(end, sizeof(end), "0x%lx", static_cast<unsigned long>(region.end));
-                std::printf("%s{\"pid\":%d,\"start\":\"%s\",\"end\":\"%s\",\"writable\":%s}",
-                            first ? "" : ",", static_cast<int>(pid), start, end,
-                            region.writable ? "true" : "false");
-                first = false;
-            }
-        }
-        std::printf("]}\n");
-        return 0;
-    }
-
-    NeedleError needle_error;
-    const auto needle = llavon::memscan::parse_needle(options.needle, needle_error);
-    if (!needle) fail(needle_error.code, needle_error.detail, 2);
+    AnchorError anchor_error;
+    const auto anchor = llavon::memscan::parse_anchor(options.anchor, anchor_error);
+    if (!anchor) fail(anchor_error.code, anchor_error.detail, 2);
 
     ScanLimits limits;
     limits.max_bytes_per_pid = options.max_bytes;
     limits.timeout = std::chrono::milliseconds(options.timeout_ms);
-    limits.all_mappings = options.all_mappings;
 
-    ScanError last_error{"not-found", "token not found"};
+
+    ScanError last_error{"not-found", "anchor not found"};
     for (const pid_t pid : options.pids) {
         if (!llavon::memscan::same_uid(pid)) {
             last_error = {"foreign-pid", "process " + std::to_string(pid) +
@@ -212,9 +226,8 @@ int main(int argc, char** argv) {
             continue;
         }
         ScanError error;
-        const auto match = llavon::memscan::scan_pid(pid, *needle, options.before, options.after,
-                                                     limits, options.hints, options.expect_suffix,
-                                                     error);
+        const auto match = llavon::memscan::scan_pid(pid, *anchor, options.before, options.after,
+                                                     limits, options.hints, error);
         if (match) {
             print_match(*match);
             return 0;

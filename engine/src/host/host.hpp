@@ -47,13 +47,10 @@ public:
     // prediction context must not be read or sent. Main thread only.
     virtual bool is_sensitive(ContextId context) = 0;
 
-    // Memory probe support (the last-resort context source). The host inserts
-    // a probe token at the caret, removes it again, and names the processes of
-    // the focused client. Hosts that cannot do this (macOS, headless tests)
-    // keep the defaults, which disable the source. Main thread only, except
-    // remove_probe which the engine marshals itself.
-    virtual bool inject_probe(ContextId, std::u16string_view) { return false; }
-    virtual void remove_probe(ContextId, std::size_t) {}
+    // Memory probe support (the last-resort context source): the host names
+    // the processes of the focused client, the probe only reads them. Hosts
+    // that cannot do this (macOS, headless tests) keep the default, which
+    // disables the source. Main thread only.
     virtual std::vector<int> probe_processes(ContextId) { return {}; }
 };
 

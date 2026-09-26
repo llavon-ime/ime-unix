@@ -175,6 +175,8 @@ Harness::Harness(HarnessOptions options) : options_(std::move(options)) {
     engine_options.on_training_discard = options_.on_training_discard;
     engine_options.commit_correction_window = options_.commit_correction_window;
     engine_options.enable_accessibility = options_.enable_accessibility;
+    engine_options.enable_memory_context = !options_.memory_helper_path.empty();
+    if (engine_options.enable_memory_context) engine_options.config.memory_context = true;
     engine_options.transport.socket_path = options_.socket_path;
     engine_options.transport.service_path = options_.service_path;
     engine_options.transport.model_path = options_.model_path;
@@ -187,11 +189,15 @@ Harness::Harness(HarnessOptions options) : options_(std::move(options)) {
 Harness::~Harness() {
     if (engine_) engine_->detach(context_);
     engine_.reset();
+    if (!options_.memory_helper_path.empty()) ::unsetenv("LLAVON_IME_MEMSCAN_PATH");
     std::error_code error;
     fs::remove_all(temp_root_, error);
 }
 
 void Harness::apply_environment() const {
+    if (!options_.memory_helper_path.empty()) {
+        ::setenv("LLAVON_IME_MEMSCAN_PATH", options_.memory_helper_path.c_str(), 1);
+    }
     if (!options_.context_sample_path.empty()) {
         ::setenv("LLAVON_IME_CONTEXT_SAMPLE_FILE", options_.context_sample_path.c_str(), 1);
     }

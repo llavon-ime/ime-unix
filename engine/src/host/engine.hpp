@@ -122,11 +122,14 @@ private:
     void withdraw_recent_commit(ContextId context);
     protocol::PredictRequest build_predict_request(ContextId context, const InputSession& session) const;
     // Adopts a sample from a context source, stripping the composition preedit
-    // when the sample was published after the composition started.
+    // when the sample was published after the composition started. Memory
+    // samples never contain the composition (they are the text in front of the
+    // committed run), so they pass strip_preedit = false.
     std::optional<std::u16string> adopt_context_sample(const InputSession& session,
                                                        const AccessibilityContextSample& sample,
                                                        std::uint64_t base_sequence,
-                                                       std::uint64_t composition_base) const;
+                                                       std::uint64_t composition_base,
+                                                       bool strip_preedit = true) const;
     std::optional<std::u16string> strip_accessibility_preedit(const InputSession& session,
                                                               const std::u16string& sample) const;
     void apply_context_sources();
@@ -162,9 +165,6 @@ private:
     std::uint64_t memory_composition_base_ = 0;
     // The context the memory probe currently belongs to (0 = none focused).
     ContextId memory_probe_context_ = 0;
-    // Tail of the last commit; the memory probe prefers a window that ends
-    // with it because the caret sits right after it.
-    std::u16string last_committed_text_;
 };
 
 }  // namespace llavon::ime

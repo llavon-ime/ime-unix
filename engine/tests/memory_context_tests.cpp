@@ -1,7 +1,4 @@
 #include "context/memory_context.hpp"
-#include "host/engine.hpp"
-
-#include "fake_host.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -10,7 +7,6 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -19,8 +15,6 @@
 namespace llavon::ime {
 namespace {
 
-using llavon::ime::test::FakeHost;
-
 bool check(bool condition, const char* message) {
     if (!condition) std::printf("[FAIL] %s\n", message);
     return condition;
@@ -28,264 +22,212 @@ bool check(bool condition, const char* message) {
 
 template <typename Predicate>
 bool wait_for(Predicate predicate, std::chrono::milliseconds timeout = std::chrono::seconds(4)) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < until) {
         if (predicate()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return predicate();
 }
 
-// A fake helper script that answers like llavon-ime-memscan.
 class FakeHelper {
 public:
-    FakeHelper(const std::string& body, const char* name) {
-        static std::atomic<int> counter{0};
+    explicit FakeHelper(std::string mode = "stable") {
+        static std::atomic<int> serial{0};
         path_ = std::filesystem::temp_directory_path() /
-                ("llavon-ime-memscan-" + std::string(name) + "-" + std::to_string(getpid()) + "-" +
-                 std::to_string(counter.fetch_add(1)) + ".sh");
+                ("memscan-serve-test-" + std::to_string(getpid()) + "-" +
+                 std::to_string(serial++) + ".py");
+        log_ = path_.string() + ".log";
         std::ofstream script(path_);
-        script << "#!/bin/sh\n" << body << "\n";
+        script << "#!/usr/bin/env python3\n"
+               << "import json, sys\n"
+               << "with open(" << nlohmann_quote(log_) << ", 'a') as log: log.write('start\\n')\n"
+               << "for line in sys.stdin:\n"
+               << " request = json.loads(line)\n"
+               << " with open(" << nlohmann_quote(log_) << ", 'a') as log: log.write(request['anchor'] + '\\n')\n"
+               << " mode = " << nlohmann_quote(mode) << "\n"
+               << " if mode == 'denied': reply = {'matches': [], 'error': 'denied'}\n"
+               << " elif mode == 'miss': reply = {'matches': [], 'error': 'not-found'}\n"
+               << " else:\n"
+               << "  address = 4096 if mode != 'moving' else 4096 + len(request['anchor'])\n"
+               << "  before = 'document prefix ' if mode != 'changing' else 'document ' + request['anchor']\n"
+               << "  reply = {'matches': [{'pid': 4242, 'encoding': 'utf8', 'address': address, 'before': before}], 'error': 'not-found'}\n"
+               << " print(json.dumps(reply), flush=True)\n"
+               << " if mode == 'exit': sys.exit(0)\n";
         script.close();
-        std::filesystem::permissions(path_,
-                                     std::filesystem::perms::owner_exec |
-                                         std::filesystem::perms::owner_read |
-                                         std::filesystem::perms::owner_write,
+        std::filesystem::permissions(path_, std::filesystem::perms::owner_all,
                                      std::filesystem::perm_options::replace);
     }
-
     ~FakeHelper() {
         std::error_code error;
         std::filesystem::remove(path_, error);
+        std::filesystem::remove(log_, error);
+    }
+    const auto& path() const { return path_; }
+    std::string log() const {
+        std::ifstream file(log_);
+        return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
     }
 
-    const std::filesystem::path& path() const { return path_; }
-
 private:
+    static std::string nlohmann_quote(const std::string& text) {
+        // The generated script uses paths and mode names from these tests only.
+        return "'" + text + "'";
+    }
     std::filesystem::path path_;
+    std::string log_;
 };
 
 struct ProbeState {
     std::mutex mutex;
-    int inject_calls = 0;
-    int remove_calls = 0;
-    bool inject_ok = true;
+    std::string preedit = "ㄋ";
+    std::vector<int> pids{4242};
     bool sensitive = false;
-    std::u16string last_token;
 
     MemoryProbeCallbacks callbacks() {
         MemoryProbeCallbacks result;
-        result.inject = [this](std::u16string_view token) {
+        result.preedit = [this] {
             std::lock_guard lock(mutex);
-            ++inject_calls;
-            last_token = std::u16string(token);
-            return inject_ok;
+            return preedit;
         };
-        result.remove = [this](std::size_t) {
+        result.processes = [this] {
             std::lock_guard lock(mutex);
-            ++remove_calls;
+            return pids;
         };
-        result.processes = [] { return std::vector<int>{4242}; };
         result.sensitive = [this] {
             std::lock_guard lock(mutex);
             return sensitive;
         };
         return result;
     }
+    void set(std::string text) {
+        std::lock_guard lock(mutex);
+        preedit = std::move(text);
+    }
 };
 
-bool test_probe_publishes_sample() {
-    const FakeHelper helper("printf '%s\\n' '{\"found\":true,\"before\":\"hello probe\",\"after\":\"\"}'",
-                             "ok");
+bool step(MemoryContextProvider& provider, ProbeState& state, std::string text, std::size_t count) {
+    const auto previous = provider.sequence();
+    state.set(std::move(text));
+    std::this_thread::sleep_for(std::chrono::milliseconds(55));
+    provider.refresh();
+    return wait_for([&] { return provider.probe_count() >= count && provider.sequence() > previous; });
+}
+
+bool test_natural_changes_confirm_and_reuse_helper() {
+    FakeHelper helper;
     ProbeState state;
     MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "provider starts with an executable helper");
-    ok &= check(provider.availability().availability == AccessibilityAvailability::Available,
-                "a working helper reports Available");
+    bool ok = check(provider.start(), "resident helper starts");
     provider.set_active(true);
-    provider.refresh();
+    ok &= check(step(provider, state, "ㄋ", 1), "first phonetic state scanned");
+    ok &= check(!provider.latest()->usable, "a single matching string is never trusted");
+    ok &= check(step(provider, state, "ㄋㄧ", 2), "second phonetic state scanned");
+    ok &= check(!provider.latest()->usable, "one transition is not enough");
+    ok &= check(step(provider, state, "你", 3), "converted character scanned");
     ok &= check(wait_for([&] {
                     const auto sample = provider.latest();
-                    return sample.has_value() && sample->usable;
-                }),
-                "the probe publishes a usable sample");
-    const auto sample = provider.latest();
-    ok &= check(sample && sample->text == u"hello probe", "the sample carries the text before the token");
-    ok &= check(wait_for([&] {
-                    std::lock_guard lock(state.mutex);
-                    return state.remove_calls == 1;
-                }),
-                "the probe token is removed again");
-    {
-        std::lock_guard lock(state.mutex);
-        ok &= check(state.inject_calls == 1, "exactly one injection per probe");
-        ok &= check(state.last_token.size() == 16, "the token has 16 code units");
-        for (const char16_t unit : state.last_token) {
-            ok &= check(unit >= 0xE000 && unit <= 0xF8FF, "the token uses private-use code points");
-        }
-    }
-    ok &= check(provider.probe_count() == 1, "one helper run is counted");
+                    return sample && sample->usable && sample->text == u"document prefix ";
+                }), "two natural changes at one address validate context");
+    const auto log = helper.log();
+    ok &= check(log.find("ㄋ\nㄋㄧ\n你\n") != std::string::npos,
+                "helper receives every natural preedit without added characters");
+    ok &= check(log.find("start\n") == log.rfind("start\n"),
+                "all scans reuse one child process");
     provider.stop();
     return ok;
 }
 
-bool test_missing_helper_is_reported() {
-    ProbeState state;
-    MemoryContextProvider provider(64, state.callbacks(), "/nonexistent/llavon-ime-memscan");
-    bool ok = check(!provider.start(), "start fails without the helper");
-    const auto availability = provider.availability();
-    ok &= check(availability.availability == AccessibilityAvailability::Unavailable,
-                "the source reports Unavailable");
-    ok &= check(availability.detail == "helper-missing", "the missing helper detail is reported");
-    ok &= check(!provider.running(), "a refused provider is not running");
+bool test_wrong_location_never_publishes() {
+    bool ok = true;
+    for (const auto* mode : {"moving", "changing", "miss"}) {
+        FakeHelper helper(mode);
+        ProbeState state;
+        MemoryContextProvider provider(64, state.callbacks(), helper.path());
+        ok &= check(provider.start(), "helper starts");
+        provider.set_active(true);
+        ok &= step(provider, state, "ㄋ", 1);
+        ok &= step(provider, state, "ㄋㄧ", 2);
+        ok &= step(provider, state, "你", 3);
+        ok &= check(!provider.latest()->usable, "moving or unrelated copies are rejected");
+        provider.stop();
+    }
     return ok;
 }
 
-bool test_permission_denied_is_reported() {
-    const FakeHelper helper("printf '%s\\n' '{\"found\":false,\"error\":\"denied\"}'", "denied");
+bool test_focus_discards_cache() {
+    FakeHelper helper;
     ProbeState state;
     MemoryContextProvider provider(64, state.callbacks(), helper.path());
     bool ok = check(provider.start(), "provider starts");
     provider.set_active(true);
-    provider.refresh();
-    ok &= check(wait_for([&] {
-                    return provider.availability().availability == AccessibilityAvailability::Unavailable;
-                }),
-                "a denied probe marks the source unavailable");
-    ok &= check(provider.availability().detail == "permission-denied",
-                "the permission detail is surfaced for the status line");
-    const auto sample = provider.latest();
-    ok &= check(sample && !sample->usable, "a denied probe publishes an unusable sample");
-    ok &= check(wait_for([&] {
-                    std::lock_guard lock(state.mutex);
-                    return state.remove_calls == 1;
-                }),
-                "the token is removed even when the scan fails");
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(wait_for([&] { return provider.latest() && provider.latest()->usable; }),
+                "location confirmed before focus switch");
+    provider.invalidate();
+    ok &= check(provider.latest() && !provider.latest()->usable, "focus invalidates published context");
+    ok &= step(provider, state, "他", 4);
+    ok &= check(!provider.latest()->usable, "one new-state observation cannot reuse old location");
     provider.stop();
     return ok;
 }
 
-bool test_sensitive_and_inactive_skip() {
-    const FakeHelper helper("printf '%s\\n' '{\"found\":true,\"before\":\"x\"}'", "skip");
+bool test_dead_helper_does_not_crash_ime() {
+    FakeHelper helper("exit");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    // The helper exited after its reply. The next write sees a closed pipe;
+    // only that probe fails, and the following request restarts the child.
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(!provider.latest()->usable, "a restarted helper cannot certify stale candidates");
+    ok &= check(wait_for([&] { return helper.log().find("start\n", 1) != std::string::npos; }),
+                "dead helper restarted on a subsequent request");
+    provider.stop();
+    return ok;
+}
+
+bool test_skip_and_denied() {
+    FakeHelper helper("denied");
     ProbeState state;
     MemoryContextProvider provider(64, state.callbacks(), helper.path());
     bool ok = check(provider.start(), "provider starts");
     provider.set_active(false);
     provider.refresh();
     provider.set_active(true);
-    {
-        std::lock_guard lock(state.mutex);
-        state.sensitive = true;
-    }
+    state.sensitive = true;
     provider.refresh();
-    {
-        std::lock_guard lock(state.mutex);
-        ok &= check(state.inject_calls == 0, "an inactive or sensitive context is never probed");
-    }
-    ok &= check(provider.probe_count() == 0, "no helper run happens");
-    provider.stop();
-    return ok;
-}
-
-bool test_probe_is_throttled() {
-    const FakeHelper helper("printf '%s\\n' '{\"found\":true,\"before\":\"x\"}'", "throttle");
-    ProbeState state;
-    MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "provider starts");
-    provider.set_active(true);
+    state.sensitive = false;
+    state.pids.clear();
     provider.refresh();
+    ok &= check(provider.probe_count() == 0, "inactive, sensitive and unnamed clients are skipped");
+    state.pids = {4242};
+    ok &= step(provider, state, "ㄋ", 1);
     ok &= check(wait_for([&] {
-                    std::lock_guard lock(state.mutex);
-                    return state.remove_calls == 1;
-                }),
-                "the first probe completes");
-    provider.refresh();
-    {
-        std::lock_guard lock(state.mutex);
-        ok &= check(state.inject_calls == 1, "an immediate second refresh is throttled");
-    }
+                    return provider.availability().detail == "permission-denied";
+                }), "permission failure reported");
     provider.stop();
-    return ok;
-}
-
-bool test_injection_failure() {
-    const FakeHelper helper("printf '%s\\n' '{\"found\":true,\"before\":\"x\"}'", "inject-fail");
-    ProbeState state;
-    {
-        std::lock_guard lock(state.mutex);
-        state.inject_ok = false;
-    }
-    MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "provider starts");
-    provider.set_active(true);
-    provider.refresh();
-    const auto sample = provider.latest();
-    ok &= check(sample && !sample->usable, "a client that cannot carry a probe publishes nothing");
-    ok &= check(provider.probe_count() == 0, "no helper run happens without a token");
-    provider.stop();
-    return ok;
-}
-
-EngineOptions engine_options(const std::filesystem::path& helper) {
-    EngineOptions options;
-    options.table_path = LLAVON_IME_TEST_TABLE_PATH;
-    options.phrase_overrides_path =
-        std::filesystem::temp_directory_path() / ("llavon-ime-memory-overrides-" + std::to_string(getpid()) + ".json");
-    options.enable_accessibility = false;
-    options.enable_memory_context = true;
-    options.config.memory_context = true;
-    options.transport.socket_path = options.phrase_overrides_path.parent_path() / "llavon-ime-no-service.sock";
-    options.transport.auto_start = false;
-    setenv("LLAVON_IME_MEMSCAN_PATH", helper.c_str(), 1);
-    return options;
-}
-
-bool test_engine_probes_through_the_host() {
-    const FakeHelper helper("printf '%s\\n' '{\"found\":true,\"before\":\"engine context\"}'", "engine");
-    FakeHost host;
-    host.set_inject_ok(true);
-    host.set_probe_pids({4711});
-    Engine engine(engine_options(helper.path()), host);
-    const ContextId context = 7;
-    engine.attach(context);
-    engine.activate(context);
-
-    bool ok = check(host.pump_until([&] { return host.removals().size() == 1; }),
-                    "the engine injects a probe and removes it through the host");
-    const auto injected = host.injected();
-    ok &= check(injected.size() == 1 && injected.front().first == context,
-                "the host received exactly one injection");
-    if (!injected.empty()) {
-        ok &= check(injected.front().second.size() == 16, "the injected token has 16 code units");
-    }
-    const auto removals = host.removals();
-    if (!removals.empty()) {
-        ok &= check(removals.front().second == 16, "the removal covers the injected token");
-    }
-    ok &= check(engine.memory_context_state().availability == AccessibilityAvailability::Available,
-                "the engine reports the memory source as available");
-    unsetenv("LLAVON_IME_MEMSCAN_PATH");
     return ok;
 }
 
 }  // namespace
-
 }  // namespace llavon::ime
 
 int run_memory_context_tests() {
     using namespace llavon::ime;
-    if (!memory_context_supported()) {
-        std::printf("memory context tests skipped (no probe backend on this platform)\n");
-        return EXIT_SUCCESS;
-    }
+    if (!memory_context_supported()) return EXIT_SUCCESS;
     bool ok = true;
-    ok &= test_probe_publishes_sample();
-    ok &= test_missing_helper_is_reported();
-    ok &= test_permission_denied_is_reported();
-    ok &= test_sensitive_and_inactive_skip();
-    ok &= test_probe_is_throttled();
-    ok &= test_injection_failure();
-    ok &= test_engine_probes_through_the_host();
+    ok &= test_natural_changes_confirm_and_reuse_helper();
+    ok &= test_wrong_location_never_publishes();
+    ok &= test_focus_discards_cache();
+    ok &= test_dead_helper_does_not_crash_ime();
+    ok &= test_skip_and_denied();
     if (ok) std::printf("memory context tests passed\n");
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -53,8 +53,6 @@ public:
     void update_ui(ContextId context) override;
     HostContext surrounding_text(ContextId context) override;
     bool is_sensitive(ContextId context) override;
-    bool inject_probe(ContextId context, std::u16string_view token) override;
-    void remove_probe(ContextId context, std::size_t units) override;
     std::vector<int> probe_processes(ContextId context) override;
 
 private:

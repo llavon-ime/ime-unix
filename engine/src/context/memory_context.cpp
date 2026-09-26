@@ -3,17 +3,15 @@
 #include "text/utf.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <deque>
-#include <fstream>
+#include <filesystem>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
-#include <random>
+#include <ranges>
 #include <string>
 #include <thread>
 #include <utility>
@@ -24,115 +22,115 @@
 #include <poll.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <pthread.h>
 #endif
 
 namespace llavon::ime {
-
 namespace {
 
-constexpr std::size_t kTokenCodeUnits = 16;
-constexpr char32_t kTokenFirst = 0xE000;
-constexpr char32_t kTokenLast = 0xF8FF;
-constexpr auto kProbeInterval = std::chrono::milliseconds(400);
-constexpr auto kBackoffPause = std::chrono::seconds(10);
+constexpr std::size_t kAnchorUnits = 48;
+constexpr auto kFailurePause = std::chrono::seconds(2);
 constexpr std::size_t kMaxConsecutiveFailures = 3;
-constexpr auto kHelperTimeout = std::chrono::seconds(5);
-constexpr std::size_t kMaxHelperOutput = 64 * 1024;
 
 #if defined(__linux__)
+// One child per provider, owned by the IME. Only explicit same-UID target PIDs
+// are passed to it; it has no listener or shared/global service endpoint.
+class HelperProcess {
+public:
+    explicit HelperProcess(std::filesystem::path path) : path_(std::move(path)) {}
+    ~HelperProcess() { close(); }
 
-std::string to_hex(std::uintptr_t value) {
-    char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "%lx", static_cast<unsigned long>(value));
-    return buffer;
-}
-
-// Runs the helper with a stdout pipe. Returns its output, or nullopt when the
-// helper could not be started. The helper enforces its own scan budget; this
-// only guards against a stuck process.
-std::optional<std::string> run_helper(const std::filesystem::path& helper,
-                                      const std::string& token_utf8,
-                                      const std::vector<int>& processes,
-                                      int hint_pid, std::uintptr_t hint_address,
-                                      const std::string& expect_suffix) {
-    int pipe_fds[2];
-    if (::pipe(pipe_fds) != 0) return std::nullopt;
-    const pid_t child = ::fork();
-    if (child < 0) {
-        ::close(pipe_fds[0]);
-        ::close(pipe_fds[1]);
-        return std::nullopt;
-    }
-    if (child == 0) {
-        ::close(pipe_fds[0]);
-        if (::dup2(pipe_fds[1], STDOUT_FILENO) < 0) ::_exit(127);
-        ::close(pipe_fds[1]);
-        std::vector<std::string> arguments;
-        arguments.push_back(helper.string());
-        arguments.push_back("--needle");
-        arguments.push_back(token_utf8);
-        arguments.push_back("--timeout-ms");
-        arguments.push_back(processes.empty() ? "8000" : "4000");
-        if (!expect_suffix.empty()) {
-            arguments.push_back("--expect-suffix");
-            arguments.push_back(expect_suffix);
+    std::optional<nlohmann::json> request(const nlohmann::json& input) {
+        if (pid_ <= 0 && !launch()) return std::nullopt;
+        const std::string line = input.dump() + '\n';
+        std::size_t offset = 0;
+        while (offset < line.size()) {
+            pollfd descriptor{to_child_, POLLOUT, 0};
+            if (::poll(&descriptor, 1, 300) <= 0 || !(descriptor.revents & POLLOUT)) {
+                close();
+                return std::nullopt;
+            }
+            const ssize_t count = ::write(to_child_, line.data() + offset, line.size() - offset);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) {
+                close();
+                return std::nullopt;
+            }
+            offset += static_cast<std::size_t>(count);
         }
-        if (hint_pid > 0 && hint_address > 0) {
-            // A previous probe found the token here; try that window first so
-            // repeat probes stay fast.
-            const auto start = hint_address > 32768 ? hint_address - 32768 : 0;
-            arguments.push_back("--hint");
-            arguments.push_back(std::to_string(hint_pid) + ":0x" + to_hex(start) + "-0x" +
-                                to_hex(hint_address + 32768));
-        }
-        if (processes.empty()) {
-            // The client did not name its processes (XIM and friends): scan
-            // every process of the user instead.
-            arguments.push_back("--same-uid-all");
-        } else {
-            for (const int pid : processes) {
-                arguments.push_back("--pid");
-                arguments.push_back(std::to_string(pid));
+        std::string output;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+        while (output.size() < 65536 && std::chrono::steady_clock::now() < deadline) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            pollfd descriptor{from_child_, POLLIN, 0};
+            const int ready = ::poll(&descriptor, 1, std::max(1, static_cast<int>(remaining.count())));
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready <= 0 || !(descriptor.revents & POLLIN)) break;
+            char buffer[4096];
+            const ssize_t count = ::read(from_child_, buffer, sizeof(buffer));
+            if (count <= 0) break;
+            output.append(buffer, static_cast<std::size_t>(count));
+            if (const auto newline = output.find('\n'); newline != std::string::npos) {
+                auto parsed = nlohmann::json::parse(output.substr(0, newline), nullptr, false);
+                if (!parsed.is_discarded() && parsed.is_object()) return parsed;
+                break;
             }
         }
-        std::vector<char*> argv;
-        argv.reserve(arguments.size() + 1);
-        for (auto& argument : arguments) argv.push_back(argument.data());
-        argv.push_back(nullptr);
-        ::execv(argv[0], argv.data());
-        ::_exit(127);
+        close();
+        return std::nullopt;
     }
-    ::close(pipe_fds[1]);
 
-    std::string output;
-    const auto deadline = std::chrono::steady_clock::now() + kHelperTimeout;
-    for (;;) {
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   deadline - std::chrono::steady_clock::now())
-                                   .count();
-        if (remaining <= 0) {
-            ::kill(child, SIGKILL);
-            break;
+    void close() {
+        if (to_child_ >= 0) ::close(to_child_);
+        if (from_child_ >= 0) ::close(from_child_);
+        to_child_ = from_child_ = -1;
+        if (pid_ > 0) {
+            ::kill(pid_, SIGKILL);
+            int status = 0;
+            while (::waitpid(pid_, &status, 0) < 0 && errno == EINTR) {}
+            pid_ = -1;
         }
-        pollfd descriptor{pipe_fds[0], POLLIN, 0};
-        const int ready = ::poll(&descriptor, 1, static_cast<int>(std::min<long long>(remaining, 1000)));
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
-        if (ready == 0) continue;
-        char buffer[4096];
-        const ssize_t count = ::read(pipe_fds[0], buffer, sizeof(buffer));
-        if (count <= 0) break;
-        output.append(buffer, static_cast<std::size_t>(count));
-        if (output.size() > kMaxHelperOutput) break;
     }
-    ::close(pipe_fds[0]);
-    int status = 0;
-    ::waitpid(child, &status, 0);
-    return output;
-}
 
+private:
+    bool launch() {
+        int input[2], output[2];
+        if (::pipe(input) != 0) return false;
+        if (::pipe(output) != 0) {
+            ::close(input[0]);
+            ::close(input[1]);
+            return false;
+        }
+        const pid_t child = ::fork();
+        if (child == 0) {
+            ::close(input[1]);
+            ::close(output[0]);
+            if (::dup2(input[0], STDIN_FILENO) < 0 ||
+                ::dup2(output[1], STDOUT_FILENO) < 0) ::_exit(127);
+            ::close(input[0]);
+            ::close(output[1]);
+            ::execl(path_.c_str(), path_.c_str(), "--serve", nullptr);
+            ::_exit(127);
+        }
+        ::close(input[0]);
+        ::close(output[1]);
+        if (child < 0) {
+            ::close(input[1]);
+            ::close(output[0]);
+            return false;
+        }
+        pid_ = child;
+        to_child_ = input[1];
+        from_child_ = output[0];
+        return true;
+    }
+
+    std::filesystem::path path_;
+    pid_t pid_ = -1;
+    int to_child_ = -1;
+    int from_child_ = -1;
+};
 #endif
 
 }  // namespace
@@ -143,34 +141,31 @@ public:
         std::function<void(std::u16string, bool)> publish;
         std::function<void(AccessibilityAvailability, std::string)> availability;
         std::function<bool()> active;
-        std::function<size_t()> max_code_units;
+        std::function<std::size_t()> max_code_units;
+        std::function<std::uint64_t()> generation;
     };
 
-    Impl(Hooks hooks, MemoryProbeCallbacks callbacks, std::filesystem::path helper_path)
-        : hooks_(std::move(hooks)),
-          callbacks_(std::move(callbacks)),
-          helper_path_(std::move(helper_path)),
-          rng_(std::random_device{}()) {}
-
+    Impl(Hooks hooks, MemoryProbeCallbacks callbacks, std::filesystem::path path)
+        : hooks_(std::move(hooks)), callbacks_(std::move(callbacks)), helper_path_(std::move(path)) {}
     ~Impl() { stop(); }
 
     bool start() {
 #if defined(__linux__)
         std::error_code error;
-        if (helper_path_.empty() || !std::filesystem::exists(helper_path_, error)) {
-            hooks_.availability(AccessibilityAvailability::Unavailable, "helper-missing");
-            return false;
-        }
-        if (!std::filesystem::is_regular_file(helper_path_, error)) {
+        if (helper_path_.empty() || !std::filesystem::is_regular_file(helper_path_, error)) {
             hooks_.availability(AccessibilityAvailability::Unavailable, "helper-missing");
             return false;
         }
         const auto permissions = std::filesystem::status(helper_path_, error).permissions();
-        if ((permissions & std::filesystem::perms::owner_exec) == std::filesystem::perms::none) {
+        if (error || (permissions & std::filesystem::perms::owner_exec) ==
+                         std::filesystem::perms::none) {
             hooks_.availability(AccessibilityAvailability::Unavailable, "helper-not-executable");
             return false;
         }
-        if (!worker_.joinable()) worker_ = std::thread([this] { worker_loop(); });
+        if (!worker_.joinable()) {
+            stopping_ = false;
+            worker_ = std::thread([this] { worker_loop(); });
+        }
         running_ = true;
         hooks_.availability(AccessibilityAvailability::Available, "memscan");
         return true;
@@ -184,7 +179,7 @@ public:
         {
             std::lock_guard lock(mutex_);
             stopping_ = true;
-            jobs_.clear();
+            pending_.reset();
         }
         condition_.notify_all();
         if (worker_.joinable()) worker_.join();
@@ -193,119 +188,165 @@ public:
 
     bool running() const noexcept { return running_; }
 
+    void invalidate() {
+        std::lock_guard lock(mutex_);
+        ++revision_;
+        pending_.reset();
+        candidates_.clear();
+        last_anchor_.clear();
+        failures_ = 0;
+        hint_pid_ = 0;
+        hint_address_ = 0;
+        last_probe_ = {};
+        hooks_.publish({}, false);
+    }
+
     void refresh() {
-        if (!running_) return;
-        if (!hooks_.active()) return;
-        if (callbacks_.sensitive && callbacks_.sensitive()) return;
+        if (!running_ || !hooks_.active() || (callbacks_.sensitive && callbacks_.sensitive())) return;
+        const std::string preedit = callbacks_.preedit ? callbacks_.preedit() : std::string{};
+        if (preedit.empty()) return;
+        std::vector<int> pids = callbacks_.processes ? callbacks_.processes() : std::vector<int>{};
+        if (pids.empty()) return;
+        if (pids.size() > 16) pids.resize(16);
 
-        const auto now = std::chrono::steady_clock::now();
-        if (now - last_probe_ < kProbeInterval) return;
-        if (failures_ >= kMaxConsecutiveFailures && now - last_probe_ < kBackoffPause) return;
-        last_probe_ = now;
-        if (failures_ >= kMaxConsecutiveFailures) failures_ = 0;
-
-        const std::u16string token = make_token();
-        if (!callbacks_.inject || !callbacks_.inject(token)) {
-            ++failures_;
-            hooks_.publish({}, false);
-            return;
-        }
-        std::vector<int> processes = callbacks_.processes ? callbacks_.processes() : std::vector<int>{};
-        Job job;
+        std::string anchor;
         try {
-            job.token_utf8 = u16_to_utf8(token);
+            anchor = u16_to_utf8(utf16_tail(utf8_to_u16(preedit), kAnchorUnits));
         } catch (const std::exception&) {
-            callbacks_.remove(token.size());
-            hooks_.publish({}, false);
             return;
         }
-        job.token_units = token.size();
-        job.processes = std::move(processes);
-        if (callbacks_.expect_suffix) job.expect_suffix = callbacks_.expect_suffix();
-        {
-            std::lock_guard lock(mutex_);
-            if (stopping_) {
-                callbacks_.remove(job.token_units);
-                return;
-            }
-            jobs_.push_back(std::move(job));
-        }
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lock(mutex_);
+        if (stopping_ || anchor == last_anchor_) return;
+        if (failures_ >= kMaxConsecutiveFailures && now - last_probe_ < kFailurePause) return;
+        last_probe_ = now;
+        last_anchor_ = anchor;
+        pending_ = Job{std::move(anchor), std::move(pids), hooks_.generation(), revision_};
         condition_.notify_one();
     }
 
     std::size_t probe_count() const noexcept { return probes_.load(); }
 
 private:
+    struct Candidate {
+        int pid = 0;
+        std::uintptr_t address = 0;
+        std::string encoding;
+        std::string before;
+        unsigned observations = 1;
+        bool operator==(const Candidate& other) const {
+            return pid == other.pid && address == other.address && encoding == other.encoding;
+        }
+    };
     struct Job {
-        std::string token_utf8;
-        std::size_t token_units = 0;
-        std::vector<int> processes;
-        std::string expect_suffix;
+        std::string anchor;
+        std::vector<int> pids;
+        std::uint64_t generation = 0;
+        std::uint64_t revision = 0;
     };
 
-    std::u16string make_token() {
-        std::uniform_int_distribution<char32_t> distribution(kTokenFirst, kTokenLast);
-        std::u16string token;
-        token.reserve(kTokenCodeUnits);
-        for (std::size_t index = 0; index < kTokenCodeUnits; ++index) {
-            token.push_back(static_cast<char16_t>(distribution(rng_)));
-        }
-        return token;
-    }
-
     void worker_loop() {
+#if defined(__linux__)
+        // A crashed helper must report an error, not terminate fcitx5 via
+        // SIGPIPE when its input pipe is written on the next request.
+        sigset_t signals;
+        sigemptyset(&signals);
+        sigaddset(&signals, SIGPIPE);
+        pthread_sigmask(SIG_BLOCK, &signals, nullptr);
+        HelperProcess helper(helper_path_);
+#endif
         for (;;) {
             Job job;
+            int hint_pid = 0;
+            std::uintptr_t hint_address = 0;
             {
                 std::unique_lock lock(mutex_);
-                condition_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
-                if (stopping_ && jobs_.empty()) return;
-                job = std::move(jobs_.front());
-                jobs_.pop_front();
+                condition_.wait(lock, [this] { return stopping_ || pending_.has_value(); });
+                if (stopping_) return;
+                job = std::move(*pending_);
+                pending_.reset();
+                hint_pid = hint_pid_;
+                hint_address = hint_address_;
             }
-            run_job(std::move(job));
-        }
-    }
-
-    void run_job(Job job) {
-        ++probes_;
-        std::string output;
+            ++probes_;
 #if defined(__linux__)
-        const auto result = run_helper(helper_path_, job.token_utf8, job.processes, hint_pid_,
-                                       hint_address_, job.expect_suffix);
-        if (result) output = *result;
-#endif
-        const auto parsed = nlohmann::json::parse(output, nullptr, false);
-        const bool found = !parsed.is_discarded() && parsed.value("found", false);
-        if (found) {
-            const std::string before = parsed.value("before", std::string{});
+            const auto result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
+                                                {"hint_pid", hint_pid},
+                                                {"hint_address", hint_address}});
+            const auto matches = result && result->contains("matches") && (*result)["matches"].is_array()
+                                     ? (*result)["matches"] : nlohmann::json::array();
+            std::vector<Candidate> current;
             try {
-                hooks_.publish(utf16_tail(utf8_to_u16(before), hooks_.max_code_units()), true);
+                for (const auto& item : matches) {
+                    Candidate candidate{item.at("pid").get<int>(),
+                                        item.at("address").get<std::uintptr_t>(),
+                                        item.at("encoding").get<std::string>(),
+                                        item.at("before").get<std::string>()};
+                    // A few printable bytes in heap metadata are not useful
+                    // document context. Very short real documents safely
+                    // fall back to the other context sources.
+                    if (std::ranges::find(job.pids, candidate.pid) != job.pids.end() &&
+                        candidate.address > 0 && utf8_to_u16(candidate.before).size() >= 8 &&
+                        current.size() < 16) current.push_back(std::move(candidate));
+                }
             } catch (const std::exception&) {
-                hooks_.publish({}, false);
+                current.clear();
             }
-            failures_ = 0;
-            hint_pid_ = parsed.value("pid", 0);
-            const std::string address = parsed.value("address", std::string{});
-            hint_address_ = 0;
-            if (!address.empty()) {
-                hint_address_ = static_cast<std::uintptr_t>(std::strtoull(address.c_str(), nullptr, 16));
+            std::optional<Candidate> verified;
+            {
+                std::lock_guard lock(mutex_);
+                if (stopping_ || job.revision != revision_ ||
+                    job.generation != hooks_.generation() || !hooks_.active() ||
+                    pending_.has_value()) continue;
+                for (auto& candidate : current) {
+                    // The preedit *changed* between requests, but the same
+                    // location and its preceding text did not. An arbitrary
+                    // copy of a common word is never enough to publish.
+                    const auto previous = std::ranges::find(candidates_, candidate);
+                    if (previous != candidates_.end() && previous->before == candidate.before &&
+                        !candidate.before.empty()) {
+                        // Three different natural composition states (two
+                        // transitions) are required to establish a location.
+                        candidate.observations = std::min(3u, previous->observations + 1);
+                    }
+                    if (candidate.observations >= 3) {
+                        verified = candidate;
+                        break;
+                    }
+                }
+                candidates_ = std::move(current);
+                if (verified) {
+                    hint_pid_ = verified->pid;
+                    hint_address_ = verified->address;
+                    failures_ = 0;
+                } else if (!candidates_.empty()) {
+                    hint_pid_ = candidates_.front().pid;
+                    hint_address_ = candidates_.front().address;
+                    failures_ = 0;
+                } else {
+                    hint_pid_ = 0;
+                    hint_address_ = 0;
+                    ++failures_;
+                }
+                if (verified) {
+                    try {
+                        hooks_.publish(utf16_tail(utf8_to_u16(verified->before), hooks_.max_code_units()), true);
+                        hooks_.availability(AccessibilityAvailability::Available, "memscan");
+                    } catch (const std::exception&) {
+                        hooks_.publish({}, false);
+                    }
+                } else {
+                    hooks_.publish({}, false);
+                    if (!result)
+                        hooks_.availability(AccessibilityAvailability::Unavailable, "helper-failed");
+                    else if (result->value("error", std::string{}) == "denied")
+                        hooks_.availability(AccessibilityAvailability::Unavailable, "permission-denied");
+                }
             }
-            hooks_.availability(AccessibilityAvailability::Available, "memscan");
-        } else {
-            ++failures_;
-            hooks_.publish({}, false);
-            const std::string code =
-                parsed.is_discarded() ? "helper-failed" : parsed.value("error", "helper-failed");
-            if (code == "denied") {
-                hooks_.availability(AccessibilityAvailability::Unavailable, "permission-denied");
-            } else if (code == "helper-missing") {
-                hooks_.availability(AccessibilityAvailability::Unavailable, "helper-missing");
-            }
+#else
+            (void)job;
+#endif
         }
-        // The probe token must leave the document again even when the scan
-        // failed; the engine marshals this onto the main thread.
-        if (callbacks_.remove) callbacks_.remove(job.token_units);
     }
 
     Hooks hooks_;
@@ -313,18 +354,18 @@ private:
     std::filesystem::path helper_path_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
-    std::deque<Job> jobs_;
+    std::optional<Job> pending_;
+    std::vector<Candidate> candidates_;
+    std::string last_anchor_;
     std::thread worker_;
     std::atomic<bool> running_{false};
     std::atomic<std::size_t> probes_{0};
     bool stopping_ = false;
     std::size_t failures_ = 0;
-    std::chrono::steady_clock::time_point last_probe_{};
-    // Where the token was found last time, so the next probe can look there
-    // first instead of scanning everything.
     int hint_pid_ = 0;
     std::uintptr_t hint_address_ = 0;
-    std::mt19937_64 rng_;
+    std::uint64_t revision_ = 0;
+    std::chrono::steady_clock::time_point last_probe_{};
 };
 
 MemoryContextProvider::MemoryContextProvider(size_t max_code_units, MemoryProbeCallbacks callbacks,
@@ -332,24 +373,21 @@ MemoryContextProvider::MemoryContextProvider(size_t max_code_units, MemoryProbeC
     : AccessibilityContextProvider(max_code_units) {
     Impl::Hooks hooks;
     hooks.publish = [this](std::u16string text, bool usable) { publish(std::move(text), usable); };
-    hooks.availability = [this](AccessibilityAvailability availability, std::string detail) {
-        set_availability(availability, std::move(detail));
+    hooks.availability = [this](AccessibilityAvailability value, std::string detail) {
+        set_availability(value, std::move(detail));
     };
     hooks.active = [this] { return active(); };
     hooks.max_code_units = [this] { return AccessibilityContextProvider::max_code_units(); };
+    hooks.generation = [this] { return activation_generation(); };
     impl_ = std::make_unique<Impl>(std::move(hooks), std::move(callbacks), std::move(helper_path));
 }
 
 MemoryContextProvider::~MemoryContextProvider() = default;
-
 bool MemoryContextProvider::start() { return impl_->start(); }
-
 void MemoryContextProvider::stop() { impl_->stop(); }
-
 bool MemoryContextProvider::running() const noexcept { return impl_->running(); }
-
 void MemoryContextProvider::refresh() { impl_->refresh(); }
-
+void MemoryContextProvider::invalidate() { impl_->invalidate(); }
 std::size_t MemoryContextProvider::probe_count() const noexcept { return impl_->probe_count(); }
 
 bool memory_context_supported() {

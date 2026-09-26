@@ -24,14 +24,15 @@ constexpr std::size_t kChunkBytes = 4 * 1024 * 1024;
 // A window with at least this many trailing printable bytes is considered a
 // good sample and ends the scan; shorter runs are kept as the best candidate
 // while the scan continues (protocol buffers, layout caches and other copies
-// of the token can have unrelated bytes in front of them).
+// of the composition can have unrelated bytes in front of them).
 constexpr int kGoodTextRun = 8;
 
 int trailing_text_run(const std::string& text) {
+    std::vector<char32_t> codepoints;
+    if (!decode_text(text, codepoints)) return 0;
     int score = 0;
-    for (auto it = text.rbegin(); it != text.rend(); ++it) {
-        const auto value = static_cast<unsigned char>(*it);
-        if (value < 0x20 || value == 0x7F) break;
+    for (auto it = codepoints.rbegin(); it != codepoints.rend(); ++it) {
+        if (!plausible_text_codepoint(*it)) break;
         ++score;
     }
     return score;
@@ -51,7 +52,7 @@ std::optional<std::uintptr_t> parse_hex(std::string_view text) {
     return value;
 }
 
-std::vector<Region> read_regions(pid_t pid, bool all_mappings) {
+std::vector<Region> read_regions(pid_t pid) {
     std::vector<Region> regions;
     std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
     std::string line;
@@ -78,9 +79,9 @@ std::vector<Region> read_regions(pid_t pid, bool all_mappings) {
                              path.starts_with("[vsyscall]") || path.starts_with("[stack]");
         if (special) continue;
         // Anonymous mappings (including [heap]) are where freshly inserted UI
-        // text lives; file backed mappings are opt-in for debugging.
+        // text lives.
         const bool anonymous = path.empty() || path.starts_with("[heap]");
-        if (!anonymous && !all_mappings) continue;
+        if (!anonymous) continue;
 
         regions.push_back(Region{*start, *end, perms.size() > 1 && perms[1] == 'w'});
     }
@@ -230,47 +231,72 @@ std::size_t unit_size(Encoding encoding) {
     return 1;
 }
 
-}  // namespace
-
-std::vector<Region> list_regions(pid_t pid, bool all_mappings) {
-    return read_regions(pid, all_mappings);
-}
-
-std::vector<int> same_uid_processes(std::size_t limit) {
-    const std::uint64_t self = static_cast<std::uint64_t>(::getpid());
-    const std::uint64_t parent = static_cast<std::uint64_t>(::getppid());
-    std::vector<std::pair<std::uint64_t, int>> candidates;
-    std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator("/proc", error)) {
-        if (error) break;
-        const std::string name = entry.path().filename().string();
-        if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])) == 0) continue;
-        const auto pid = std::strtoull(name.c_str(), nullptr, 10);
-        if (pid <= 1 || pid == self || pid == parent) continue;
-        struct stat info {};
-        if (::stat(entry.path().c_str(), &info) != 0 || info.st_uid != ::getuid()) continue;
-        std::uint64_t rss = 0;
-        std::ifstream status(entry.path() / "status");
-        std::string line;
-        while (std::getline(status, line)) {
-            if (line.starts_with("VmRSS:")) {
-                rss = std::strtoull(line.c_str() + 6, nullptr, 10);
-                break;
+// Decodes a window and trims the heap metadata a partially readable area can
+// contribute: everything up to the last NUL before the match, nothing after
+// the first NUL behind it, and replacement characters a cut lead byte leaves.
+std::string decode_window(std::vector<std::byte> raw, Encoding encoding) {
+    std::string decoded = decode(raw, encoding);
+    // Terminal grids store a wide character as two cells: the code point and a
+    // continuation marker (U+FFFF). Noncharacters are not document text, so
+    // drop them instead of letting the trim stop there.
+    if (encoding == Encoding::Utf32Le) {
+        std::vector<char32_t> codepoints;
+        if (decode_text(decoded, codepoints)) {
+            decoded.clear();
+            for (const char32_t codepoint : codepoints) {
+                if ((codepoint & 0xFFFEu) == 0xFFFEu) continue;
+                if (codepoint >= 0xFDD0 && codepoint <= 0xFDEF) continue;
+                if (codepoint <= 0x7F) decoded.push_back(static_cast<char>(codepoint));
+                else if (codepoint <= 0x7FF) {
+                    decoded.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+                    decoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                } else if (codepoint <= 0xFFFF) {
+                    decoded.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+                    decoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+                    decoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                } else {
+                    decoded.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+                    decoded.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+                    decoded.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+                    decoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+                }
             }
         }
-        candidates.emplace_back(rss, static_cast<int>(pid));
     }
-    std::ranges::sort(candidates, [](const auto& left, const auto& right) {
-        return left.first > right.first;
-    });
-    std::vector<int> processes;
-    for (const auto& [rss, pid] : candidates) {
-        (void)rss;
-        if (processes.size() >= limit) break;
-        processes.push_back(pid);
+    if (const auto nul = decoded.rfind('\0'); nul != std::string::npos) decoded.erase(0, nul + 1);
+    // Heap neighbours are arbitrary bytes and decoding them can produce
+    // plausible-looking code points (misaligned UTF-16 turns binary into
+    // Hangul). Only the trailing run of plausible document text is what sits
+    // in front of the caret; everything before it is dropped.
+    std::vector<char32_t> codepoints;
+    if (decode_text(decoded, codepoints)) {
+        std::size_t keep = codepoints.size();
+        while (keep > 0 && plausible_text_codepoint(codepoints[keep - 1])) --keep;
+        std::size_t bytes = 0;
+        for (std::size_t index = 0; index < keep; ++index) {
+            const char32_t codepoint = codepoints[index];
+            if (codepoint <= 0x7F) bytes += 1;
+            else if (codepoint <= 0x7FF) bytes += 2;
+            else if (codepoint <= 0xFFFF) bytes += 3;
+            else bytes += 4;
+        }
+        decoded.erase(0, bytes);
     }
-    return processes;
+    if (!decoded.empty()) {
+        const std::string replacement = "\xEF\xBF\xBD";
+        while (decoded.starts_with(replacement)) decoded.erase(0, replacement.size());
+    }
+    return decoded;
 }
+
+std::string decode_after_window(std::vector<std::byte> raw, Encoding encoding) {
+    std::string decoded = decode(raw, encoding);
+    if (const auto nul = decoded.find('\0'); nul != std::string::npos) decoded.resize(nul);
+    return decoded;
+}
+
+}  // namespace
+
 
 bool same_uid(pid_t pid) {
     if (pid <= 1) return false;
@@ -279,10 +305,10 @@ bool same_uid(pid_t pid) {
     return info.st_uid == ::getuid();
 }
 
-std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t before_bytes,
+std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t before_bytes,
                               std::size_t after_bytes, const ScanLimits& limits,
-                              const std::vector<Hint>& hints, const std::string& expect_suffix,
-                              ScanError& error) {
+                              const std::vector<Hint>& hints, ScanError& error,
+                              std::vector<Match>* candidates) {
     if (!same_uid(pid)) {
         error = {"foreign-pid", "process " + std::to_string(pid) + " is not owned by this user"};
         return std::nullopt;
@@ -302,13 +328,16 @@ std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t befor
             regions.push_back(Region{hint.start, hint.end, true});
         }
     }
-    const auto heuristic = read_regions(pid, limits.all_mappings);
-    regions.insert(regions.end(), heuristic.begin(), heuristic.end());
+    // Do not even parse /proc/<pid>/maps on the common validated-hint path.
+    // Mappings are discovered only after the small hinted window missed.
+    if (regions.empty()) regions = read_regions(pid);
+    bool full_scan_added = hints.empty();
 
     std::optional<Match> best;
     int best_score = -1;
 
-    for (const auto& region : regions) {
+    for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
+        const auto& region = regions[region_index];
         std::vector<std::byte> tail;
         std::uintptr_t position = region.start;
         while (position < region.end) {
@@ -337,9 +366,9 @@ std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t befor
             area.insert(area.end(), chunk.begin(), chunk.end());
             const auto area_start = position - tail.size();
 
-            for (std::size_t index = 0; index < needle.patterns.size(); ++index) {
-                const auto& pattern = needle.patterns[index];
-                const auto encoding = needle.encodings[index];
+            for (std::size_t index = 0; index < anchor.patterns.size(); ++index) {
+                const auto& pattern = anchor.patterns[index];
+                const auto encoding = anchor.encodings[index];
                 const std::size_t unit = unit_size(encoding);
                 std::size_t search_from = 0;
                 for (;;) {
@@ -373,10 +402,6 @@ std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t befor
                                      before_raw.begin() + static_cast<std::ptrdiff_t>(before_raw.size() % unit));
                 }
 
-                Match match;
-                match.pid = pid;
-                match.encoding = encoding;
-                match.address = address;
                 if (std::getenv("MEMSCAN_DEBUG") != nullptr) {
                     std::fprintf(stderr, "hit pid=%d enc=%s addr=0x%lx before=%zu after=%zu raw=",
                                  static_cast<int>(pid), encoding_name(encoding),
@@ -387,37 +412,24 @@ std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t befor
                     }
                     std::fprintf(stderr, "\n");
                 }
+                Match match;
+                match.pid = pid;
+                match.encoding = encoding;
+                match.address = address;
                 match.before_bytes = before_raw.size();
                 match.after_bytes = after_raw.size();
                 match.scanned_bytes = scanned;
                 match.truncated = truncated;
-                match.before = decode(before_raw, encoding);
-                match.after = decode(after_raw, encoding);
-                // A window can start or end in heap metadata or padding. Text
-                // buffers are NUL-free, so trim to the last NUL before the
-                // token and the first NUL after it, handing the caller clean
-                // text (the input method takes the tail anyway).
-                if (const auto nul = match.before.rfind('\0'); nul != std::string::npos) {
-                    match.before.erase(0, nul + 1);
-                }
-                if (const auto nul = match.after.find('\0'); nul != std::string::npos) {
-                    match.after.resize(nul);
-                }
-                if (!match.before.empty()) {
-                    // Drop the replacement character a partially read lead
-                    // sequence may produce.
-                    const std::string replacement = "\xEF\xBF\xBD";
-                    while (match.before.starts_with(replacement)) {
-                        match.before.erase(0, replacement.size());
-                    }
-                }
+                match.before = decode_window(std::move(before_raw), encoding);
+                match.after = decode_after_window(std::move(after_raw), encoding);
                 const int score = trailing_text_run(match.before);
-                if (score >= kGoodTextRun) {
-                    if (expect_suffix.empty() || match.before.ends_with(expect_suffix)) return match;
-                }
-                if (!expect_suffix.empty() && match.before.ends_with(expect_suffix)) {
-                    // The caret sat right after our own commit: this is the
-                    // document copy of the token.
+                if (candidates != nullptr) {
+                    // The provider must verify a location across two distinct
+                    // natural preedit states; never turn a single nice-looking
+                    // copy into a trusted result. Bound memory and scan time.
+                    if (candidates->size() < 16) candidates->push_back(match);
+                    if (candidates->size() == 16) return std::nullopt;
+                } else if (score >= kGoodTextRun) {
                     return match;
                 }
                 if (!best || score > best_score) {
@@ -427,7 +439,7 @@ std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t befor
                 }
             }
 
-            const std::size_t overlap = needle.max_pattern_bytes > 0 ? needle.max_pattern_bytes - 1 : 0;
+            const std::size_t overlap = anchor.max_pattern_bytes > 0 ? anchor.max_pattern_bytes - 1 : 0;
             if (chunk.size() > overlap) {
                 tail.assign(chunk.end() - static_cast<std::ptrdiff_t>(overlap), chunk.end());
             } else {
@@ -436,17 +448,28 @@ std::optional<Match> scan_pid(pid_t pid, const Needle& needle, std::size_t befor
             position += request;
         }
         if (truncated) break;
+        // A validated address is a much better lead than a full-process
+        // search. Return the nearby candidates without scanning every map.
+        if (candidates != nullptr && !candidates->empty() && region_index < hints.size())
+            return std::nullopt;
+        if (region_index + 1 == regions.size() && !full_scan_added) {
+            full_scan_added = true;
+            const auto heuristic = read_regions(pid);
+            regions.insert(regions.end(), heuristic.begin(), heuristic.end());
+        }
     }
     if (best) return best;
     if (denied) {
         error = {"denied", "process memory read denied; grant CAP_SYS_PTRACE to the helper "
                             "or set kernel.yama.ptrace_scope=0"};
     } else if (truncated) {
-        error = {"budget", "token not found within the byte budget"};
+        error = {"budget", "composition not found within the byte budget"};
     } else {
-        error = {"not-found", "token not found"};
+        error = {"not-found", "composition not found"};
     }
     return std::nullopt;
 }
+
+
 
 }  // namespace llavon::memscan
