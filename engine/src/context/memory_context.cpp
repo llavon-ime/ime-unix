@@ -201,6 +201,8 @@ public:
         hint_address_ = 0;
         hint_before_.clear();
         last_probe_ = {};
+        published_usable_ = false;
+        unverified_ = 0;
         hooks_.publish({}, false);
     }
 
@@ -364,8 +366,11 @@ private:
                                      static_cast<unsigned long>(verified->address), candidates_.size());
                     try {
                         hooks_.publish(utf16_tail(utf8_to_u16(verified->before), hooks_.max_code_units()), true);
+                        published_usable_ = true;
+                        unverified_ = 0;
                         hooks_.availability(AccessibilityAvailability::Available, "memscan");
                     } catch (const std::exception&) {
+                        published_usable_ = false;
                         hooks_.publish({}, false);
                     }
                 } else if (current_job) {
@@ -374,11 +379,20 @@ private:
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified matches=%zu accepted=%zu error=%s progress=%s",
                                      job.anchor.c_str(), matches.size(), candidates_.size(),
                                      error_code.c_str(), progress.c_str());
-                    hooks_.publish({}, false);
-                    if (!result)
-                        hooks_.availability(AccessibilityAvailability::Unavailable, "helper-failed");
-                    else if (error_code == "denied")
-                        hooks_.availability(AccessibilityAvailability::Unavailable, "permission-denied");
+                    // A miss on one preedit state (client redraw lag, scan
+                    // budget) must not discard a location that natural preedit
+                    // changes already confirmed. Document changes invalidate
+                    // it explicitly; several unverified states in a row drop
+                    // it as well, so a vanished location cannot linger.
+                    if (published_usable_ && ++unverified_ >= kMaxConsecutiveFailures)
+                        published_usable_ = false;
+                    if (!published_usable_) {
+                        hooks_.publish({}, false);
+                        if (!result)
+                            hooks_.availability(AccessibilityAvailability::Unavailable, "helper-failed");
+                        else if (error_code == "denied")
+                            hooks_.availability(AccessibilityAvailability::Unavailable, "permission-denied");
+                    }
                 }
             }
 #else
@@ -404,6 +418,8 @@ private:
     int hint_pid_ = 0;
     std::uintptr_t hint_address_ = 0;
     std::string hint_before_;
+    bool published_usable_ = false;
+    std::size_t unverified_ = 0;
     std::uint64_t revision_ = 0;
     std::chrono::steady_clock::time_point last_probe_{};
 };

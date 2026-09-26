@@ -43,15 +43,18 @@ public:
         std::ofstream script(path_);
         script << "#!/usr/bin/env python3\n"
                << "import json, sys, time\n"
+               << "count = 0\n"
                << "with open(" << nlohmann_quote(log_) << ", 'a') as log: log.write('start\\n')\n"
                << "for line in sys.stdin:\n"
                << " request = json.loads(line)\n"
+               << " count += 1\n"
                << " with open(" << nlohmann_quote(log_) << ", 'a') as log: log.write(request['anchor'] + '\\n')\n"
                << " mode = " << nlohmann_quote(mode) << "\n"
                << " if mode == 'slow': time.sleep(0.15)\n"
                << " if mode == 'denied': reply = {'matches': [], 'error': 'denied'}\n"
                << " elif mode == 'miss': reply = {'matches': [], 'error': 'not-found'}\n"
                << " elif mode == 'bad-error': reply = {'matches': [], 'error': 42}\n"
+               << " elif mode == 'vanish' and count > 3: reply = {'matches': [], 'error': 'not-found'}\n"
                << " else:\n"
                << "  address = 4096 if mode != 'moving' else 4096 + len(request['anchor'])\n"
                << "  before = 'document prefix ' if mode != 'changing' else 'document ' + request['anchor']\n"
@@ -270,6 +273,37 @@ bool test_sensitive_transition_forgets_context() {
     return ok;
 }
 
+bool test_transient_miss_keeps_confirmed_context() {
+    FakeHelper helper("vanish");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(wait_for([&] { return provider.latest() && provider.latest()->usable; }),
+                "location confirmed before the miss");
+    state.set("他");
+    provider.refresh();
+    ok &= check(wait_for([&] { return provider.probe_count() >= 4; }), "missing state probed");
+    ok &= check(provider.latest() && provider.latest()->usable &&
+                    provider.latest()->text == u"document prefix ",
+                "a transient miss keeps the confirmed location");
+    state.set("他你");
+    provider.refresh();
+    ok &= check(wait_for([&] { return provider.probe_count() >= 5; }), "second missing state probed");
+    ok &= check(provider.latest() && provider.latest()->usable,
+                "a second miss still keeps the location");
+    state.set("他你好");
+    provider.refresh();
+    ok &= check(wait_for([&] { return provider.probe_count() >= 6; }), "third missing state probed");
+    ok &= check(provider.latest() && !provider.latest()->usable,
+                "three unverified states in a row drop the location");
+    provider.stop();
+    return ok;
+}
+
 bool test_bad_helper_response_does_not_crash_worker() {
     FakeHelper helper("bad-error");
     ProbeState state;
@@ -407,6 +441,7 @@ int run_memory_context_tests() {
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();
     ok &= test_sensitive_transition_forgets_context();
+    ok &= test_transient_miss_keeps_confirmed_context();
     ok &= test_bad_helper_response_does_not_crash_worker();
 #if defined(__linux__)
     ok &= test_real_scanner_terminal_grid();

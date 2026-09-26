@@ -264,6 +264,10 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         const bool allow_training = effect.training_sample && config_.collect_training_data &&
                                     !host_.is_sensitive(context);
         host_.commit(context, effect.commit);
+        // Committed text changes the document, so a location confirmed for the
+        // previous caret position no longer describes the text before the
+        // caret. The following redraw re-probes the new composition.
+        if (memory_context_) memory_context_->invalidate();
         if (allow_training) {
             try {
                 protocol::RecordCommitRequest request;
