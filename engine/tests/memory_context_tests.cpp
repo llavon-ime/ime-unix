@@ -2,12 +2,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -282,6 +284,115 @@ bool test_bad_helper_response_does_not_crash_worker() {
     return ok;
 }
 
+#if defined(__linux__)
+// A client that stores its screen as 12-byte cells: a UTF-32 code point plus
+// attributes, with wide characters repeated in a continuation cell. The
+// composition starts at a fixed address so the scanner can verify it across
+// preedit changes.
+struct GridChild {
+    pid_t pid = -1;
+    int commands = -1;
+    int responses = -1;
+};
+
+GridChild spawn_grid_child(std::string_view prefix) {
+    int commands[2], responses[2];
+    if (::pipe(commands) != 0) return {};
+    if (::pipe(responses) != 0) {
+        ::close(commands[0]);
+        ::close(commands[1]);
+        return {};
+    }
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(commands[1]);
+        ::close(responses[0]);
+        auto append_cell = [](std::string& out, char32_t codepoint, bool continuation) {
+            for (int shift = 0; shift < 32; shift += 8) {
+                out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
+            }
+            const unsigned char attributes[8] = {
+                0x00, 0x00, 0x0e, 0x00,
+                static_cast<unsigned char>(continuation ? 0x01 : 0x00), 0x04, 0x00, 0x00};
+            out.append(reinterpret_cast<const char*>(attributes), 8);
+        };
+        std::string buffer;
+        buffer.reserve(16384);
+        for (const char value : prefix) append_cell(buffer, static_cast<unsigned char>(value), false);
+        const std::size_t composition_start = buffer.size();
+        constexpr std::size_t kCompositionCells = 256;
+        for (std::size_t cell = 0; cell < kCompositionCells; ++cell) append_cell(buffer, 0, false);
+        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data() + composition_start);
+        (void)::write(responses[1], &address, sizeof(address));
+        char step = 0;
+        while (::read(commands[0], &step, 1) == 1) {
+            std::vector<char32_t> text;
+            if (step == '1') text = {0x310B};
+            if (step == '2') text = {0x310B, 0x3127};
+            if (step == '3') text = {0x4F60};
+            std::string cells;
+            for (const char32_t codepoint : text) {
+                append_cell(cells, codepoint, false);
+                append_cell(cells, codepoint, true);
+            }
+            while (cells.size() < kCompositionCells * 12) cells.push_back('\0');
+            buffer.replace(composition_start, cells.size(), cells);
+            (void)::write(responses[1], &step, 1);
+        }
+        ::_exit(0);
+    }
+    ::close(commands[0]);
+    ::close(responses[1]);
+    std::uintptr_t address = 0;
+    if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
+    return {pid, commands[1], responses[0]};
+}
+
+bool update_grid(const GridChild& child, char step) {
+    char ack = 0;
+    return ::write(child.commands, &step, 1) == 1 &&
+           ::read(child.responses, &ack, 1) == 1 && ack == step;
+}
+
+// End-to-end: the real scanner must locate the client's grid composition and
+// the provider must confirm the same address and prefix across natural
+// preedit changes. Skipped unless the built helper is named in the
+// environment, so the ordinary test run stays self-contained.
+bool test_real_scanner_terminal_grid() {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') return true;
+    const GridChild child = spawn_grid_child("document prefix ");
+    if (!check(child.pid > 0, "grid child spawned")) return false;
+    ProbeState state;
+    {
+        std::lock_guard lock(state.mutex);
+        state.pids = {static_cast<int>(child.pid)};
+    }
+    MemoryContextProvider provider(64, state.callbacks(), helper);
+    bool ok = check(provider.start(), "real helper starts");
+    provider.set_active(true);
+    auto advance = [&](char step_key, std::string preedit, std::size_t count) {
+        ok &= check(update_grid(child, step_key), "grid composition updated");
+        return step(provider, state, std::move(preedit), count);
+    };
+    ok &= advance('1', "ㄋ", 1);
+    ok &= check(!provider.latest()->usable, "one grid observation is not trusted");
+    ok &= advance('2', "ㄋㄧ", 2);
+    ok &= advance('3', "你", 3);
+    ok &= check(wait_for([&] {
+                    const auto sample = provider.latest();
+                    return sample && sample->usable && sample->text.ends_with(u"document prefix ");
+                }), "the real scanner confirms the terminal grid across preedit changes");
+    provider.stop();
+    ::kill(child.pid, SIGKILL);
+    int status = 0;
+    ::waitpid(child.pid, &status, 0);
+    ::close(child.commands);
+    ::close(child.responses);
+    return ok;
+}
+#endif
+
 }  // namespace
 }  // namespace llavon::ime
 
@@ -297,6 +408,9 @@ int run_memory_context_tests() {
     ok &= test_skip_and_denied();
     ok &= test_sensitive_transition_forgets_context();
     ok &= test_bad_helper_response_does_not_crash_worker();
+#if defined(__linux__)
+    ok &= test_real_scanner_terminal_grid();
+#endif
     if (ok) std::printf("memory context tests passed\n");
     return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -23,6 +23,12 @@ The helper is intentionally *not* a generic memory reader:
   validation;
 * scanning is bounded in bytes and wall-clock time.
 
+Text is looked for as UTF-8, UTF-16LE, UTF-32LE, and as the 12-byte cell
+grids terminal emulators such as kitty use (a UTF-32 code point followed by
+cell attributes, with wide characters repeated in a continuation cell). The
+cell-grid match verifies every following character cell by cell, so attribute
+bytes never have to match.
+
 ## Build and test
 
 ```sh

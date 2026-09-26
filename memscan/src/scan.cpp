@@ -227,22 +227,69 @@ std::string decode_utf32le(const std::vector<std::byte>& bytes) {
     return output;
 }
 
+// Screen grids interleave a UTF-32 code point with cell attributes. Only the
+// leading code point of each cell is text; the rest of the cell is dropped.
+std::string decode_utf32_cell12le(const std::vector<std::byte>& bytes) {
+    std::string output;
+    for (std::size_t offset = 0; offset + 4 <= bytes.size(); offset += 12) {
+        const auto* raw = reinterpret_cast<const unsigned char*>(bytes.data() + offset);
+        const char32_t codepoint = static_cast<char32_t>(raw[0] | (raw[1] << 8) | (raw[2] << 16) |
+                                                         (static_cast<char32_t>(raw[3]) << 24));
+        append_utf8(output, codepoint);
+    }
+    return output;
+}
+
 std::string decode(const std::vector<std::byte>& bytes, Encoding encoding) {
     switch (encoding) {
         case Encoding::Utf8: return decode_utf8(bytes);
         case Encoding::Utf16Le: return decode_utf16le(bytes);
         case Encoding::Utf32Le: return decode_utf32le(bytes);
+        case Encoding::Utf32Cell12Le: return decode_utf32_cell12le(bytes);
     }
     return {};
 }
 
+// Cell grids are addressed in 12-byte units but the code point inside a cell
+// is 4-byte aligned; the wider stride would reject every real match.
 std::size_t unit_size(Encoding encoding) {
     switch (encoding) {
         case Encoding::Utf8: return 1;
         case Encoding::Utf16Le: return 2;
         case Encoding::Utf32Le: return 4;
+        case Encoding::Utf32Cell12Le: return 4;
     }
     return 1;
+}
+
+constexpr std::size_t kCellBytes = 12;
+
+// A terminal grid stores each character in a 12-byte cell. A wide character
+// duplicates its code point in the next cell, so the walk advances two cells
+// whenever the following cell repeats the current code point. This verifies
+// the characters after the first one, whose cell supplied the byte pattern.
+bool verify_cell12(pid_t pid, std::uintptr_t address, const std::vector<char32_t>& codepoints) {
+    if (codepoints.empty()) return false;
+    const std::size_t needed = (codepoints.size() * 2 + 1) * kCellBytes;
+    const auto bytes = read_memory(pid, address, needed);
+    std::size_t offset = 0;
+    for (const char32_t codepoint : codepoints) {
+        if (offset + 4 > bytes.size()) return false;
+        const auto* raw = reinterpret_cast<const unsigned char*>(bytes.data() + offset);
+        const char32_t value = static_cast<char32_t>(raw[0] | (raw[1] << 8) | (raw[2] << 16) |
+                                                     (static_cast<char32_t>(raw[3]) << 24));
+        if (value != codepoint) return false;
+        bool wide = false;
+        if (offset + kCellBytes + 4 <= bytes.size()) {
+            const auto* next =
+                reinterpret_cast<const unsigned char*>(bytes.data() + offset + kCellBytes);
+            const char32_t following = static_cast<char32_t>(
+                next[0] | (next[1] << 8) | (next[2] << 16) | (static_cast<char32_t>(next[3]) << 24));
+            wide = following == value;
+        }
+        offset += wide ? 2 * kCellBytes : kCellBytes;
+    }
+    return true;
 }
 
 // Decodes a window and trims the heap metadata a partially readable area can
@@ -253,7 +300,7 @@ std::string decode_window(std::vector<std::byte> raw, Encoding encoding) {
     // Terminal grids store a wide character as two cells: the code point and a
     // continuation marker (U+FFFF). Noncharacters are not document text, so
     // drop them instead of letting the trim stop there.
-    if (encoding == Encoding::Utf32Le) {
+    if (encoding == Encoding::Utf32Le || encoding == Encoding::Utf32Cell12Le) {
         std::vector<char32_t> codepoints;
         if (decode_text(decoded, codepoints)) {
             decoded.clear();
@@ -413,14 +460,20 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 // in unrelated GUI processes) must not consume candidate
                 // slots or be treated as document text.
                 if (address % unit != 0) continue;
+                if (encoding == Encoding::Utf32Cell12Le &&
+                    !verify_cell12(pid, address, anchor.codepoints)) continue;
                 if (stats != nullptr) ++stats->hits;
 
-                const std::uintptr_t left_edge = std::max<std::uintptr_t>(region.start,
-                                                                          address >= before_bytes
-                                                                              ? address - before_bytes
-                                                                              : 0);
+                // Cell grids are read as whole 12-byte cells so the decoder
+                // starts at a cell boundary; other encodings use their unit.
+                const std::size_t window_unit =
+                    encoding == Encoding::Utf32Cell12Le ? kCellBytes : unit;
+                const std::size_t before_window = before_bytes - before_bytes % window_unit;
+                const std::size_t after_window = after_bytes - after_bytes % window_unit;
+                const std::uintptr_t left_edge = std::max<std::uintptr_t>(
+                    region.start, address >= before_window ? address - before_window : 0);
                 const std::uintptr_t right_edge = std::min<std::uintptr_t>(
-                    region.end, address + pattern.size() + after_bytes);
+                    region.end, address + pattern.size() + after_window);
                 auto before_raw = address > left_edge
                                       ? read_memory(pid, left_edge, address - left_edge)
                                       : std::vector<std::byte>{};
@@ -430,9 +483,9 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                                      : std::vector<std::byte>{};
                 // Keep the windows aligned to the encoding unit so the decoder
                 // starts at a code unit boundary.
-                if (before_raw.size() % unit != 0) {
+                if (before_raw.size() % window_unit != 0) {
                     before_raw.erase(before_raw.begin(),
-                                     before_raw.begin() + static_cast<std::ptrdiff_t>(before_raw.size() % unit));
+                                     before_raw.begin() + static_cast<std::ptrdiff_t>(before_raw.size() % window_unit));
                 }
 
                 if (std::getenv("MEMSCAN_DEBUG") != nullptr) {

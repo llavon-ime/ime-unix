@@ -102,6 +102,67 @@ Holder spawn_misaligned_utf16_holder(std::string_view text) {
     return {pid, address};
 }
 
+std::vector<char32_t> to_codepoints(std::string_view input) {
+    std::vector<char32_t> output;
+    std::size_t index = 0;
+    while (index < input.size()) {
+        const auto first = static_cast<unsigned char>(input[index]);
+        if (first < 0x80) {
+            output.push_back(static_cast<char32_t>(first));
+            ++index;
+        } else if ((first & 0xE0) == 0xC0) {
+            output.push_back(static_cast<char32_t>(
+                ((first & 0x1F) << 6) | (static_cast<unsigned char>(input[index + 1]) & 0x3F)));
+            index += 2;
+        } else {
+            output.push_back(static_cast<char32_t>(
+                ((first & 0x0F) << 12) |
+                ((static_cast<unsigned char>(input[index + 1]) & 0x3F) << 6) |
+                (static_cast<unsigned char>(input[index + 2]) & 0x3F)));
+            index += 3;
+        }
+    }
+    return output;
+}
+
+// A terminal grid: 12-byte cells holding a UTF-32 code point and attributes.
+// Wide characters repeat the code point in a continuation cell.
+Holder spawn_cell12_holder(std::string_view prefix, std::string_view text) {
+    int ready[2];
+    if (::pipe(ready) != 0) return {};
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(ready[0]);
+        auto append_cell = [](std::string& out, char32_t codepoint, bool continuation) {
+            for (int shift = 0; shift < 32; shift += 8) {
+                out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
+            }
+            const unsigned char attributes[8] = {
+                0x00, 0x00, 0x0e, 0x00,
+                static_cast<unsigned char>(continuation ? 0x01 : 0x00), 0x04, 0x00, 0x00};
+            out.append(reinterpret_cast<const char*>(attributes), 8);
+        };
+        std::string buffer;
+        buffer.reserve(4096);
+        for (const char value : prefix) append_cell(buffer, static_cast<unsigned char>(value), false);
+        for (const char32_t codepoint : to_codepoints(text)) {
+            append_cell(buffer, codepoint, false);
+            append_cell(buffer, codepoint, true);
+        }
+        for (int empty = 0; empty < 4; ++empty) append_cell(buffer, 0, false);
+        [[maybe_unused]] auto* heap = new std::string(std::move(buffer));
+        const auto address = reinterpret_cast<std::uintptr_t>(heap->data());
+        (void)::write(ready[1], &address, sizeof(address));
+        ::pause();
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    std::uintptr_t address = 0;
+    [[maybe_unused]] const auto got = ::read(ready[0], &address, sizeof(address));
+    ::close(ready[0]);
+    return {pid, address};
+}
+
 Holder spawn_large_holder(std::string_view text) {
     int ready[2];
     if (::pipe(ready) != 0) return {};
@@ -229,6 +290,32 @@ int main() {
                        &candidates, nullptr, &stats);
         check(stats.hits > 0 && stats.qualified == 0 && candidates.empty(),
               "a byte hit without a readable prefix is reported but not accepted");
+        stop_holder(holder.pid);
+    }
+
+    {
+        const Holder holder = spawn_cell12_holder("doc text ", kAnchor);
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 256, 0, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::Utf32Cell12Le &&
+                         item.address == holder.address + 9 * 12 &&
+                         item.before.ends_with("doc text ");
+              }), "a 12-byte cell grid is found with the text before the composition");
+        stop_holder(holder.pid);
+    }
+
+    {
+        const Holder holder = spawn_cell12_holder("doc text ", "智a慧錨點");
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 64, 0, limits, hints, error, &candidates);
+        check(std::ranges::none_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::Utf32Cell12Le;
+              }), "a grid cell whose continuation is not the composition is rejected");
         stop_holder(holder.pid);
     }
 

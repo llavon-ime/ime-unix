@@ -100,6 +100,16 @@ std::vector<std::byte> to_utf32_bytes(const std::vector<char32_t>& codepoints) {
     return bytes;
 }
 
+// Terminal grids interleave each code point with cell attributes, so the
+// bytes around a cell are not part of the text. Only the first character's
+// cell is used as the byte pattern; the rest is verified cell by cell.
+std::vector<std::byte> to_utf32_cell_bytes(char32_t codepoint) {
+    return {static_cast<std::byte>(codepoint & 0xFF),
+            static_cast<std::byte>((codepoint >> 8) & 0xFF),
+            static_cast<std::byte>((codepoint >> 16) & 0xFF),
+            static_cast<std::byte>((codepoint >> 24) & 0xFF)};
+}
+
 }  // namespace
 
 bool decode_text(const std::string& utf8, std::vector<char32_t>& output) {
@@ -125,6 +135,7 @@ const char* encoding_name(Encoding encoding) {
         case Encoding::Utf8: return "utf8";
         case Encoding::Utf16Le: return "utf16le";
         case Encoding::Utf32Le: return "utf32le";
+        case Encoding::Utf32Cell12Le: return "utf32cell12le";
     }
     return "unknown";
 }
@@ -156,9 +167,11 @@ std::optional<Anchor> parse_anchor(const std::string& utf8, AnchorError& error) 
     decode_utf8(*text, codepoints);
     Anchor anchor;
     anchor.text = *text;
-    anchor.encodings = {Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf32Le};
+    anchor.codepoints = codepoints;
+    anchor.encodings = {Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf32Le,
+                        Encoding::Utf32Cell12Le};
     anchor.patterns = {to_utf8_bytes(codepoints), to_utf16_bytes(codepoints),
-                       to_utf32_bytes(codepoints)};
+                       to_utf32_bytes(codepoints), to_utf32_cell_bytes(codepoints.front())};
     for (const auto& pattern : anchor.patterns) {
         anchor.max_pattern_bytes = std::max(anchor.max_pattern_bytes, pattern.size());
     }
