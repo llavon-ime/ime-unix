@@ -512,10 +512,6 @@ std::vector<int> ImeEngine::probe_processes(ContextId context) {
     if (input_context_ptr == nullptr) return {};
     const std::string program = input_context_ptr->program();
     if (program.empty()) return {};
-    // Mutter's X11 decoration process is not the focused document. Some
-    // Wayland/Xwayland focus transitions report it as the program; probing
-    // its memory only finds unrelated UI copies of the composition.
-    if (program == "mutter-x11-frames") return {};
 
     const auto matches = [](std::string_view candidate, std::string_view needle) {
         std::string lowered;
