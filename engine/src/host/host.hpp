@@ -52,6 +52,11 @@ public:
     // that cannot do this (macOS, headless tests) keep the default, which
     // disables the source. Main thread only.
     virtual std::vector<int> probe_processes(ContextId) { return {}; }
+
+    // Name of the focused client (e.g. "kitty", "konsole"). The memory probe
+    // uses it to try the client's own screen layout first instead of guessing
+    // every cell width. Empty when the host cannot name the client.
+    virtual std::string program(ContextId) { return {}; }
 };
 
 }  // namespace llavon::ime

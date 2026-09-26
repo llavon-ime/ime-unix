@@ -122,7 +122,8 @@ echo "Building and testing fcitx5 addon..."
 
 echo "Building and testing the memory probe helper..."
 cmake -S "${ROOT_DIR}/memscan" -B "${ROOT_DIR}/build/memscan" \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    ${LLAVON_DEBUG_FLAG}
 cmake --build "${ROOT_DIR}/build/memscan" --parallel
 ctest --test-dir "${ROOT_DIR}/build/memscan" --output-on-failure
 

@@ -411,6 +411,10 @@ void Harness::clear_context_text() {
     engine_->clear_context_text(context_);
 }
 
+std::string Harness::context_text() const {
+    return u16_to_utf8(engine_->context_text(context_));
+}
+
 void Harness::activate() {
     engine_->activate(context_);
 }

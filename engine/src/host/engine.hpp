@@ -97,6 +97,10 @@ public:
 
     // Drops any cached context text (used when a context becomes sensitive).
     void clear_context_text(ContextId context);
+
+    // Context most recently adopted for this input context (diagnostics and
+    // host-side display); empty when no source produced context.
+    std::u16string context_text(ContextId context) const;
     AccessibilityContextState accessibility_state() const;
     AccessibilityContextState memory_context_state() const;
 

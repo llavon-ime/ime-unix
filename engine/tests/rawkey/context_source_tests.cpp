@@ -143,6 +143,10 @@ RAWKEY_SUITE("memory probe leaves preedit and commit untouched", natural_memory_
         harness.key("3");
         RAWKEY_ASSERT(harness.preedit() == "你");
         RAWKEY_ASSERT(scanned("你"));
+        // The confirmation arrives after this state's prediction was already
+        // requested; the engine re-requests it so the context is used.
+        RAWKEY_ASSERT(harness.pump_until(
+            [&] { return harness.context_text() == "document prefix "; }));
         harness.expect_commit("你");
         RAWKEY_ASSERT(harness.commits().back() == "你");
     }

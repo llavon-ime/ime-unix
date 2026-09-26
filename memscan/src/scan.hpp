@@ -50,6 +50,10 @@ struct Match {
     // quality of the text in front plus a bonus for terminal screen grids,
     // which are where a terminal actually shows the composition.
     int confidence = 0;
+    // The hit continues as a longer word, so it may be a prefix of a static
+    // string rather than the caret. Such a location is only trusted when the
+    // text after it stays the same across composition states.
+    bool continuation = false;
     bool truncated = false;
 };
 
@@ -71,17 +75,23 @@ struct Region {
     std::uintptr_t start = 0;
     std::uintptr_t end = 0;
     bool writable = false;
+    bool main_heap = false;
 };
 
 // Finds the anchor in one process and returns the decoded window around it.
 // Refuses foreign PIDs, validates the caller-provided budget, and never
 // returns more than ScanLimits::window_limit bytes per side. Hints are tried
-// first so repeat probes stay fast.
+// first so repeat probes stay fast. With changed_only the scan reads only the
+// pages the client wrote since the last soft-dirty reset.
 std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t before_bytes,
                               std::size_t after_bytes, const ScanLimits& limits,
                               const std::vector<Hint>& hints, ScanError& error,
                               std::vector<Match>* candidates = nullptr,
                               std::uintptr_t* next_address = nullptr,
-                              ScanStats* stats = nullptr);
+                              ScanStats* stats = nullptr, bool changed_only = false);
+
+// Resets the target's soft-dirty bits so the next changed_only scan sees only
+// pages written from now on. Returns false when the kernel does not allow it.
+bool reset_soft_dirty(pid_t pid);
 
 }  // namespace llavon::memscan

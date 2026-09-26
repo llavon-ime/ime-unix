@@ -152,6 +152,8 @@ public:
     const std::string& phrase_overrides_path() const { return options_.phrase_overrides_path; }
     void reload_phrase_overrides();
     void clear_context_text();
+    // Context adopted for the current input context, as UTF-8.
+    std::string context_text() const;
     // Detaches the context, which closes the prediction service session.
     void detach();
     void activate();

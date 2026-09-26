@@ -32,6 +32,41 @@ namespace {
 constexpr std::size_t kAnchorUnits = 48;
 constexpr auto kFailurePause = std::chrono::seconds(2);
 constexpr std::size_t kMaxConsecutiveFailures = 3;
+// A missed scan is retried while the same preedit state is still current:
+// once for a slow client redraw, plus further attempts for a scan that ran
+// out of its byte or time budget and must resume.
+constexpr int kScanAttempts = 4;
+
+// Preference order for layouts that match at the same address: plain byte
+// encodings before cell grids, denser cells before wider ones. A wider cell
+// layout reading a denser grid sees every other character and can decode
+// plausible text from it, so its score alone is not comparable.
+int encoding_rank(std::string_view encoding) {
+    if (encoding == "utf8") return 0;
+    if (encoding == "utf16le") return 1;
+    if (encoding == "utf32le") return 2;
+    if (encoding == "utf32cell8le") return 3;
+    if (encoding == "utf32cell12le") return 4;
+    if (encoding == "utf32cell16le") return 5;
+    if (encoding == "utf32cell24le") return 6;
+    return 7;
+}
+
+// Debug logs must not contain the composition itself: the log is often shown
+// in a terminal, and a log line then becomes a stable copy of the composition
+// that the probe would happily verify. Set LLAVON_IME_DEBUG_RAW to log the
+// real text when debugging a specific case.
+#ifdef LLAVON_IME_DEBUG
+bool debug_raw_text() {
+    static const bool enabled = std::getenv("LLAVON_IME_DEBUG_RAW") != nullptr;
+    return enabled;
+}
+
+std::string masked_preedit(std::string_view preedit) {
+    if (debug_raw_text()) return std::string(preedit);
+    return "<" + std::to_string(preedit.size()) + ">";
+}
+#endif
 
 #if defined(__linux__)
 // One child per provider, owned by the IME. Only explicit same-UID target PIDs
@@ -65,7 +100,7 @@ public:
             offset += static_cast<std::size_t>(count);
         }
         std::string output;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1750);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3500);
         while (output.size() < 65536 && std::chrono::steady_clock::now() < deadline) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now());
@@ -215,6 +250,18 @@ public:
         hooks_.publish({}, false);
     }
 
+    void prime() {
+        if (!running_ || !hooks_.active()) return;
+        std::vector<int> pids = callbacks_.processes ? callbacks_.processes() : std::vector<int>{};
+        if (pids.empty()) return;
+        if (pids.size() > 16) pids.resize(16);
+        const std::string program = callbacks_.program ? callbacks_.program() : std::string{};
+        std::lock_guard lock(mutex_);
+        if (stopping_) return;
+        pending_ = Job{std::string{}, std::move(pids), hooks_.generation(), revision_, true, program};
+        condition_.notify_one();
+    }
+
     void refresh() {
         if (!running_ || !hooks_.active()) return;
         if (callbacks_.sensitive && callbacks_.sensitive()) {
@@ -229,6 +276,7 @@ public:
             return;
         }
         if (pids.size() > 16) pids.resize(16);
+        const std::string program = callbacks_.program ? callbacks_.program() : std::string{};
 
         std::string anchor;
         try {
@@ -242,11 +290,18 @@ public:
         if (failures_ >= kMaxConsecutiveFailures && now - last_probe_ < kFailurePause) return;
         last_probe_ = now;
         last_anchor_ = anchor;
-        pending_ = Job{std::move(anchor), std::move(pids), hooks_.generation(), revision_};
+        pending_ = Job{std::move(anchor), std::move(pids), hooks_.generation(), revision_, false, program};
         condition_.notify_one();
     }
 
     std::size_t probe_count() const noexcept { return probes_.load(); }
+
+    // True while a location is being verified or already confirmed, so a
+    // rendered-only composition may still be tracked.
+    bool tracking() const {
+        std::lock_guard lock(mutex_);
+        return !candidates_.empty() || hint_pid_ != 0;
+    }
 
 private:
     struct Candidate {
@@ -254,8 +309,17 @@ private:
         std::uintptr_t address = 0;
         std::string encoding;
         std::string before;
+        // The text after the composition. A hit whose following text starts
+        // as the same word may be a static string prefix; it is only trusted
+        // when this text stays the same across composition states.
+        std::string after;
+        bool continuation = false;
         int confidence = 0;
         unsigned observations = 1;
+        // States in which the location was not seen again. Clients that keep
+        // two copies of the composition (double buffering) alternate between
+        // them, so a candidate has to survive a few states to be verified.
+        unsigned carried = 0;
         bool operator==(const Candidate& other) const {
             return pid == other.pid && address == other.address && encoding == other.encoding;
         }
@@ -265,6 +329,8 @@ private:
         std::vector<int> pids;
         std::uint64_t generation = 0;
         std::uint64_t revision = 0;
+        bool prime = false;
+        std::string program;
     };
 
     void worker_loop() {
@@ -292,12 +358,20 @@ private:
                 hint_address = hint_address_;
                 hint_before = hint_before_;
             }
+#if defined(__linux__)
+            if (job.prime) {
+                // Establish the soft-dirty baseline; no anchor is scanned yet.
+                helper.request({{"prime", true}, {"anchor", ""}, {"pids", job.pids}});
+                continue;
+            }
+#endif
             ++probes_;
 #if defined(__linux__)
             std::optional<nlohmann::json> result;
             std::string error_code;
-            for (int attempt = 0; attempt < 2; ++attempt) {
+            for (int attempt = 0; attempt < kScanAttempts; ++attempt) {
                 result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
+                                         {"program", job.program},
                                          {"epoch", job.revision},
                                          {"hint_pid", hint_pid},
                                          {"hint_address", hint_address},
@@ -307,17 +381,19 @@ private:
                                  : "helper-failed";
                 const bool transient = error_code == "not-found" || error_code == "timeout" ||
                                        error_code == "budget";
-                if (!transient || attempt + 1 >= 2) break;
+                if (!transient || attempt + 1 >= kScanAttempts) break;
                 // The client may not have painted this preedit state yet, so
-                // retry once while the state is still current instead of
-                // depending on a fixed delay or on the client's redraw speed.
+                // keep retrying while the state is still current instead of
+                // giving up after one miss or depending on a fixed delay. A
+                // timeout/budget retry also resumes where the last scan
+                // stopped, because the helper keeps its cursor per PID.
                 std::unique_lock lock(mutex_);
                 if (stopping_ || job.revision != revision_ || job.anchor != last_anchor_ ||
                     pending_.has_value()) {
                     break;
                 }
                 lock.unlock();
-                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
             const auto matches = result && result->contains("matches") && (*result)["matches"].is_array()
                                      ? (*result)["matches"] : nlohmann::json::array();
@@ -328,6 +404,8 @@ private:
                                         item.at("address").get<std::uintptr_t>(),
                                         item.at("encoding").get<std::string>(),
                                         item.at("before").get<std::string>(),
+                                        item.value("after", std::string{}),
+                                        item.value("continuation", false),
                                         item.value("confidence", 0)};
                     // A few printable bytes in heap metadata are not useful
                     // document context. Very short real documents safely
@@ -340,6 +418,7 @@ private:
                 current.clear();
             }
             std::optional<Candidate> verified;
+            bool notify_published = false;
             {
                 std::lock_guard lock(mutex_);
                 if (stopping_ || job.revision != revision_ ||
@@ -356,16 +435,30 @@ private:
                     // location and its preceding text did not. An arbitrary
                     // copy of a common word is never enough to publish.
                     const auto previous = std::ranges::find(candidates_, candidate);
+                    // A location whose hit continues as a longer word may be a
+                    // static string prefix. A static string's tail shrinks as
+                    // the composition grows, while a real caret's following
+                    // text stays the same, so require that text to match too.
+                    bool after_stable = true;
+                    if (previous != candidates_.end() &&
+                        (candidate.continuation || previous->continuation)) {
+                        after_stable = previous->after == candidate.after;
+                    }
                     if (changed && previous != candidates_.end() &&
-                        previous->before == candidate.before && !candidate.before.empty()) {
+                        previous->before == candidate.before && after_stable &&
+                        !candidate.before.empty()) {
                         // Every further natural composition state at the same
-                        // location raises confidence; three (two transitions)
-                        // are required to establish it.
+                        // location raises the observation count; three (two
+                        // transitions) are required to establish it.
                         candidate.observations = std::min(8u, previous->observations + 1);
                     }
                     if (candidate.observations >= 3) {
-                        const int score = static_cast<int>(candidate.observations) * 64 +
-                                          candidate.confidence;
+                        int score = candidate.confidence * 4 +
+                                    static_cast<int>(std::min(4u, candidate.observations)) * 8;
+                        // A strong hit sits at a word boundary like a caret
+                        // does; a continuation hit may be a static prefix, so
+                        // it needs a clear lead to win over a strong one.
+                        if (candidate.continuation) score -= 32;
                         if (score > verified_score) {
                             verified_score = score;
                             verified = candidate;
@@ -380,7 +473,49 @@ private:
                     if (++misses_ >= kMaxConsecutiveFailures) candidates_.clear();
                 } else {
                     misses_ = 0;
-                    candidates_ = std::move(current);
+                    // Keep locations seen in earlier states: a client can
+                    // alternate between two copies of the composition, and
+                    // each copy is verified on its own. A location that stops
+                    // appearing is dropped after a few states.
+                    std::vector<Candidate> merged;
+                    merged.reserve(current.size() + candidates_.size());
+                    for (auto& candidate : current) {
+                        candidate.carried = 0;
+                        merged.push_back(std::move(candidate));
+                    }
+                    for (auto& previous : candidates_) {
+                        if (std::ranges::any_of(merged, [&](const Candidate& candidate) {
+                                return candidate == previous;
+                            })) {
+                            continue;
+                        }
+                        if (++previous.carried >= kMaxConsecutiveFailures) continue;
+                        if (merged.size() < 32) merged.push_back(std::move(previous));
+                    }
+                    // The same address can satisfy several cell layouts at
+                    // once (an 8-byte grid read as 16-byte cells sees every
+                    // other character, which still decodes as plausible
+                    // text). A wider layout is only trusted when its text
+                    // quality is clearly better; on a near-tie the denser,
+                    // plainer layout is the real one.
+                    std::vector<Candidate> unique;
+                    unique.reserve(merged.size());
+                    for (auto& candidate : merged) {
+                        const auto existing = std::ranges::find_if(unique, [&](const Candidate& other) {
+                            return other.pid == candidate.pid && other.address == candidate.address;
+                        });
+                        if (existing == unique.end()) {
+                            unique.push_back(std::move(candidate));
+                            continue;
+                        }
+                        const bool clearly_better =
+                            candidate.confidence > existing->confidence + 8;
+                        const bool near_tie_better =
+                            candidate.confidence + 8 >= existing->confidence &&
+                            encoding_rank(candidate.encoding) < encoding_rank(existing->encoding);
+                        if (clearly_better || near_tie_better) *existing = std::move(candidate);
+                    }
+                    candidates_ = std::move(unique);
                 }
                 if (verified && current_job) {
                     hint_pid_ = verified->pid;
@@ -402,15 +537,37 @@ private:
                     hint_before_.clear();
                     ++failures_;
                 }
-                if (verified && current_job) {
+#ifdef LLAVON_IME_DEBUG
+                if (current_job) {
+                    for (const auto& candidate : candidates_) {
+                        const char* tail = candidate.before.c_str() +
+                                           (candidate.before.size() > 60
+                                                ? candidate.before.size() - 60
+                                                : 0);
+                        LLAVON_DEBUG_LOG("MEMCTX-CAND",
+                                         "preedit=\"%s\" pid=%d encoding=%s address=0x%lx observations=%u confidence=%d before_tail=\"%s\"",
+                                         masked_preedit(job.anchor).c_str(), candidate.pid,
+                                         candidate.encoding.c_str(),
+                                         static_cast<unsigned long>(candidate.address),
+                                         candidate.observations, candidate.confidence, tail);
+                    }
+                }
+#endif
+                // A verified location is the text in front of the caret,
+                // which does not change while the composition grows. Publish
+                // it even when typing already moved on; the published callback
+                // re-requests the prediction for the composition on screen.
+                if (verified) {
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx observations=%u confidence=%d candidates=%zu",
-                                     job.anchor.c_str(), verified->pid,
+                                     masked_preedit(job.anchor).c_str(), verified->pid,
                                      static_cast<unsigned long>(verified->address),
-                                     verified->observations, verified->confidence, candidates_.size());
+                                     verified->observations, verified->confidence,
+                                     candidates_.size());
                     try {
                         hooks_.publish(utf16_tail(utf8_to_u16(verified->before), hooks_.max_code_units()), true);
                         published_usable_ = true;
                         unverified_ = 0;
+                        notify_published = true;
                         hooks_.availability(AccessibilityAvailability::Available, "memscan");
                     } catch (const std::exception&) {
                         published_usable_ = false;
@@ -420,7 +577,7 @@ private:
                     const auto progress = result && result->contains("progress")
                                               ? (*result)["progress"].dump() : std::string{};
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified matches=%zu accepted=%zu error=%s progress=%s",
-                                     job.anchor.c_str(), matches.size(), candidates_.size(),
+                                     masked_preedit(job.anchor).c_str(), matches.size(), candidates_.size(),
                                      error_code.c_str(), progress.c_str());
                     // A miss on one preedit state (client redraw lag, scan
                     // budget) must not discard a location that natural preedit
@@ -438,6 +595,9 @@ private:
                     }
                 }
             }
+            // Notify outside the lock: the engine re-requests the prediction
+            // for the composition on screen so the confirmed context is used.
+            if (notify_published && callbacks_.published) callbacks_.published();
 #else
             (void)job;
 #endif
@@ -488,7 +648,9 @@ void MemoryContextProvider::stop() { impl_->stop(); }
 bool MemoryContextProvider::running() const noexcept { return impl_->running(); }
 void MemoryContextProvider::refresh() { impl_->refresh(); }
 void MemoryContextProvider::invalidate() { impl_->invalidate(); }
+void MemoryContextProvider::prime() { impl_->prime(); }
 std::size_t MemoryContextProvider::probe_count() const noexcept { return impl_->probe_count(); }
+bool MemoryContextProvider::tracking() const { return impl_->tracking(); }
 
 bool memory_context_supported() {
 #if defined(__linux__)

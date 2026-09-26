@@ -105,10 +105,42 @@ void print_match(const Match& match) {
         match.after_bytes, match.scanned_bytes, match.truncated ? "true" : "false");
 }
 
+// The screen layout a known client uses, if the name matches one. The plain
+// byte encodings are always kept: toolkit buffers and document text are not
+// grids.
+std::vector<llavon::memscan::Encoding> preferred_encodings(std::string_view program) {
+    std::string lowered;
+    lowered.reserve(program.size());
+    for (const char value : program) {
+        lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(value))));
+    }
+    const auto has = [&](std::string_view needle) {
+        return lowered.find(needle) != std::string::npos;
+    };
+    using llavon::memscan::Encoding;
+    const std::vector<Encoding> plain{Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf32Le};
+    const auto with = [&](Encoding cell) {
+        std::vector<Encoding> list = plain;
+        list.push_back(cell);
+        return list;
+    };
+    if (has("kitty") || has("foot")) return with(Encoding::Utf32Cell12Le);
+    if (has("konsole")) return with(Encoding::Utf32Cell8Le);
+    if (has("alacritty")) return with(Encoding::Utf32Cell24Le);
+    if (has("gnome-terminal") || has("vte") || has("xfce4-terminal") ||
+        has("mate-terminal") || has("tilix") || has("terminator")) {
+        return with(Encoding::Utf32Cell8Le);
+    }
+    return {};
+}
+
 // A private, newline-delimited protocol for the IME-owned child. The normal
 // one-shot CLI above stays compatible with existing callers.
 void serve() {
     std::unordered_map<int, std::uintptr_t> next_address;
+    // A PID whose soft-dirty bits were reset once can be scanned by only
+    // reading the pages written since, instead of its whole address space.
+    std::unordered_map<int, bool> changed_only;
     std::uint64_t epoch = 0;
     std::size_t next_pid_index = 0;
     std::string line;
@@ -117,12 +149,47 @@ void serve() {
         try {
             if (line.size() > 65536) throw std::runtime_error("request too long");
             const auto request = nlohmann::json::parse(line);
+            const auto pids = request.at("pids").get<std::vector<int>>();
+            if (pids.empty() || pids.size() > 16) throw std::runtime_error("invalid pids");
+            // Priming only resets the soft-dirty baseline, so the first real
+            // scan is a changed-pages scan instead of a full one.
+            if (request.value("prime", false)) {
+                nlohmann::json primed = nlohmann::json::array();
+                for (const int pid : pids) {
+                    const bool ready = llavon::memscan::reset_soft_dirty(pid);
+                    changed_only[pid] = ready;
+                    if (ready) primed.push_back(pid);
+                }
+#ifdef LLAVON_IME_DEBUG
+                std::fprintf(stderr, "[prime] pids=%zu ready=%zu\n", pids.size(), primed.size());
+#endif
+                response = {{"matches", nlohmann::json::array()}, {"error", ""},
+                            {"primed", std::move(primed)}};
+                // The outer write is skipped by the continue.
+                std::cout << response.dump() << '\n' << std::flush;
+                continue;
+            }
             const auto text = request.at("anchor").get<std::string>();
             AnchorError anchor_error;
             const auto anchor = llavon::memscan::parse_anchor(text, anchor_error);
             if (!anchor) throw std::runtime_error(anchor_error.detail);
-            const auto pids = request.at("pids").get<std::vector<int>>();
-            if (pids.empty() || pids.size() > 16) throw std::runtime_error("invalid pids");
+            // A known client stores its screen with one cell width; trying
+            // only that width avoids reading the same bytes with a wrong
+            // stride, which produces plausible but wrong text.
+            const auto program = request.value("program", std::string{});
+            const auto preferred = preferred_encodings(program);
+            std::optional<Anchor> narrowed;
+            if (!preferred.empty()) {
+                narrowed = anchor;
+                narrowed->patterns.clear();
+                narrowed->encodings.clear();
+                for (std::size_t index = 0; index < anchor->encodings.size(); ++index) {
+                    if (std::ranges::find(preferred, anchor->encodings[index]) != preferred.end()) {
+                        narrowed->encodings.push_back(anchor->encodings[index]);
+                        narrowed->patterns.push_back(anchor->patterns[index]);
+                    }
+                }
+            }
             const auto request_epoch = request.value("epoch", std::uint64_t{0});
             if (request_epoch != epoch) {
                 next_address.clear();
@@ -144,11 +211,13 @@ void serve() {
                                  hint_address, hint_before});
             }
             ScanLimits limits;
-            limits.max_bytes_per_pid = 512ull * 1024 * 1024;
+            // Effectively a full scan of the writable address space; the
+            // per-request deadline still bounds the work.
+            limits.max_bytes_per_pid = 8ull * 1024 * 1024 * 1024;
             nlohmann::json matches = nlohmann::json::array();
             nlohmann::json progress = nlohmann::json::array();
             std::string error_code = "not-found";
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
             const auto start_pid = next_pid_index % pids.size();
             next_pid_index = (start_pid + 1) % pids.size();
             for (std::size_t index = 0; index < pids.size(); ++index) {
@@ -156,21 +225,32 @@ void serve() {
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now());
                 if (remaining.count() <= 0 || matches.size() >= 32) break;
-                limits.timeout = std::min(remaining, std::chrono::milliseconds(600));
+                limits.timeout = std::min(remaining, std::chrono::milliseconds(1500));
                 ScanError error;
                 llavon::memscan::ScanStats stats;
                 std::vector<Match> candidates;
                 // Enough context for the model: 1024 bytes is 85 terminal
                 // grid cells, or 1024/512/256 units in the byte encodings.
-                // A small window after the match tells the scanner whether
-                // the hit continues as a longer word (not the caret).
-                (void)llavon::memscan::scan_pid(pid, *anchor, 1024, 16, limits, hints,
-                                                error, &candidates, &next_address[pid], &stats);
+                (void)llavon::memscan::scan_pid(pid, narrowed ? *narrowed : *anchor, 1024, 16,
+                                                limits, hints, error, &candidates,
+                                                &next_address[pid], &stats, changed_only[pid]);
+                if (narrowed && candidates.empty()) {
+                    // The client's layout may differ from the table; try every
+                    // encoding before giving up on this state.
+                    (void)llavon::memscan::scan_pid(pid, *anchor, 1024, 16, limits, hints, error,
+                                                    &candidates, &next_address[pid], &stats,
+                                                    changed_only[pid]);
+                }
+                // The first request for a PID is a full scan; reset afterwards
+                // so later requests only read what the client writes. A
+                // changed-only scan resets internally, right after reading the
+                // dirty set. Without permission to reset, fall back to
+                // scanning everything each time.
+                if (!changed_only[pid]) {
+                    changed_only[pid] = llavon::memscan::reset_soft_dirty(pid);
+                }
                 progress.push_back({{"pid", pid}, {"next_address", next_address[pid]},
                                     {"hits", stats.hits}, {"qualified", stats.qualified}});
-                // One process may hold many display/protocol copies. Keep a
-                // bounded share from each named PID so another client process
-                // with the real document buffer can still be considered.
                 std::ranges::stable_sort(candidates, [&](const Match& left, const Match& right) {
                     const bool left_hint = left.pid == hint_pid && left.address == hint_address &&
                                            left.before == hint_before && !hint_before.empty();
@@ -188,7 +268,9 @@ void serve() {
                     matches.push_back({{"pid", match.pid}, {"address", match.address},
                                        {"encoding", llavon::memscan::encoding_name(match.encoding)},
                                        {"confidence", match.confidence},
-                                       {"before", match.before}});
+                                       {"before", match.before},
+                                       {"after", match.after},
+                                       {"continuation", match.continuation}});
                 }
                 if (!error.code.empty()) error_code = error.code;
             }

@@ -23,11 +23,20 @@ The helper is intentionally *not* a generic memory reader:
   validation;
 * scanning is bounded in bytes and wall-clock time.
 
-Text is looked for as UTF-8, UTF-16LE, UTF-32LE, and as the 12-byte cell
-grids terminal emulators such as kitty use (a UTF-32 code point followed by
-cell attributes, with wide characters repeated in a continuation cell). The
-cell-grid match verifies every following character cell by cell, so attribute
-bytes never have to match.
+Text is looked for as UTF-8, UTF-16LE, UTF-32LE, and as the cell grids
+terminal emulators use: 8-byte cells (VTE, st), 12-byte cells (kitty, foot),
+16-byte cells (Konsole), and 24-byte cells (Alacritty). Each cell starts with
+a UTF-32 code point followed by attributes; wide characters use a repeated
+code point, a spacer above the Unicode range, or a blank continuation cell,
+and the match walks the following cells so attribute bytes never have to
+match. A hit whose following text continues the same word may be a prefix of
+a static string rather than the caret, so it is kept as a continuation
+candidate and only trusted when the text after it stays the same across
+composition states; a static string's tail shrinks as the composition grows.
+This is what lets the probe find a caret in the middle of existing text.
+The engine's raw-key suite `memory formats validate through raw keys`
+validates every format end-to-end when `LLAVON_IME_TEST_MEMSCAN` names a
+built helper.
 
 ## Build and test
 
@@ -51,7 +60,13 @@ The one-shot CLI still returns the best matching window. The IME's private
 bounded list of candidate matches. It is a child process owned by the IME,
 not a system service. Requests name explicit PIDs and may include a cached
 `hint_pid`/`hint_address`/`hint_before` only after a location is confirmed.
-A nearby but different copy does not prevent the fallback full scan.
+A nearby but different copy does not prevent the fallback full scan. A
+`{"prime": true, "pids": [...]}` request only resets the soft-dirty baseline
+so the first real scan is a changed-pages scan instead of a full one; the
+input method sends it when a client gets focus. The first scan after a prime
+does not trust an empty dirty set, because the client may have written its
+first composition before the baseline was reset; that one request keeps the
+full region list.
 
 Output is one JSON object on stdout:
 
@@ -69,10 +84,10 @@ reported as `{"found":false,"error":"denied"}`, which the engine surfaces as
 `--hint <pid>:<start>-<end>` points the one-shot scanner at a region to try
 first. The resident mode only uses a previously confirmed location as a hint.
 
-Building the fcitx5 addon with `-DLLAVON_IME_DEBUG=ON` enables `[CTX]` and
-`[MEMCTX]` lines on fcitx5 stderr. Setting `MEMSCAN_DEBUG=1` in fcitx5's
-environment also prints raw bytes around scanner hits to that same stderr;
-those bytes may include private document text.
+Building with `-DLLAVON_IME_DEBUG=ON` (the same switch the engine and the
+fcitx5 addon use, set by `LLAVON_IME_DEBUG=1 scripts/build-linux.sh`) enables
+`[CTX]`/`[MEMCTX]` lines on fcitx5 stderr, raw bytes around scanner hits, and
+soft-dirty scan timings; those bytes may include private document text.
 
 ## Permission
 

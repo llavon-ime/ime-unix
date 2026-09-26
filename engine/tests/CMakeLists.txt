@@ -55,6 +55,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/context_source_tests.cpp
     rawkey/hsu_layout_tests.cpp
     rawkey/lifecycle_tests.cpp
+    rawkey/memory_format_tests.cpp
     rawkey/phrase_override_tests.cpp
     rawkey/prediction_integration_tests.cpp
     rawkey/punctuation_tests.cpp

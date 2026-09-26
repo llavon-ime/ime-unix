@@ -9,6 +9,9 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 option(LLAVON_IME_MEMSCAN_BUILD_TESTS "Build the memscan self tests" ON)
+# Same switch as the engine and the fcitx5 addon; off by default so the scan
+# loop stays clean.
+option(LLAVON_IME_DEBUG "Compile in debug logging (LLAVON_DEBUG_LOG)" OFF)
 
 add_library(memscan_core STATIC
     src/anchor.cpp
@@ -22,6 +25,9 @@ set_target_properties(memscan_core PROPERTIES
     CXX_EXTENSIONS NO
 )
 target_compile_options(memscan_core PRIVATE -Wall -Wextra -Wpedantic)
+if(LLAVON_IME_DEBUG)
+    target_compile_definitions(memscan_core PRIVATE LLAVON_IME_DEBUG=1)
+endif()
 
 add_executable(llavon-ime-memscan src/main.cpp)
 find_package(nlohmann_json CONFIG REQUIRED)
@@ -32,6 +38,9 @@ set_target_properties(llavon-ime-memscan PROPERTIES
     CXX_EXTENSIONS NO
 )
 target_compile_options(llavon-ime-memscan PRIVATE -Wall -Wextra -Wpedantic)
+if(LLAVON_IME_DEBUG)
+    target_compile_definitions(llavon-ime-memscan PRIVATE LLAVON_IME_DEBUG=1)
+endif()
 target_link_libraries(llavon-ime-memscan PRIVATE memscan_core nlohmann_json::nlohmann_json)
 
 install(TARGETS llavon-ime-memscan RUNTIME DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/llavon-ime")

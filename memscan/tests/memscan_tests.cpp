@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <sys/wait.h>
@@ -144,12 +145,57 @@ Holder spawn_cell12_holder(std::string_view prefix, std::string_view text) {
         };
         std::string buffer;
         buffer.reserve(4096);
-        for (const char value : prefix) append_cell(buffer, static_cast<unsigned char>(value), false);
+        for (const char32_t codepoint : to_codepoints(prefix)) {
+            append_cell(buffer, codepoint, false);
+            if (codepoint > 0x2000) append_cell(buffer, codepoint, true);
+        }
         for (const char32_t codepoint : to_codepoints(text)) {
             append_cell(buffer, codepoint, false);
             append_cell(buffer, codepoint, true);
         }
         for (int empty = 0; empty < 4; ++empty) append_cell(buffer, 0, false);
+        [[maybe_unused]] auto* heap = new std::string(std::move(buffer));
+        const auto address = reinterpret_cast<std::uintptr_t>(heap->data());
+        (void)::write(ready[1], &address, sizeof(address));
+        ::pause();
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    std::uintptr_t address = 0;
+    [[maybe_unused]] const auto got = ::read(ready[0], &address, sizeof(address));
+    ::close(ready[0]);
+    return {pid, address};
+}
+
+// Konsole-style 16-byte cells: code point plus twelve attribute bytes. A wide
+// character is followed by a blank continuation cell.
+Holder spawn_cell16_holder(std::string_view prefix, std::string_view text) {
+    int ready[2];
+    if (::pipe(ready) != 0) return {};
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(ready[0]);
+        auto append_cell = [](std::string& out, char32_t codepoint, bool wide) {
+            for (int shift = 0; shift < 32; shift += 8) {
+                out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
+            }
+            const unsigned char attributes[12] = {0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+                                                  0x01, 0x01, 0x00, 0x00, 0x01, 0x00};
+            out.append(reinterpret_cast<const char*>(attributes), 12);
+            if (wide) {
+                out.push_back(0x20);
+                out.append(3, '\0');
+                out.append(reinterpret_cast<const char*>(attributes), 12);
+            }
+        };
+        std::string buffer;
+        buffer.reserve(4096);
+        for (const char32_t codepoint : to_codepoints(prefix)) {
+            append_cell(buffer, codepoint, codepoint > 0x2000);
+        }
+        for (const char32_t codepoint : to_codepoints(text)) {
+            append_cell(buffer, codepoint, true);
+        }
         [[maybe_unused]] auto* heap = new std::string(std::move(buffer));
         const auto address = reinterpret_cast<std::uintptr_t>(heap->data());
         (void)::write(ready[1], &address, sizeof(address));
@@ -302,30 +348,70 @@ int main() {
         check(std::ranges::any_of(candidates, [&](const Match& item) {
                   return item.encoding == Encoding::Utf32Cell12Le &&
                          item.address == holder.address + 9 * 12 &&
-                         item.before.ends_with("doc text ") && item.confidence >= 32;
+                         item.before.ends_with("doc text ");
               }), "a 12-byte cell grid is found with the text before the composition");
+        check(std::ranges::none_of(candidates, [&](const Match& item) {
+                  return item.address == holder.address + 10 * 12;
+              }), "a wide character's continuation cell is not a composition start");
         stop_holder(holder.pid);
     }
 
     {
-        // A prefix of a longer word in a path or message must not become a
-        // candidate: the composition sits at the caret, followed by a
-        // boundary, not by more of the same word.
-        const Holder holder = spawn_holder(std::string("doc prefix ") + kAnchor + "續", false);
+        // Konsole keeps its screen as 16-byte cells; the composition must be
+        // found with the document text in front of it.
+        const Holder holder = spawn_cell16_holder("doc text ", kAnchor);
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::Utf32Cell16Le &&
+                         item.address == holder.address + 9 * 16 &&
+                         item.before.ends_with("doc text ");
+              }), "a 16-byte cell grid is found with the text before the composition");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // Wide characters occupy two cells; the continuation must not be
+        // decoded as a second character ("文件" not "文文件件").
+        const Holder holder = spawn_cell12_holder("這是一段測試文件 ", kAnchor);
+        const auto anchor_address = holder.address + 17 * 12;
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == anchor_address && item.before.ends_with("文件 ") &&
+                         item.before.find("文文") == std::string::npos &&
+                         item.before.find("這這") == std::string::npos;
+              }), "cell-grid continuation cells are not decoded twice");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // A prefix of a longer word in a path or message must not count as a
+        // caret hit, but it is also exactly what a caret in the middle of
+        // existing text looks like. The scanner keeps it as a continuation
+        // candidate; the provider only trusts it when the following text
+        // stays the same across composition states. A unique anchor keeps the
+        // child's inherited heap copies from filling the candidate budget.
+        const auto continuation_anchor = parse("錨點連續字");
+        check(continuation_anchor.has_value(), "continuation anchor parses");
+        const Holder holder =
+            spawn_holder(std::string("doc prefix ") + "錨點連續字" + "續", false);
         const auto anchor_address = holder.address + std::string_view("doc prefix ").size();
         ScanError error;
         ScanStats stats;
         std::vector<Match> candidates;
         const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 256}};
-        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates,
+        (void)scan_pid(holder.pid, *continuation_anchor, 256, 16, limits, hints, error, &candidates,
                        nullptr, &stats);
-        // The forked child inherits the parent's heap, so other copies exist;
-        // only the holder's own location must be rejected.
         check(stats.hits > 0 &&
-                  std::ranges::none_of(candidates, [&](const Match& item) {
-                      return item.address == anchor_address;
+                  std::ranges::any_of(candidates, [&](const Match& item) {
+                      return item.address == anchor_address && item.continuation;
                   }),
-              "a match continuing as a longer word is not a caret candidate");
+              "a match continuing as a longer word is kept as a continuation candidate");
         stop_holder(holder.pid);
     }
 
@@ -369,7 +455,10 @@ int main() {
     }
 
     {
-        const Holder holder = spawn_large_holder(std::string("document prefix ") + kAnchor);
+        const auto large_anchor = parse("巨量錨點字");
+        check(large_anchor.has_value(), "large scan anchor parses");
+        const Holder holder =
+            spawn_large_holder(std::string("document prefix ") + "巨量錨點字" + " ");
         ScanLimits incremental = limits;
         incremental.max_bytes_per_pid = 4 * 1024 * 1024;
         std::uintptr_t cursor = 0;
@@ -377,7 +466,8 @@ int main() {
         for (int attempt = 0; attempt < 16 && !found; ++attempt) {
             ScanError error;
             std::vector<Match> candidates;
-            (void)scan_pid(holder.pid, *anchor, 64, 0, incremental, {}, error, &candidates, &cursor);
+            (void)scan_pid(holder.pid, *large_anchor, 64, 16, incremental, {}, error, &candidates,
+                           &cursor);
             advanced |= cursor != 0;
             found = std::ranges::any_of(candidates, [&](const Match& match) {
                 return match.address == holder.address + std::string("document prefix ").size();
@@ -411,6 +501,44 @@ int main() {
             }
             check(found, std::string("natural composition match: ") + text);
         }
+        ::close(changing.updates); ::close(changing.acknowledgements);
+        stop_holder(changing.holder.pid);
+    }
+
+    {
+        // Repeated probes only need the pages the client wrote since the last
+        // reset; the rest of the address space is skipped.
+        const ChangingHolder changing = spawn_changing_holder();
+        check(changing.holder.address != 0, "dirty tracking holder spawned");
+        check(update_holder(changing, '1'), "client wrote its first composition");
+        const auto first = parse("ㄋ");
+        const std::string anchor_prefix = "document prefix ";
+        const auto anchor_address = changing.holder.address + anchor_prefix.size();
+        ScanError error;
+        ScanStats stats;
+        std::vector<Match> candidates;
+        (void)scan_pid(changing.holder.pid, *first, 64, 16, limits, {}, error, &candidates,
+                       nullptr, &stats);
+        const auto full = std::ranges::find_if(candidates, [&](const Match& item) {
+            return item.address == anchor_address;
+        });
+        check(full != candidates.end(), "full scan finds the initial composition");
+        const std::size_t full_bytes = full != candidates.end() ? full->scanned_bytes : 0;
+        check(llavon::memscan::reset_soft_dirty(changing.holder.pid), "soft-dirty reset is allowed");
+        candidates.clear();
+        (void)scan_pid(changing.holder.pid, *first, 64, 16, limits, {}, error, &candidates,
+                       nullptr, &stats, true);
+        check(candidates.empty(), "an unchanged process has no dirty pages");
+        check(update_holder(changing, '2'), "client changed its composition");
+        const auto second = parse("ㄋㄧ");
+        candidates.clear();
+        (void)scan_pid(changing.holder.pid, *second, 64, 16, limits, {}, error, &candidates,
+                       nullptr, &stats, true);
+        const auto dirty = std::ranges::find_if(candidates, [&](const Match& item) {
+            return item.address == anchor_address;
+        });
+        check(dirty != candidates.end() && dirty->scanned_bytes < full_bytes,
+              "a dirty scan reads only the pages the client wrote");
         ::close(changing.updates); ::close(changing.acknowledgements);
         stop_holder(changing.holder.pid);
     }

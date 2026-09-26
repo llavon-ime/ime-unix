@@ -507,6 +507,12 @@ bool ImeEngine::is_sensitive(ContextId context) {
     return input_context_ptr->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive);
 }
 
+std::string ImeEngine::program(ContextId context) {
+    auto* input_context_ptr = input_context(context);
+    if (input_context_ptr == nullptr) return {};
+    return input_context_ptr->program();
+}
+
 std::vector<int> ImeEngine::probe_processes(ContextId context) {
     auto* input_context_ptr = input_context(context);
     if (input_context_ptr == nullptr) return {};

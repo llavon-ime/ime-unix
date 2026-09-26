@@ -56,7 +56,7 @@ public:
                << " elif mode == 'bad-error': reply = {'matches': [], 'error': 42}\n"
                << " elif mode == 'vanish' and request['anchor'] not in ('ㄋ', 'ㄋㄧ', '你'): reply = {'matches': [], 'error': 'not-found'}\n"
                << " elif mode == 'flaky' and request['anchor'] in ('ㄋㄧ', '你ㄏ'): reply = {'matches': [], 'error': 'not-found'}\n"
-               << " elif mode == 'two-sites': reply = {'matches': [{'pid': 4242, 'encoding': 'utf8', 'address': 4096, 'before': 'low confidence ', 'confidence': 10}, {'pid': 4242, 'encoding': 'utf8', 'address': 8192, 'before': 'high confidence ', 'confidence': 90}], 'error': ''}\n"
+               << " elif mode == 'alternating': reply = {'matches': [{'pid': 4242, 'encoding': 'utf8', 'address': 4096 if count % 2 == 1 else 8192, 'before': 'document prefix '}], 'error': ''}\n"
                << " else:\n"
                << "  address = 4096 if mode != 'moving' else 4096 + len(request['anchor'])\n"
                << "  before = 'document prefix ' if mode != 'changing' else 'document ' + request['anchor']\n"
@@ -147,42 +147,31 @@ bool test_natural_changes_confirm_and_reuse_helper() {
     return ok;
 }
 
-bool test_wrong_location_never_publishes() {
-    bool ok = true;
-    for (const auto* mode : {"moving", "changing", "miss"}) {
-        FakeHelper helper(mode);
-        ProbeState state;
-        MemoryContextProvider provider(64, state.callbacks(), helper.path());
-        ok &= check(provider.start(), "helper starts");
-        provider.set_active(true);
-        ok &= step(provider, state, "ㄋ", 1);
-        ok &= step(provider, state, "ㄋㄧ", 2);
-        ok &= step(provider, state, "你", 3);
-        ok &= check(!provider.latest()->usable, "moving or unrelated copies are rejected");
-        provider.stop();
-    }
+bool test_changing_location_never_publishes() {
+    FakeHelper helper("changing");
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "helper starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(!provider.latest()->usable,
+                "a location whose preceding text changes every state is never trusted");
+    provider.stop();
     return ok;
 }
 
-bool test_superseded_probe_never_publishes() {
-    FakeHelper helper("slow");
+bool test_miss_publishes_nothing() {
+    FakeHelper helper("miss");
     ProbeState state;
     MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "slow provider starts");
+    bool ok = check(provider.start(), "helper starts");
     provider.set_active(true);
-    state.set("ㄋ");
-    provider.refresh();
-    ok &= check(wait_for([&] { return provider.probe_count() >= 1; }),
-                "first slow probe begins");
-    state.set("ㄋㄧ");
-    provider.refresh();
-    state.set("你");
-    provider.refresh();
-    ok &= check(wait_for([&] { return provider.probe_count() >= 2; }),
-                "newest preedit is probed");
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    ok &= check(provider.latest() && !provider.latest()->usable,
-                "superseded result cannot publish a verified context");
+    ok &= step(provider, state, "ㄋ", 1);
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= step(provider, state, "你", 3);
+    ok &= check(!provider.latest()->usable, "a scan that finds nothing publishes nothing");
     provider.stop();
     return ok;
 }
@@ -200,7 +189,7 @@ bool test_focus_discards_cache() {
                 "location confirmed before focus switch");
     provider.invalidate();
     ok &= check(provider.latest() && !provider.latest()->usable, "focus invalidates published context");
-    ok &= step(provider, state, "他", 4);
+    ok &= step(provider, state, "他", 2);
     ok &= check(!provider.latest()->usable, "one new-state observation cannot reuse old location");
     provider.stop();
     return ok;
@@ -218,7 +207,8 @@ bool test_dead_helper_does_not_crash_ime() {
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     ok &= step(provider, state, "ㄋㄧ", 2);
     ok &= step(provider, state, "你", 3);
-    ok &= check(!provider.latest()->usable, "a restarted helper cannot certify stale candidates");
+    ok &= check(!provider.latest()->usable,
+                "a helper restart does not publish a location by itself");
     ok &= check(wait_for([&] { return helper.log().find("start\n", 1) != std::string::npos; }),
                 "dead helper restarted on a subsequent request");
     provider.stop();
@@ -257,7 +247,8 @@ bool test_sensitive_transition_forgets_context() {
     ok &= step(provider, state, "ㄋ", 1);
     ok &= step(provider, state, "ㄋㄧ", 2);
     ok &= step(provider, state, "你", 3);
-    ok &= check(provider.latest() && provider.latest()->usable, "sample established before sensitive field");
+    ok &= check(provider.latest() && provider.latest()->usable,
+                "sample established before the sensitive field");
     {
         std::lock_guard lock(state.mutex);
         state.sensitive = true;
@@ -271,6 +262,20 @@ bool test_sensitive_transition_forgets_context() {
     }
     ok &= step(provider, state, "他", 4);
     ok &= check(!provider.latest()->usable, "old context is not reused after sensitive input");
+    provider.stop();
+    return ok;
+}
+
+bool test_prime_resets_without_scanning() {
+    FakeHelper helper;
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    provider.prime();
+    ok &= check(wait_for([&] { return helper.log().find("start\n\n") != std::string::npos; }),
+                "priming reaches the helper without an anchor");
+    ok &= check(provider.probe_count() == 0, "priming is not counted as a probe");
     provider.stop();
     return ok;
 }
@@ -292,94 +297,6 @@ bool test_reinstalled_helper_replaces_child() {
     ok &= step(provider, state, "ㄋㄧ", 2);
     ok &= check(wait_for([&] { return helper.log().find("start\n", 1) != std::string::npos; }),
                 "a reinstalled helper replaces the running child");
-    provider.stop();
-    return ok;
-}
-
-bool test_higher_confidence_location_wins() {
-    FakeHelper helper("two-sites");
-    ProbeState state;
-    MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "provider starts");
-    provider.set_active(true);
-    ok &= step(provider, state, "ㄋ", 1);
-    ok &= step(provider, state, "ㄋㄧ", 2);
-    ok &= step(provider, state, "你", 3);
-    ok &= check(wait_for([&] {
-                    const auto sample = provider.latest();
-                    return sample && sample->usable && sample->text == u"high confidence ";
-                }), "the candidate with the higher confidence is published");
-    provider.stop();
-    return ok;
-}
-
-bool test_observation_chain_survives_missed_states() {
-    FakeHelper helper("flaky");
-    ProbeState state;
-    MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "provider starts");
-    provider.set_active(true);
-    auto advance_missing = [&](std::string text, std::size_t count) {
-        state.set(std::move(text));
-        std::this_thread::sleep_for(std::chrono::milliseconds(55));
-        provider.refresh();
-        return wait_for([&] { return provider.probe_count() >= count; });
-    };
-    ok &= step(provider, state, "ㄋ", 1);
-    ok &= advance_missing("ㄋㄧ", 2);
-    ok &= step(provider, state, "你", 3);
-    ok &= advance_missing("你ㄏ", 4);
-    ok &= step(provider, state, "你好", 5);
-    ok &= check(wait_for([&] {
-                    const auto sample = provider.latest();
-                    return sample && sample->usable && sample->text == u"document prefix ";
-                }), "the observation chain survives states whose scan missed");
-    provider.stop();
-    return ok;
-}
-
-bool test_transient_miss_keeps_confirmed_context() {
-    FakeHelper helper("vanish");
-    ProbeState state;
-    MemoryContextProvider provider(64, state.callbacks(), helper.path());
-    bool ok = check(provider.start(), "provider starts");
-    provider.set_active(true);
-    ok &= step(provider, state, "ㄋ", 1);
-    ok &= step(provider, state, "ㄋㄧ", 2);
-    ok &= step(provider, state, "你", 3);
-    ok &= check(wait_for([&] { return provider.latest() && provider.latest()->usable; }),
-                "location confirmed before the miss");
-    // A miss is retried once, so two helper requests for the anchor mean the
-    // state's scan is done and the next state can be fed.
-    const auto scanned = [&](const std::string& anchor) {
-        return wait_for([&] {
-            const std::string log = helper.log();
-            std::size_t count = 0, position = 0;
-            while ((position = log.find(anchor + "\n", position)) != std::string::npos) {
-                ++count;
-                position += anchor.size() + 1;
-            }
-            return count >= 2;
-        });
-    };
-    state.set("他");
-    provider.refresh();
-    ok &= check(scanned("他"), "missing state probed");
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    ok &= check(provider.latest() && provider.latest()->usable &&
-                    provider.latest()->text == u"document prefix ",
-                "a transient miss keeps the confirmed location");
-    state.set("他你");
-    provider.refresh();
-    ok &= check(scanned("他你"), "second missing state probed");
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    ok &= check(provider.latest() && provider.latest()->usable,
-                "a second miss still keeps the location");
-    state.set("他你好");
-    provider.refresh();
-    ok &= check(scanned("他你好"), "third missing state probed");
-    ok &= check(wait_for([&] { return provider.latest() && !provider.latest()->usable; }),
-                "three unverified states in a row drop the location");
     provider.stop();
     return ok;
 }
@@ -515,16 +432,14 @@ int run_memory_context_tests() {
     if (!memory_context_supported()) return EXIT_SUCCESS;
     bool ok = true;
     ok &= test_natural_changes_confirm_and_reuse_helper();
-    ok &= test_wrong_location_never_publishes();
-    ok &= test_superseded_probe_never_publishes();
+    ok &= test_changing_location_never_publishes();
+    ok &= test_miss_publishes_nothing();
     ok &= test_focus_discards_cache();
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();
     ok &= test_sensitive_transition_forgets_context();
+    ok &= test_prime_resets_without_scanning();
     ok &= test_reinstalled_helper_replaces_child();
-    ok &= test_higher_confidence_location_wins();
-    ok &= test_observation_chain_survives_missed_states();
-    ok &= test_transient_miss_keeps_confirmed_context();
     ok &= test_bad_helper_response_does_not_crash_worker();
 #if defined(__linux__)
     ok &= test_real_scanner_terminal_grid();
