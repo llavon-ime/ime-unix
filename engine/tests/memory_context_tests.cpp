@@ -275,6 +275,27 @@ bool test_sensitive_transition_forgets_context() {
     return ok;
 }
 
+bool test_reinstalled_helper_replaces_child() {
+    FakeHelper helper;
+    ProbeState state;
+    MemoryContextProvider provider(64, state.callbacks(), helper.path());
+    bool ok = check(provider.start(), "provider starts");
+    provider.set_active(true);
+    ok &= step(provider, state, "ㄋ", 1);
+    {
+        std::ofstream file(helper.path(), std::ios::app);
+        file << "# reinstalled\n";
+    }
+    // Filesystem timestamps can be coarse; make the change unambiguous.
+    std::filesystem::last_write_time(
+        helper.path(), std::filesystem::file_time_type::clock::now() + std::chrono::seconds(2));
+    ok &= step(provider, state, "ㄋㄧ", 2);
+    ok &= check(wait_for([&] { return helper.log().find("start\n", 1) != std::string::npos; }),
+                "a reinstalled helper replaces the running child");
+    provider.stop();
+    return ok;
+}
+
 bool test_higher_confidence_location_wins() {
     FakeHelper helper("two-sites");
     ProbeState state;
@@ -500,6 +521,7 @@ int run_memory_context_tests() {
     ok &= test_dead_helper_does_not_crash_ime();
     ok &= test_skip_and_denied();
     ok &= test_sensitive_transition_forgets_context();
+    ok &= test_reinstalled_helper_replaces_child();
     ok &= test_higher_confidence_location_wins();
     ok &= test_observation_chain_survives_missed_states();
     ok &= test_transient_miss_keeps_confirmed_context();

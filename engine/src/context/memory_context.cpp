@@ -42,6 +42,11 @@ public:
     ~HelperProcess() { close(); }
 
     std::optional<nlohmann::json> request(const nlohmann::json& input) {
+        // Reinstalling the helper must take effect without restarting the
+        // input method: replace the child when its binary changed on disk.
+        std::error_code mtime_error;
+        const auto mtime = std::filesystem::last_write_time(path_, mtime_error);
+        if (pid_ > 0 && !mtime_error && mtime != launched_mtime_) close();
         if (pid_ <= 0 && !launch()) return std::nullopt;
         const std::string line = input.dump() + '\n';
         std::size_t offset = 0;
@@ -124,10 +129,13 @@ private:
         pid_ = child;
         to_child_ = input[1];
         from_child_ = output[0];
+        std::error_code mtime_error;
+        launched_mtime_ = std::filesystem::last_write_time(path_, mtime_error);
         return true;
     }
 
     std::filesystem::path path_;
+    std::filesystem::file_time_type launched_mtime_{};
     pid_t pid_ = -1;
     int to_child_ = -1;
     int from_child_ = -1;
