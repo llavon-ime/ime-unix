@@ -35,6 +35,9 @@ struct ScanLimits {
     std::size_t max_bytes_per_pid = 512ull * 1024 * 1024;
     std::chrono::milliseconds timeout{3000};
     std::size_t window_limit = 64 * 1024;
+    // Only for a known terminal layout in resident mode. Return the first
+    // screen-row candidates promptly; the engine verifies them across keys.
+    bool stop_at_strong_grid_candidate = false;
 };
 
 struct Match {
@@ -46,6 +49,9 @@ struct Match {
     std::size_t before_bytes = 0;
     std::size_t after_bytes = 0;
     std::size_t scanned_bytes = 0;
+    // Index of the anchor that produced this match when a request scans
+    // several anchors at once (the composition and the committed text).
+    std::size_t anchor_index = 0;
     // How strongly this location looks like the caret's composition: the
     // quality of the text in front plus a bonus for terminal screen grids,
     // which are where a terminal actually shows the composition.
@@ -88,7 +94,26 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                               const std::vector<Hint>& hints, ScanError& error,
                               std::vector<Match>* candidates = nullptr,
                               std::uintptr_t* next_address = nullptr,
-                              ScanStats* stats = nullptr, bool changed_only = false);
+                              ScanStats* stats = nullptr, bool changed_only = false,
+                              bool reset_dirty_after = true);
+
+// One anchor of a multi-anchor request. The optional narrowed anchor holds the
+// client's own screen layout; when it finds nothing the full anchor is tried.
+struct AnchorRequest {
+    const Anchor* full = nullptr;
+    const Anchor* narrowed = nullptr;
+};
+
+// Scans several anchors against one process in a single request. The dirty set
+// is read once, so every anchor sees the same pages: the text committed just
+// before a composition and the composition itself can both be in them. Each
+// returned match carries the index of the anchor that produced it. The
+// soft-dirty baseline is reset by the caller after all anchors were scanned.
+void scan_pid_anchors(pid_t pid, const std::vector<AnchorRequest>& anchors,
+                      std::size_t before_bytes, std::size_t after_bytes,
+                      const ScanLimits& limits, const std::vector<Hint>& hints,
+                      ScanError& error, std::vector<Match>* candidates,
+                      std::uintptr_t* next_address, ScanStats* stats, bool changed_only);
 
 // Resets the target's soft-dirty bits so the next changed_only scan sees only
 // pages written from now on. Returns false when the kernel does not allow it.

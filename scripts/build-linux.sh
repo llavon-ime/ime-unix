@@ -81,7 +81,7 @@ else
     echo "Using existing model: ${MODEL_PATH}"
 fi
 
-LLAVON_DEBUG_FLAG=""
+LLAVON_DEBUG_FLAG="-DLLAVON_IME_DEBUG=OFF"
 if [[ -n "${LLAVON_IME_DEBUG:-}" ]]; then
     LLAVON_DEBUG_FLAG="-DLLAVON_IME_DEBUG=ON"
 fi

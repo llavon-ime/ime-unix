@@ -103,6 +103,7 @@ public:
     std::u16string context_text(ContextId context) const;
     AccessibilityContextState accessibility_state() const;
     AccessibilityContextState memory_context_state() const;
+    std::size_t memory_probe_count() const;
 
     // Raw session access for host diagnostics and tests. The engine keeps
     // ownership; prefer the event API for normal operation.
@@ -167,9 +168,13 @@ private:
     std::size_t accessibility_max_code_units_ = 0;
     std::unique_ptr<MemoryContextProvider> memory_context_;
     std::uint64_t memory_base_sequence_ = 0;
-    std::uint64_t memory_composition_base_ = 0;
     // The context the memory probe currently belongs to (0 = none focused).
     ContextId memory_probe_context_ = 0;
+    // Recently committed text of the focused client. Clients that do not draw
+    // the composition into their document still write the committed text
+    // there, so the probe can locate the caret with it. Cleared whenever the
+    // caret may have moved without a commit (forwarded key, focus change).
+    std::u16string memory_commit_history_;
 };
 
 }  // namespace llavon::ime

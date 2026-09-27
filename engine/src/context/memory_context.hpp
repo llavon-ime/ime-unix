@@ -18,7 +18,18 @@ struct MemoryProbeCallbacks {
     // client may hold it in memory. Natural changes to the composition serve
     // as the probe signal; no extra character is inserted into the preedit.
     std::function<std::string()> preedit;
+    // Rendered composition preceding the last segment used as the anchor.
+    // This text is still in the IME preedit, even when a client draws it in
+    // the same buffer as the document before the anchor.
+    std::function<std::string()> preedit_prefix;
+    // Text the engine committed recently (UTF-8, empty = none). Clients that
+    // do not draw the composition into their document (Konsole, VTE) still
+    // write the committed text there, so it locates the caret for them.
+    std::function<std::string()> commit_history;
     std::function<std::vector<int>()> processes;
+    // Optional OS focus association. Only boosts an address that was also
+    // found among the regular scanned process list.
+    std::function<int()> focused_process;
     // Focused client name, used to try the client's own screen layout first.
     std::function<std::string()> program;
     std::function<bool()> sensitive;
@@ -53,8 +64,10 @@ public:
     void refresh() override;
 
     // A focus change or a forwarded edit invalidates the previously verified
-    // document location; the next composition must establish a new one.
-    void invalidate();
+    // document location; the next composition must establish a new one. When
+    // the caret only moved forward because of a commit (context_continues),
+    // retain the previous document tail to compare against the next sample.
+    void invalidate(bool context_continues = false);
 
     // Main thread. Resets the client's soft-dirty baseline before any
     // composition exists, so the first probe of a focused client is a

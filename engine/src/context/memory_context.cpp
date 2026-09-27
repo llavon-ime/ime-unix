@@ -48,25 +48,10 @@ int encoding_rank(std::string_view encoding) {
     if (encoding == "utf32cell8le") return 3;
     if (encoding == "utf32cell12le") return 4;
     if (encoding == "utf32cell16le") return 5;
-    if (encoding == "utf32cell24le") return 6;
-    return 7;
+    if (encoding == "utf32cell20le") return 6;
+    if (encoding == "utf32cell24le") return 7;
+    return 8;
 }
-
-// Debug logs must not contain the composition itself: the log is often shown
-// in a terminal, and a log line then becomes a stable copy of the composition
-// that the probe would happily verify. Set LLAVON_IME_DEBUG_RAW to log the
-// real text when debugging a specific case.
-#ifdef LLAVON_IME_DEBUG
-bool debug_raw_text() {
-    static const bool enabled = std::getenv("LLAVON_IME_DEBUG_RAW") != nullptr;
-    return enabled;
-}
-
-std::string masked_preedit(std::string_view preedit) {
-    if (debug_raw_text()) return std::string(preedit);
-    return "<" + std::to_string(preedit.size()) + ">";
-}
-#endif
 
 #if defined(__linux__)
 // One child per provider, owned by the IME. Only explicit same-UID target PIDs
@@ -232,7 +217,7 @@ public:
 
     bool running() const noexcept { return running_; }
 
-    void invalidate() {
+    void invalidate(bool context_continues = false) {
         std::lock_guard lock(mutex_);
         ++revision_;
         pending_.reset();
@@ -244,10 +229,20 @@ public:
         hint_address_ = 0;
         hint_before_.clear();
         last_probe_ = {};
-        published_usable_ = false;
         unverified_ = 0;
         misses_ = 0;
+        focus_misses_ = 0;
+        // A commit moves the caret. Keep the old *tail* only as verification
+        // evidence; the previous sample must not be adopted for the new caret
+        // while the client has not been scanned again.
+        published_usable_ = false;
         hooks_.publish({}, false);
+        if (!context_continues) {
+            // A forwarded edit or focus change can replace the document.
+            last_context_.clear();
+            last_published_commit_.clear();
+            last_commit_history_.clear();
+        }
     }
 
     void prime() {
@@ -258,7 +253,7 @@ public:
         const std::string program = callbacks_.program ? callbacks_.program() : std::string{};
         std::lock_guard lock(mutex_);
         if (stopping_) return;
-        pending_ = Job{std::string{}, std::move(pids), hooks_.generation(), revision_, true, program};
+        pending_ = Job{{}, {}, std::move(pids), hooks_.generation(), revision_, true, false, program, {}, 0};
         condition_.notify_one();
     }
 
@@ -269,7 +264,6 @@ public:
             return;
         }
         const std::string preedit = callbacks_.preedit ? callbacks_.preedit() : std::string{};
-        if (preedit.empty()) return;
         std::vector<int> pids = callbacks_.processes ? callbacks_.processes() : std::vector<int>{};
         if (pids.empty()) {
             LLAVON_DEBUG_LOG("MEMCTX", "skip: focused client has no named process");
@@ -278,19 +272,49 @@ public:
         if (pids.size() > 16) pids.resize(16);
         const std::string program = callbacks_.program ? callbacks_.program() : std::string{};
 
-        std::string anchor;
-        try {
-            anchor = u16_to_utf8(utf16_tail(utf8_to_u16(preedit), kAnchorUnits));
-        } catch (const std::exception&) {
-            return;
-        }
+        // The composition and the text committed just before it are searched
+        // together: clients that never draw the composition into their
+        // document (Konsole, VTE) still write the committed text there, and a
+        // location that both agree on is the caret.
+        std::vector<std::string> anchors;
+        std::string committed_anchor;
+        const auto add_anchor = [&](const std::string& text, bool committed) {
+            if (text.empty()) return;
+            try {
+                const auto tail = u16_to_utf8(utf16_tail(utf8_to_u16(text), kAnchorUnits));
+                if (tail.empty()) return;
+                if (committed) committed_anchor = tail;
+                if (std::ranges::find(anchors, tail) == anchors.end()) anchors.push_back(tail);
+            } catch (const std::exception&) {
+            }
+        };
+        add_anchor(preedit, false);
+        std::string history;
+        if (callbacks_.commit_history) history = callbacks_.commit_history();
+        add_anchor(history, true);
+        if (anchors.empty()) return;
+        const std::string preedit_prefix = callbacks_.preedit_prefix ? callbacks_.preedit_prefix() : std::string{};
+        const int focus = callbacks_.focused_process ? callbacks_.focused_process() : 0;
+        const int preferred_pid = std::ranges::find(pids, focus) == pids.end() ? 0 : focus;
+        const std::string key = Job::make_key(anchors) + '\x1e' + preedit_prefix + '\x1e' +
+                                std::to_string(preferred_pid);
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard lock(mutex_);
-        if (stopping_ || anchor == last_anchor_) return;
+        if (stopping_ || key == last_anchor_) return;
         if (failures_ >= kMaxConsecutiveFailures && now - last_probe_ < kFailurePause) return;
         last_probe_ = now;
-        last_anchor_ = anchor;
-        pending_ = Job{std::move(anchor), std::move(pids), hooks_.generation(), revision_, false, program};
+        last_anchor_ = key;
+        // A new commit means the client just wrote text the probe has never
+        // seen; the dirty baseline may already cover it, so read everything
+        // once and fall back to the dirty set afterwards.
+        const bool committed = !history.empty() && history != last_commit_history_;
+        last_commit_history_ = history;
+        // A pending job that has not run yet must not lose the full scan a
+        // commit asked for: typing can replace it before the worker picks it up.
+        const bool carry_full = pending_.has_value() && pending_->full_scan;
+        pending_ = Job{std::move(anchors), std::move(committed_anchor), std::move(pids),
+                       hooks_.generation(), revision_, false, committed || carry_full, program,
+                        preedit_prefix, preferred_pid};
         condition_.notify_one();
     }
 
@@ -315,6 +339,13 @@ private:
         std::string after;
         bool continuation = false;
         int confidence = 0;
+        // Index of the anchor that produced this match. Anchor 0 is the
+        // composition; later anchors are the recently committed text, which
+        // sits between the match and the caret.
+        std::size_t anchor_index = 0;
+        // True when the match came from the committed-text anchor (or from the
+        // single deduplicated anchor whose text is the committed one).
+        bool committed = false;
         unsigned observations = 1;
         // States in which the location was not seen again. Clients that keep
         // two copies of the composition (double buffering) alternate between
@@ -325,13 +356,55 @@ private:
         }
     };
     struct Job {
-        std::string anchor;
+        // Anchors to search for, most important first: the composition on
+        // screen, then the text committed just before it. Both are scanned in
+        // one request over the same pages.
+        std::vector<std::string> anchors;
+        // The committed anchor among them, empty when there is none. A match
+        // in front of the caret has this text between it and the caret.
+        std::string committed_anchor;
         std::vector<int> pids;
         std::uint64_t generation = 0;
         std::uint64_t revision = 0;
         bool prime = false;
+        // The first scan after a commit reads the whole address space: the
+        // committed text may have been written before the dirty baseline was
+        // reset, so a changed-pages scan can miss it. Later states reuse the
+        // dirty set and the verified hint.
+        bool full_scan = false;
         std::string program;
+        std::string preedit_prefix;
+        int preferred_pid = 0;
+        // Stable identity of the anchor set, for state deduplication.
+        static std::string make_key(const std::vector<std::string>& list) {
+            std::string joined;
+            for (const auto& anchor : list) {
+                joined += anchor;
+                joined.push_back('\x1f');
+            }
+            return joined;
+        }
+        std::string key() const {
+            return make_key(anchors) + '\x1e' + preedit_prefix + '\x1e' +
+                   std::to_string(preferred_pid);
+        }
+        const std::string& primary() const {
+            static const std::string empty;
+            return anchors.empty() ? empty : anchors.front();
+        }
     };
+
+    // The best committed-text candidate among everything seen so far. Its
+    // text never changes between composition states, so a hint pointing at it
+    // stays meaningful while its pages are no longer written.
+    const Candidate* best_committed_candidate() const {
+        const Candidate* best = nullptr;
+        for (const auto& candidate : candidates_) {
+            if (!candidate.committed) continue;
+            if (best == nullptr || candidate.confidence > best->confidence) best = &candidate;
+        }
+        return best;
+    }
 
     void worker_loop() {
 #if defined(__linux__)
@@ -365,12 +438,12 @@ private:
                 continue;
             }
 #endif
-            ++probes_;
 #if defined(__linux__)
             std::optional<nlohmann::json> result;
             std::string error_code;
             for (int attempt = 0; attempt < kScanAttempts; ++attempt) {
-                result = helper.request({{"anchor", job.anchor}, {"pids", job.pids},
+                result = helper.request({{"anchor", job.primary()}, {"anchors", job.anchors},
+                                         {"full", job.full_scan}, {"pids", job.pids},
                                          {"program", job.program},
                                          {"epoch", job.revision},
                                          {"hint_pid", hint_pid},
@@ -388,7 +461,7 @@ private:
                 // timeout/budget retry also resumes where the last scan
                 // stopped, because the helper keeps its cursor per PID.
                 std::unique_lock lock(mutex_);
-                if (stopping_ || job.revision != revision_ || job.anchor != last_anchor_ ||
+                if (stopping_ || job.revision != revision_ || job.key() != last_anchor_ ||
                     pending_.has_value()) {
                     break;
                 }
@@ -406,7 +479,11 @@ private:
                                         item.at("before").get<std::string>(),
                                         item.value("after", std::string{}),
                                         item.value("continuation", false),
-                                        item.value("confidence", 0)};
+                                        item.value("confidence", 0),
+                                        item.value("anchor_index", std::size_t{0})};
+                    candidate.committed =
+                        candidate.anchor_index < job.anchors.size() &&
+                        job.anchors[candidate.anchor_index] == job.committed_anchor;
                     // A few printable bytes in heap metadata are not useful
                     // document context. Very short real documents safely
                     // fall back to the other context sources.
@@ -418,6 +495,7 @@ private:
                 current.clear();
             }
             std::optional<Candidate> verified;
+            std::u16string verified_context;
             bool notify_published = false;
             {
                 std::lock_guard lock(mutex_);
@@ -426,9 +504,15 @@ private:
                 // Typing may outrun a cold scan. Keep its candidate evidence
                 // for the next natural state, but never publish a result for
                 // an already superseded preedit.
-                const bool current_job = !pending_.has_value() && job.anchor == last_anchor_;
-                const bool changed = job.anchor != observed_anchor_;
-                observed_anchor_ = job.anchor;
+                const bool current_job = !pending_.has_value() && job.key() == last_anchor_;
+                const bool changed = job.key() != observed_anchor_;
+                observed_anchor_ = job.key();
+                const bool focused_hit = job.preferred_pid &&
+                    std::ranges::any_of(current, [&](const Candidate& candidate) {
+                        return candidate.pid == job.preferred_pid;
+                    });
+                if (focused_hit) focus_misses_ = 0;
+                else if (job.preferred_pid) ++focus_misses_;
                 int verified_score = -1;
                 for (auto& candidate : current) {
                     // The preedit *changed* between requests, but the same
@@ -453,8 +537,67 @@ private:
                         candidate.observations = std::min(8u, previous->observations + 1);
                     }
                     if (candidate.observations >= 3) {
+                        // A stable copy in a different window must not win
+                        // while the actual focused process is still producing
+                        // candidates. If it never yields a caret, three misses
+                        // let the search fall through to other processes.
+                        if (job.preferred_pid && candidate.pid != job.preferred_pid &&
+                            (focused_hit || focus_misses_ < 3)) continue;
+                        // Evaluate every confirmed location before ranking
+                        // them. The top-scoring old row may be stale while a
+                        // different location in this scan is current.
+                        std::string context = candidate.before;
+                        // An editor may draw the entire uncommitted preedit
+                        // into the document buffer. The anchor is only the
+                        // last segment; earlier segments can therefore sit
+                        // immediately before it but must remain in padding,
+                        // not be mistaken for committed document context.
+                        if (!candidate.committed && !job.preedit_prefix.empty() &&
+                            context.ends_with(job.preedit_prefix)) {
+                            context.resize(context.size() - job.preedit_prefix.size());
+                        }
+                        if (candidate.committed && !job.committed_anchor.empty() &&
+                            !context.ends_with(job.committed_anchor)) {
+                            context += job.committed_anchor;
+                        }
+                        std::u16string published;
+                        try {
+                            published = utf16_tail(utf8_to_u16(context), hooks_.max_code_units());
+                        } catch (const std::exception&) {
+                            continue;
+                        }
+                        if (published.empty()) continue;
+                        // A fixed-size tail shifts forward after a commit;
+                        // comparing it as a prefix of the old tail is wrong.
+                        bool stale = false;
+                        if (!last_context_.empty()) {
+                            if (job.committed_anchor == last_published_commit_) {
+                                stale = !published.ends_with(last_context_);
+                            } else if (job.committed_anchor.starts_with(last_published_commit_)) {
+                                const std::string delta =
+                                    job.committed_anchor.substr(last_published_commit_.size());
+                                try {
+                                    const auto expected = utf16_tail(last_context_ + utf8_to_u16(delta),
+                                                                     hooks_.max_code_units());
+                                    stale = !published.ends_with(expected);
+                                } catch (const std::exception&) {
+                                    stale = true;
+                                }
+                            }
+                        }
+                        if (stale) continue;
                         int score = candidate.confidence * 4 +
-                                    static_cast<int>(std::min(4u, candidate.observations)) * 8;
+                                     static_cast<int>(std::min(4u, candidate.observations)) * 8;
+                        if (job.preferred_pid && candidate.pid == job.preferred_pid) score += 100;
+                        // A terminal displaying our diagnostics can contain
+                        // an exact, naturally changing copy of every preedit.
+                        // It is weaker evidence of the *document caret* than
+                        // text from the application's actual edit buffer.
+                        const bool diagnostic_copy =
+                            candidate.before.find("[MEMCTX] preedit=") != std::string::npos ||
+                            candidate.before.find("[MEMCTX-CAND] preedit=") != std::string::npos ||
+                            candidate.before.find("[CTX] source=") != std::string::npos;
+                        if (diagnostic_copy) score -= 500;
                         // A strong hit sits at a word boundary like a caret
                         // does; a continuation hit may be a static prefix, so
                         // it needs a clear lead to win over a strong one.
@@ -462,15 +605,24 @@ private:
                         if (score > verified_score) {
                             verified_score = score;
                             verified = candidate;
+                            verified_context = std::move(published);
                         }
                     }
                 }
                 if (current.empty()) {
-                    // A state whose scan missed (client redraw lag, budget)
-                    // does not move the caret, so the location observed for
-                    // the previous state is still valid. Do not reset the
-                    // observation chain; give up only after several misses.
-                    if (++misses_ >= kMaxConsecutiveFailures) candidates_.clear();
+                    // A missed state is negative evidence, not another vote
+                    // for a once-confirmed address. Keep it briefly for redraw
+                    // lag, but reduce its confidence before it can win again.
+                    if (++misses_ >= kMaxConsecutiveFailures) {
+                        candidates_.clear();
+                    } else {
+                        for (auto& previous : candidates_) {
+                            ++previous.carried;
+                            previous.observations = previous.observations > 2
+                                                        ? previous.observations - 2 : 0;
+                            previous.confidence = std::max(0, previous.confidence - 20);
+                        }
+                    }
                 } else {
                     misses_ = 0;
                     // Keep locations seen in earlier states: a client can
@@ -490,6 +642,9 @@ private:
                             continue;
                         }
                         if (++previous.carried >= kMaxConsecutiveFailures) continue;
+                        previous.observations = previous.observations > 2
+                                                    ? previous.observations - 2 : 0;
+                        previous.confidence = std::max(0, previous.confidence - 20);
                         if (merged.size() < 32) merged.push_back(std::move(previous));
                     }
                     // The same address can satisfy several cell layouts at
@@ -522,6 +677,18 @@ private:
                     hint_address_ = verified->address;
                     hint_before_ = verified->before;
                     failures_ = 0;
+                } else if (const auto* best = best_committed_candidate(); best != nullptr) {
+                    // Keep the next scan pointed at the best committed-text
+                    // candidate even before it is verified: that text never
+                    // changes between states and its pages may already be
+                    // clean, so the following states have to find it again to
+                    // accumulate observations. Candidates of the composition
+                    // itself are left to the changed-pages scan, which finds
+                    // the rewritten text on its own.
+                    hint_pid_ = best->pid;
+                    hint_address_ = best->address;
+                    hint_before_ = best->before;
+                    failures_ = 0;
                 } else if (!candidates_.empty()) {
                     // A copy of the composition in a protocol/layout buffer
                     // is not a document location. Until the transitions
@@ -545,11 +712,12 @@ private:
                                                 ? candidate.before.size() - 60
                                                 : 0);
                         LLAVON_DEBUG_LOG("MEMCTX-CAND",
-                                         "preedit=\"%s\" pid=%d encoding=%s address=0x%lx observations=%u confidence=%d before_tail=\"%s\"",
-                                         masked_preedit(job.anchor).c_str(), candidate.pid,
+                                         "preedit=\"%s\" pid=%d encoding=%s address=0x%lx observations=%u confidence=%d before_units=%zu before_tail=\"%s\"",
+                                          job.primary().c_str(), candidate.pid,
                                          candidate.encoding.c_str(),
                                          static_cast<unsigned long>(candidate.address),
-                                         candidate.observations, candidate.confidence, tail);
+                                         candidate.observations, candidate.confidence,
+                                         candidate.before.size(), tail);
                     }
                 }
 #endif
@@ -559,12 +727,14 @@ private:
                 // re-requests the prediction for the composition on screen.
                 if (verified) {
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx observations=%u confidence=%d candidates=%zu",
-                                     masked_preedit(job.anchor).c_str(), verified->pid,
+                                      job.primary().c_str(), verified->pid,
                                      static_cast<unsigned long>(verified->address),
                                      verified->observations, verified->confidence,
                                      candidates_.size());
                     try {
-                        hooks_.publish(utf16_tail(utf8_to_u16(verified->before), hooks_.max_code_units()), true);
+                        hooks_.publish(verified_context, true);
+                        last_context_ = std::move(verified_context);
+                        last_published_commit_ = job.committed_anchor;
                         published_usable_ = true;
                         unverified_ = 0;
                         notify_published = true;
@@ -577,15 +747,23 @@ private:
                     const auto progress = result && result->contains("progress")
                                               ? (*result)["progress"].dump() : std::string{};
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" unverified matches=%zu accepted=%zu error=%s progress=%s",
-                                     masked_preedit(job.anchor).c_str(), matches.size(), candidates_.size(),
+                                      job.primary().c_str(), matches.size(), candidates_.size(),
                                      error_code.c_str(), progress.c_str());
                     // A miss on one preedit state (client redraw lag, scan
                     // budget) must not discard a location that natural preedit
                     // changes already confirmed. Document changes invalidate
                     // it explicitly; several unverified states in a row drop
                     // it as well, so a vanished location cannot linger.
-                    if (published_usable_ && ++unverified_ >= kMaxConsecutiveFailures)
+                    if (published_usable_ && ++unverified_ >= 2) {
                         published_usable_ = false;
+                        // The old caret may have vanished. Its tail must not
+                        // veto a newly found document in another location.
+                        last_context_.clear();
+                        last_published_commit_.clear();
+                        hint_pid_ = 0;
+                        hint_address_ = 0;
+                        hint_before_.clear();
+                    }
                     if (!published_usable_) {
                         hooks_.publish({}, false);
                         if (!result)
@@ -597,6 +775,7 @@ private:
             }
             // Notify outside the lock: the engine re-requests the prediction
             // for the composition on screen so the confirmed context is used.
+            ++probes_;
             if (notify_published && callbacks_.published) callbacks_.published();
 #else
             (void)job;
@@ -613,6 +792,11 @@ private:
     std::vector<Candidate> candidates_;
     std::string last_anchor_;
     std::string observed_anchor_;
+    std::string last_commit_history_;
+    // The last published context. A following publish has to extend it while
+    // the caret keeps moving forward, so stale copies cannot shrink it.
+    std::u16string last_context_;
+    std::string last_published_commit_;
     std::thread worker_;
     std::atomic<bool> running_{false};
     std::atomic<std::size_t> probes_{0};
@@ -624,6 +808,7 @@ private:
     bool published_usable_ = false;
     std::size_t unverified_ = 0;
     std::size_t misses_ = 0;
+    std::size_t focus_misses_ = 0;
     std::uint64_t revision_ = 0;
     std::chrono::steady_clock::time_point last_probe_{};
 };
@@ -647,7 +832,9 @@ bool MemoryContextProvider::start() { return impl_->start(); }
 void MemoryContextProvider::stop() { impl_->stop(); }
 bool MemoryContextProvider::running() const noexcept { return impl_->running(); }
 void MemoryContextProvider::refresh() { impl_->refresh(); }
-void MemoryContextProvider::invalidate() { impl_->invalidate(); }
+void MemoryContextProvider::invalidate(bool context_continues) {
+    impl_->invalidate(context_continues);
+}
 void MemoryContextProvider::prime() { impl_->prime(); }
 std::size_t MemoryContextProvider::probe_count() const noexcept { return impl_->probe_count(); }
 bool MemoryContextProvider::tracking() const { return impl_->tracking(); }

@@ -232,7 +232,19 @@ public:
     void stop() {
         running_.store(false);
         if (backend_thread_.joinable()) {
-            if (loop_ != nullptr) g_main_loop_quit(loop_);
+            if (loop_ != nullptr) {
+                // Quit on the loop's own context. Calling g_main_loop_quit
+                // here can race with the worker entering g_main_loop_run:
+                // a quit before run starts is lost, and join then hangs.
+                GSource* quit = g_idle_source_new();
+                g_source_set_priority(quit, G_PRIORITY_HIGH);
+                g_source_set_callback(quit, [](gpointer data) -> gboolean {
+                    g_main_loop_quit(static_cast<GMainLoop*>(data));
+                    return G_SOURCE_REMOVE;
+                }, loop_, nullptr);
+                g_source_attach(quit, context_);
+                g_source_unref(quit);
+            }
             backend_thread_.join();
         }
     }

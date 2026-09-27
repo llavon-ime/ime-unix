@@ -18,6 +18,10 @@ namespace llavon::ime {
 
 namespace {
 
+// How much recently committed text the memory probe may use to locate the
+// caret. Long enough to be unique, short enough to survive scrolling.
+constexpr std::size_t kMemoryCommitHistoryUnits = 32;
+
 // True when the client itself gives the caret context, so the memory probe has
 // nothing to add and must not write anything.
 bool client_reports_text(Host& host, ContextId context) {
@@ -26,20 +30,32 @@ bool client_reports_text(Host& host, ContextId context) {
 }
 
 // The probe searches for the text the client is displaying at the caret.
-// Earlier segments of the composition are already part of the document, and
-// searching for their rendered characters matches copies of the same sentence
-// elsewhere in memory, so only the segment being typed is used: its raw
-// reading while it is incomplete, its rendered candidate once one is on
-// screen.
+// Earlier segments of the composition can be drawn in the same buffer, so
+// search only the segment being typed: its raw reading while incomplete or
+// its rendered candidate once visible. They are removed from the context
+// after the memory location has been confirmed.
 std::u16string probe_anchor(const InputSession& session) {
+    if (!session.pending_token.empty()) return InputProcessor::pending_rendered_text(session);
     const auto& segments = session.buffer.segments();
     for (auto it = segments.rbegin(); it != segments.rend(); ++it) {
         if (it->empty()) continue;
         if (it->complete() && it->visible_candidate()) return it->rendered_text();
         return it->reading();
     }
-    if (!session.pending_token.empty()) return InputProcessor::pending_rendered_text(session);
     return {};
+}
+
+std::u16string probe_preedit_prefix(const InputSession& session) {
+    if (!session.pending_token.empty()) return session.buffer.rendered_composition();
+    const auto& segments = session.buffer.segments();
+    const auto last = std::ranges::find_if(segments.rbegin(), segments.rend(),
+                                           [](const auto& segment) { return !segment.empty(); });
+    if (last == segments.rend()) return {};
+    std::u16string prefix;
+    for (auto it = segments.begin(); it != last.base() - 1; ++it) {
+        prefix += it->rendered_text();
+    }
+    return prefix;
 }
 
 // True when the composition on screen is only rendered candidates: there is
@@ -48,12 +64,13 @@ std::u16string probe_anchor(const InputSession& session) {
 // for the next reading; a location that is already confirmed can still be
 // tracked with them.
 bool probe_anchor_is_rendered_only(const InputSession& session) {
+    if (!session.pending_token.empty()) return false;
     const auto& segments = session.buffer.segments();
     for (auto it = segments.rbegin(); it != segments.rend(); ++it) {
         if (it->empty()) continue;
         return it->complete() && it->visible_candidate();
     }
-    return !session.pending_token.empty();
+    return false;
 }
 
 // The memory probe helper is resolved like the installed service: an
@@ -92,15 +109,13 @@ Engine::Engine(EngineOptions options, Host& host)
             if (accessibility_context_) {
                 accessibility_composition_base_ = accessibility_context_->sequence();
             }
-            if (memory_context_) {
-                memory_composition_base_ = memory_context_->sequence();
-            }
         } else if (next == InputStateKind::Empty) {
             accessibility_composition_base_ = 0;
-            memory_composition_base_ = 0;
             // A completed/cancelled preedit no longer identifies the same
             // client memory. In-flight scans must not publish it afterwards.
-            if (memory_context_) memory_context_->invalidate();
+            // The document itself did not move backwards, so the published
+            // context may still be extended.
+            if (memory_context_) memory_context_->invalidate(true);
         }
     });
     apply_context_sources();
@@ -123,6 +138,7 @@ void Engine::attach(ContextId context) {
 void Engine::detach(ContextId context) {
     const auto it = sessions_.find(context);
     if (it == sessions_.end()) return;
+    if (memory_probe_context_ == context) memory_commit_history_.clear();
     if (memory_probe_context_ == context && memory_context_) memory_context_->invalidate();
     close_prediction_session(*it->second);
     sessions_.erase(it);
@@ -149,6 +165,7 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
         // The application receives this key, so the caret may have moved away
         // from the text the memory probe would locate; a paste or undo may
         // also have changed the context, so probe again.
+        memory_commit_history_.clear();
         if (memory_context_) memory_context_->invalidate();
         if (should_probe_memory(context, session)) {
             memory_context_->refresh();
@@ -170,6 +187,7 @@ void Engine::select_symbol(ContextId context, int index, std::uint64_t epoch) {
 }
 
 void Engine::activate(ContextId context) {
+    memory_commit_history_.clear();
     if (memory_context_) memory_context_->invalidate();
     memory_probe_context_ = context;
     if (accessibility_context_) {
@@ -189,6 +207,7 @@ void Engine::activate(ContextId context) {
 }
 
 void Engine::deactivate(ContextId context) {
+    if (memory_probe_context_ == context) memory_commit_history_.clear();
     if (memory_context_) memory_context_->invalidate();
     if (memory_probe_context_ == context) memory_probe_context_ = 0;
     if (accessibility_context_) {
@@ -208,7 +227,10 @@ void Engine::reset(ContextId context, InputResetReason reason, bool clear_contex
     if (memory_context_) memory_context_->invalidate();
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
     if (reason == InputResetReason::FocusOut) {
-        if (memory_probe_context_ == context) memory_probe_context_ = 0;
+        if (memory_probe_context_ == context) {
+            memory_commit_history_.clear();
+            memory_probe_context_ = 0;
+        }
         if (accessibility_context_) {
             accessibility_context_->set_active(false);
             accessibility_base_sequence_ = accessibility_context_->sequence();
@@ -280,6 +302,10 @@ AccessibilityContextState Engine::memory_context_state() const {
     return memory_context_->availability();
 }
 
+std::size_t Engine::memory_probe_count() const {
+    return memory_context_ ? memory_context_->probe_count() : 0;
+}
+
 InputSession* Engine::find(ContextId context) {
     const auto it = sessions_.find(context);
     return it == sessions_.end() ? nullptr : it->second.get();
@@ -304,10 +330,19 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         const bool allow_training = effect.training_sample && config_.collect_training_data &&
                                     !host_.is_sensitive(context);
         host_.commit(context, effect.commit);
+        // The committed text lands in the client's document; clients that do
+        // not draw the composition itself (Konsole, VTE) can still be located
+        // through it on the next composition. Keep a bounded tail.
+        memory_commit_history_ += effect.commit;
+        if (memory_commit_history_.size() > kMemoryCommitHistoryUnits) {
+            memory_commit_history_.erase(0, memory_commit_history_.size() -
+                                                kMemoryCommitHistoryUnits);
+        }
         // Committed text changes the document, so a location confirmed for the
         // previous caret position no longer describes the text before the
-        // caret. The following redraw re-probes the new composition.
-        if (memory_context_) memory_context_->invalidate();
+        // caret. The text before the caret only grew, though, so the published
+        // context may be extended but not replaced by a shorter one.
+        if (memory_context_) memory_context_->invalidate(true);
         if (allow_training) {
             try {
                 protocol::RecordCommitRequest request;
@@ -573,27 +608,19 @@ void Engine::resync_context(ContextId context, InputSession& session) {
     // only used when no other source produced context.
     if (memory_context_) {
         const auto sample = memory_context_->latest();
-        // The memory sample normally starts at the document text, but a
-        // candidate that began at a wide character's continuation cell can
-        // leak the composition into the tail. Strip it only when it is really
-        // there: a clean sample must not be rejected for lacking a preedit.
-        std::optional<std::u16string> text;
         if (sample && sample->usable && sample->sequence > memory_base_sequence_) {
-            const bool predates_composition =
-                memory_composition_base_ != 0 && sample->sequence <= memory_composition_base_;
-            if (InputProcessor::composition_empty(session) || predates_composition) {
-                text = sample->text;
-            } else if (const auto stripped = strip_accessibility_preedit(session, sample->text)) {
-                if (!stripped->empty()) text = *stripped;
-            } else {
-                text = sample->text;
+            // The scanner returns text *before* the matched anchor; for a
+            // committed-text match the provider adds only that committed
+            // anchor. This is already document context, unlike an AT-SPI
+            // sample which may include the live preedit. Stripping a suffix
+            // here erases real commits when the next preedit spells the same
+            // word (and can even strip a short, unrelated text suffix).
+            if (!sample->text.empty()) {
+                session.context_text = utf16_tail(sample->text, limit);
+                session.context_source = ContextSource::Memory;
+                log_context("memory-probe", session.context_text);
+                return;
             }
-        }
-        if (text && !text->empty()) {
-            session.context_text = utf16_tail(*text, limit);
-            session.context_source = ContextSource::Memory;
-            log_context("memory-probe", session.context_text);
-            return;
         }
         log_context("memory-probe-unusable", {});
     }
@@ -723,9 +750,31 @@ void Engine::apply_context_sources() {
                 return std::string{};
             }
         };
+        callbacks.preedit_prefix = [this] {
+            if (memory_probe_context_ == 0) return std::string{};
+            const auto* session = find(memory_probe_context_);
+            if (session == nullptr) return std::string{};
+            try {
+                return u16_to_utf8(probe_preedit_prefix(*session));
+            } catch (const std::exception&) {
+                return std::string{};
+            }
+        };
+        callbacks.commit_history = [this] {
+            if (memory_probe_context_ == 0) return std::string{};
+            if (memory_commit_history_.empty()) return std::string{};
+            try {
+                return u16_to_utf8(memory_commit_history_);
+            } catch (const std::exception&) {
+                return std::string{};
+            }
+        };
         callbacks.processes = [this] {
             if (memory_probe_context_ == 0) return std::vector<int>{};
             return host_.probe_processes(memory_probe_context_);
+        };
+        callbacks.focused_process = [this] {
+            return memory_probe_context_ ? host_.focused_probe_process(memory_probe_context_) : 0;
         };
         callbacks.program = [this] {
             if (memory_probe_context_ == 0) return std::string{};

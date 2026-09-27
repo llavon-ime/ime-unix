@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
@@ -77,6 +78,28 @@ Holder spawn_holder(const std::string& text, bool utf16) {
     return {pid, address};
 }
 
+Holder spawn_guarded_holder(const std::string& text) {
+    int ready[2];
+    if (::pipe(ready) != 0) return {};
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(ready[0]);
+        auto* pages = static_cast<char*>(::mmap(nullptr, 8192, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        if (pages == MAP_FAILED || ::mprotect(pages, 4096, PROT_NONE) != 0) ::_exit(1);
+        std::copy(text.begin(), text.end(), pages + 4096);
+        const auto address = reinterpret_cast<std::uintptr_t>(pages + 4096);
+        (void)::write(ready[1], &address, sizeof(address));
+        ::pause();
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    std::uintptr_t address = 0;
+    (void)::read(ready[0], &address, sizeof(address));
+    ::close(ready[0]);
+    return {pid, address};
+}
+
 Holder spawn_misaligned_utf16_holder(std::string_view text) {
     int ready[2];
     if (::pipe(ready) != 0) return {};
@@ -128,7 +151,8 @@ std::vector<char32_t> to_codepoints(std::string_view input) {
 
 // A terminal grid: 12-byte cells holding a UTF-32 code point and attributes.
 // Wide characters repeat the code point in a continuation cell.
-Holder spawn_cell12_holder(std::string_view prefix, std::string_view text) {
+Holder spawn_cell12_holder(std::string_view prefix, std::string_view text,
+                           bool noisy_heap_boundary = false) {
     int ready[2];
     if (::pipe(ready) != 0) return {};
     const pid_t pid = ::fork();
@@ -145,6 +169,15 @@ Holder spawn_cell12_holder(std::string_view prefix, std::string_view text) {
         };
         std::string buffer;
         buffer.reserve(4096);
+        if (noisy_heap_boundary) {
+            // Three binary cells, then a coincidental valid CJK code point
+            // with heap attributes, just before the actual screen row.
+            for (int index = 0; index < 3; ++index) {
+                buffer.append(4, static_cast<char>(0xFE));
+                buffer.append(8, static_cast<char>(0x5A));
+            }
+            buffer.append("\x80\x7f\0\0\x61\x03\0\0\0\0\0\0", 12);
+        }
         for (const char32_t codepoint : to_codepoints(prefix)) {
             append_cell(buffer, codepoint, false);
             if (codepoint > 0x2000) append_cell(buffer, codepoint, true);
@@ -168,14 +201,16 @@ Holder spawn_cell12_holder(std::string_view prefix, std::string_view text) {
 }
 
 // Konsole-style 16-byte cells: code point plus twelve attribute bytes. A wide
-// character is followed by a blank continuation cell.
-Holder spawn_cell16_holder(std::string_view prefix, std::string_view text) {
+// character is followed by a continuation cell; the real client marks it as an
+// unreal cell (zero code point, both extra-flag bytes clear), older rows use a
+// blank cell.
+Holder spawn_cell16_holder(std::string_view prefix, std::string_view text, bool unreal = false) {
     int ready[2];
     if (::pipe(ready) != 0) return {};
     const pid_t pid = ::fork();
     if (pid == 0) {
         ::close(ready[0]);
-        auto append_cell = [](std::string& out, char32_t codepoint, bool wide) {
+        auto append_cell = [unreal](std::string& out, char32_t codepoint, bool wide) {
             for (int shift = 0; shift < 32; shift += 8) {
                 out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
             }
@@ -183,9 +218,15 @@ Holder spawn_cell16_holder(std::string_view prefix, std::string_view text) {
                                                   0x01, 0x01, 0x00, 0x00, 0x01, 0x00};
             out.append(reinterpret_cast<const char*>(attributes), 12);
             if (wide) {
-                out.push_back(0x20);
-                out.append(3, '\0');
-                out.append(reinterpret_cast<const char*>(attributes), 12);
+                if (unreal) {
+                    out.append(4, '\0');
+                    out.append(reinterpret_cast<const char*>(attributes), 10);
+                    out.append(2, '\0');
+                } else {
+                    out.push_back(0x20);
+                    out.append(3, '\0');
+                    out.append(reinterpret_cast<const char*>(attributes), 12);
+                }
             }
         };
         std::string buffer;
@@ -196,6 +237,47 @@ Holder spawn_cell16_holder(std::string_view prefix, std::string_view text) {
         for (const char32_t codepoint : to_codepoints(text)) {
             append_cell(buffer, codepoint, true);
         }
+        [[maybe_unused]] auto* heap = new std::string(std::move(buffer));
+        const auto address = reinterpret_cast<std::uintptr_t>(heap->data());
+        (void)::write(ready[1], &address, sizeof(address));
+        ::pause();
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    std::uintptr_t address = 0;
+    [[maybe_unused]] const auto got = ::read(ready[0], &address, sizeof(address));
+    ::close(ready[0]);
+    return {pid, address};
+}
+
+// VTE keeps its screen as 20-byte cells: a UTF-32 code point plus a 16-byte
+// attribute record. A wide character repeats the code point in a fragment
+// cell, flagged in the low attribute byte (bit 4).
+Holder spawn_cell20_holder(std::string_view prefix, std::string_view text) {
+    int ready[2];
+    if (::pipe(ready) != 0) return {};
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(ready[0]);
+        auto append_cell = [](std::string& out, char32_t codepoint, bool fragment) {
+            for (int shift = 0; shift < 32; shift += 8) {
+                out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
+            }
+            unsigned char attributes[16] = {0x01, 0x00, 0x00, 0x00};
+            if (fragment) attributes[0] = 0x11;
+            out.append(reinterpret_cast<const char*>(attributes), 16);
+        };
+        std::string buffer;
+        buffer.reserve(4096);
+        for (const char32_t codepoint : to_codepoints(prefix)) {
+            append_cell(buffer, codepoint, false);
+            if (codepoint > 0x2000) append_cell(buffer, codepoint, true);
+        }
+        for (const char32_t codepoint : to_codepoints(text)) {
+            append_cell(buffer, codepoint, false);
+            append_cell(buffer, codepoint, true);
+        }
+        for (int empty = 0; empty < 4; ++empty) append_cell(buffer, 0, false);
         [[maybe_unused]] auto* heap = new std::string(std::move(buffer));
         const auto address = reinterpret_cast<std::uintptr_t>(heap->data());
         (void)::write(ready[1], &address, sizeof(address));
@@ -323,6 +405,20 @@ int main() {
     }
 
     {
+        // U+4E00 begins with a zero byte in UTF-16LE and UTF-32LE. The
+        // fast nonzero-byte search must retain the zero-leading fallback.
+        const auto zero_lead = parse("一錨");
+        const Holder holder = spawn_holder("hello magic 一錨 seed line", true);
+        ScanError error;
+        const auto match = scan_pid(holder.pid, *zero_lead, 64, 32, limits,
+                                    {{holder.pid, holder.address, holder.address + 256}}, error);
+        check(match && match->encoding == Encoding::Utf16Le &&
+                  match->before.ends_with("hello magic "),
+              "UTF-16 anchor with a zero leading byte is found");
+        stop_holder(holder.pid);
+    }
+
+    {
         const std::string bare = std::string("\x01\x02", 2) + kAnchor;
         const Holder holder = spawn_holder(bare, false);
         ScanError error;
@@ -336,6 +432,27 @@ int main() {
                        &candidates, nullptr, &stats);
         check(stats.hits > 0 && stats.qualified == 0 && candidates.empty(),
               "a byte hit without a readable prefix is reported but not accepted");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // A multi-anchor request scans the composition and the committed text
+        // together and tags every candidate with the anchor that found it.
+        const Holder holder = spawn_cell12_holder("document prefix ", "你");
+        const auto anchor_a = parse("你");
+        const auto anchor_b = parse("prefix");
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<AnchorRequest> requests{{&*anchor_a, nullptr}, {&*anchor_b, nullptr}};
+        scan_pid_anchors(holder.pid, requests, 256, 16, limits,
+                         {{holder.pid, holder.address, holder.address + 512}}, error, &candidates,
+                         nullptr, nullptr, false);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.anchor_index == 0 && item.before.ends_with("document prefix ");
+              }), "the composition anchor is tagged index 0");
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.anchor_index == 1 && item.before.ends_with("document ");
+              }), "the committed-text anchor is tagged index 1");
         stop_holder(holder.pid);
     }
 
@@ -369,6 +486,136 @@ int main() {
                          item.address == holder.address + 9 * 16 &&
                          item.before.ends_with("doc text ");
               }), "a 16-byte cell grid is found with the text before the composition");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // A grid containing only the first character of the anchor is not a
+        // hit, even if it has a convincing document prefix. In particular,
+        // wide-cell layouts must verify the whole anchor before ranking it.
+        const Holder holder = spawn_cell16_holder("doc text ", "智錯");
+        ScanError error;
+        std::vector<Match> candidates;
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits,
+                       {{holder.pid, holder.address, holder.address + 512}}, error, &candidates);
+        check(std::ranges::none_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::Utf32Cell16Le &&
+                         item.address == holder.address + 9 * 16;
+              }), "a matching first cell with a different tail is rejected");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // A repeated wide character in the anchor is a real character, not a
+        // continuation cell: "你好好" has to verify completely in every grid.
+        const auto repeated = parse("你好好");
+        for (const auto& [holder, cell] : std::initializer_list<std::pair<Holder, std::size_t>>{
+                 {spawn_cell12_holder("doc text ", "你好好"), 12},
+                 {spawn_cell16_holder("doc text ", "你好好"), 16},
+                 {spawn_cell20_holder("doc text ", "你好好"), 20}}) {
+            ScanError error;
+            std::vector<Match> candidates;
+            const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+            (void)scan_pid(holder.pid, *repeated, 256, 16, limits, hints, error, &candidates);
+            check(std::ranges::any_of(candidates, [&](const Match& item) {
+                      return item.address == holder.address + 9 * cell &&
+                             item.before.ends_with("doc text ");
+                  }), "a repeated wide character is not skipped as a continuation");
+            stop_holder(holder.pid);
+        }
+    }
+    {
+        // Heap metadata next to a kitty row can decode to a valid CJK code
+        // point. Its attributes differ from the actual row and it must not
+        // leak into the context or increase the candidate confidence.
+        const Holder holder = spawn_cell12_holder("doc text ", kAnchor, true);
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == holder.address + 4 * 12 + 9 * 12 &&
+                         item.encoding == Encoding::Utf32Cell12Le && item.before == "doc text ";
+              }), "an orphan heap cell does not become kitty context");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // VTE keeps its screen as 20-byte cells; the composition must be
+        // found with the document text in front of it.
+        const Holder holder = spawn_cell20_holder("doc text ", kAnchor);
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::Utf32Cell20Le &&
+                         item.address == holder.address + 9 * 20 &&
+                         item.before.ends_with("doc text ");
+              }), "a 20-byte cell grid is found with the text before the composition");
+        stop_holder(holder.pid);
+    }
+    {
+        // Matching the repeated code point in VTE's fragment cell must not
+        // make the composing character itself part of the document context.
+        const Holder holder = spawn_cell20_holder("doc text ", "你");
+        const auto one_char = parse("你");
+        ScanError error;
+        std::vector<Match> candidates;
+        (void)scan_pid(holder.pid, *one_char, 256, 16, limits,
+                       {{holder.pid, holder.address, holder.address + 512}}, error, &candidates);
+        const bool correct = std::ranges::any_of(candidates, [&](const Match& item) {
+                   return item.encoding == Encoding::Utf32Cell20Le &&
+                          item.address == holder.address + 9 * 20 &&
+                          item.before.ends_with("doc text ");
+               }) && std::ranges::none_of(candidates, [&](const Match& item) {
+                   return item.encoding == Encoding::Utf32Cell20Le &&
+                          item.address == holder.address + 10 * 20;
+               });
+        if (!correct) {
+            std::fprintf(stderr, "VTE fragment pid=%d base=0x%lx count=%zu error=%s\n",
+                         static_cast<int>(holder.pid), static_cast<unsigned long>(holder.address),
+                         candidates.size(), error.code.c_str());
+            for (const auto& item : candidates) {
+                std::fprintf(stderr, "  address=0x%lx encoding=%s before=%s\n",
+                             static_cast<unsigned long>(item.address), encoding_name(item.encoding),
+                             item.before.c_str());
+            }
+        }
+        check(correct, "VTE fragment cannot start a composition match");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // VTE repeats the code point in the fragment cell of a wide glyph;
+        // decoding it twice would duplicate every CJK character in front of
+        // the composition ("文件" not "文文件件").
+        const Holder holder = spawn_cell20_holder("這是一段測試文件 ", kAnchor);
+        const auto anchor_address = holder.address + 17 * 20;
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 512, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == anchor_address && item.before.ends_with("文件 ") &&
+                         item.before.find("文文") == std::string::npos;
+              }), "VTE fragment cells are not decoded twice");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // Konsole marks the right half of a wide glyph as an unreal cell: a
+        // zero code point with both extra-flag bytes clear. The text in front
+        // of the composition must not be cut at it.
+        const Holder holder = spawn_cell16_holder("這是一段測試文件 ", kAnchor, true);
+        const auto anchor_address = holder.address + 17 * 16;
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == anchor_address && item.before.ends_with("文件 ");
+              }), "Konsole unreal placeholder cells do not cut the context");
         stop_holder(holder.pid);
     }
 
@@ -544,6 +791,82 @@ int main() {
     }
 
     {
+        // A multi-anchor changed-only scan reads the same dirty set for every
+        // anchor: the committed text and the composition that follows it can
+        // both be found by one request. The soft-dirty baseline is consumed
+        // once, after all anchors were scanned.
+        const ChangingHolder changing = spawn_changing_holder();
+        const auto composition = parse("ㄋ");
+        const auto document = parse("prefix");
+        (void)reset_soft_dirty(changing.holder.pid);
+        check(update_holder(changing, '1'), "the client wrote the new composition");
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<AnchorRequest> requests{{&*composition, nullptr}, {&*document, nullptr}};
+        scan_pid_anchors(changing.holder.pid, requests, 256, 16, limits, {}, error, &candidates,
+                         nullptr, nullptr, true);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.anchor_index == 0 && item.before.ends_with("document prefix ");
+              }), "a changed-only multi-anchor scan finds the composition");
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.anchor_index == 1 && item.before.ends_with("document ");
+              }), "the same dirty set still holds the document text for the other anchor");
+        ::close(changing.updates);
+        ::close(changing.acknowledgements);
+        stop_holder(changing.holder.pid);
+    }
+
+    {
+        // A hint whose pages were not written since the last reset is still
+        // read directly: the committed text never changes, so it must stay
+        // findable by a changed-only scan.
+        const Holder holder = spawn_cell12_holder("doc text ", kAnchor);
+        (void)reset_soft_dirty(holder.pid);
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, holder.address, holder.address + 512,
+                                       holder.address + 9 * 12, "doc text "}};
+        (void)scan_pid(holder.pid, *anchor, 256, 16, limits, hints, error, &candidates, nullptr,
+                       nullptr, true);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == holder.address + 9 * 12 &&
+                         item.before.ends_with("doc text ");
+              }), "a hint is read even when its pages were not written");
+        stop_holder(holder.pid);
+    }
+
+    {
+        // The matched cell can be on a dirty page while the beginning of its
+        // row is clean. A scan range starting inside the row must not truncate
+        // the prefix read after the anchor was found.
+        const Holder holder = spawn_cell20_holder("document prefix ", kAnchor);
+        const auto address = holder.address + 16 * 20;
+        ScanError error;
+        std::vector<Match> candidates;
+        const std::vector<Hint> hints{{holder.pid, address - 13 * 20, address + 20}};
+        (void)scan_pid(holder.pid, *anchor, 512, 0, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == address && item.before.ends_with("document prefix ");
+              }), "a narrow scan range reads the complete prefix across its start");
+        stop_holder(holder.pid);
+    }
+    {
+        // A validated hint can extend into an unmapped page. The scanner
+        // still has to reach the adjacent mapped page holding the document.
+        const std::string text = std::string("document prefix ") + kAnchor;
+        const Holder holder = spawn_guarded_holder(text);
+        ScanError error;
+        std::vector<Match> candidates;
+        const auto address = holder.address + std::string_view("document prefix ").size();
+        const std::vector<Hint> hints{{holder.pid, address - 8192, address + 4096}};
+        (void)scan_pid(holder.pid, *anchor, 256, 0, limits, hints, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.address == address && item.before.ends_with("document prefix ");
+              }), "an unmapped hint page cannot hide an adjacent document");
+        stop_holder(holder.pid);
+    }
+
+    {
         // Two copies of the anchor: the first sits behind binary bytes, the
         // second behind readable text. The scan must report the readable one.
         const std::string repeated = std::string("\x01\x02", 2) + kAnchor + std::string("\x01\x02", 2) +
@@ -581,10 +904,22 @@ int main() {
                               holder.address + first_offset + std::string(kAnchor).size(),
                               holder.address + first_offset, "unrelated prefix"};
         (void)scan_pid(holder.pid, *anchor, 64, 0, limits, {misleading}, error, &candidates);
-        check(std::ranges::any_of(candidates, [&](const Match& item) {
-                  return item.address == holder.address + second_offset &&
-                         item.before.ends_with("readable run before the anchor ");
-              }), "a misleading hinted copy falls back to the document copy");
+        const bool found_document = std::ranges::any_of(candidates, [&](const Match& item) {
+                   return item.address == holder.address + second_offset &&
+                          item.before.ends_with("readable run before the anchor ");
+               });
+        if (!found_document) {
+            std::fprintf(stderr, "hint test: pid=%d document=0x%lx candidates=%zu error=%s\n",
+                         static_cast<int>(holder.pid),
+                         static_cast<unsigned long>(holder.address + second_offset),
+                         candidates.size(), error.code.c_str());
+            for (const auto& item : candidates) {
+                std::fprintf(stderr, "  address=0x%lx encoding=%s before=%s\n",
+                             static_cast<unsigned long>(item.address), encoding_name(item.encoding),
+                             item.before.c_str());
+            }
+        }
+        check(found_document, "a misleading hinted copy falls back to the document copy");
         stop_holder(holder.pid);
     }
 

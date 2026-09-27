@@ -154,6 +154,7 @@ public:
     void clear_context_text();
     // Context adopted for the current input context, as UTF-8.
     std::string context_text() const;
+    std::size_t memory_probe_count() const;
     // Detaches the context, which closes the prediction service session.
     void detach();
     void activate();

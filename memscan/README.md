@@ -86,8 +86,10 @@ first. The resident mode only uses a previously confirmed location as a hint.
 
 Building with `-DLLAVON_IME_DEBUG=ON` (the same switch the engine and the
 fcitx5 addon use, set by `LLAVON_IME_DEBUG=1 scripts/build-linux.sh`) enables
-`[CTX]`/`[MEMCTX]` lines on fcitx5 stderr, raw bytes around scanner hits, and
-soft-dirty scan timings; those bytes may include private document text.
+`[CTX]`/`[MEMCTX]` lines on fcitx5 stderr, soft-dirty scan timings, and raw
+context, composition and scan-window bytes. The resulting logs may contain
+private document text. The switch is only read when building; it is not read
+from the environment when the program runs.
 
 ## Permission
 

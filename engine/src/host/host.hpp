@@ -52,6 +52,9 @@ public:
     // that cannot do this (macOS, headless tests) keep the default, which
     // disables the source. Main thread only.
     virtual std::vector<int> probe_processes(ContextId) { return {}; }
+    // Optional focused client PID. Zero means no reliable focus association;
+    // the memory probe still searches the program's other processes.
+    virtual int focused_probe_process(ContextId) { return 0; }
 
     // Name of the focused client (e.g. "kitty", "konsole"). The memory probe
     // uses it to try the client's own screen layout first instead of guessing

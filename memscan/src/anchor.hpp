@@ -11,9 +11,9 @@ namespace llavon::memscan {
 // Byte encodings the text can be stored in. UI toolkits use UTF-8 (GTK,
 // terminals) or UTF-16 (Qt, Java, Chromium); terminals that store cells as
 // code points need UTF-32. The Cell variants are screen grids whose first
-// four bytes per cell are a UTF-32 code point: 8-byte cells (VTE, st),
-// 12-byte cells (kitty, foot), 16-byte cells (Konsole), and 24-byte cells
-// (Alacritty).
+// four bytes per cell are a UTF-32 code point: 8-byte cells, 12-byte cells
+// (kitty, foot), 16-byte cells (Konsole), 20-byte cells (VTE), and 24-byte
+// cells (Alacritty).
 enum class Encoding : std::uint8_t {
     Utf8,
     Utf16Le,
@@ -21,6 +21,7 @@ enum class Encoding : std::uint8_t {
     Utf32Cell8Le,
     Utf32Cell12Le,
     Utf32Cell16Le,
+    Utf32Cell20Le,
     Utf32Cell24Le,
 };
 

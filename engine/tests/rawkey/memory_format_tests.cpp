@@ -2,8 +2,8 @@
 //
 // Each case spawns a synthetic client that keeps its composition in one
 // format (plain UTF-8, UTF-16, kitty's 12-byte cells, Konsole's 16-byte
-// cells), drives the engine with raw keys, and requires the adopted context
-// to be the document prefix typed before the composition.
+// cells, VTE's 20-byte cells), drives the engine with raw keys, and requires
+// the adopted context to be the document prefix typed before the composition.
 //
 // The suite needs the real helper binary and ptrace permission for it, so it
 // runs when LLAVON_IME_TEST_MEMSCAN points at a built (and, on hosts with
@@ -23,8 +23,21 @@
 #include <unistd.h>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 namespace llavon::ime::rawkey {
 namespace {
+
+void allow_memory_probe() {
+#if defined(__linux__)
+    // The resident helper is a sibling of this synthetic client under Yama.
+    // Permit it to read the child's memory without requiring a privileged
+    // helper binary for the raw-key suite.
+    (void)::prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY);
+#endif
+}
 
 struct FormatClient {
     pid_t pid = -1;
@@ -65,31 +78,35 @@ std::string encode_utf16(std::string_view input) {
 }
 
 // How a format stores a wide character's continuation cell.
-enum class Continuation { KittyFlag, Spacer, Blank };
+enum class Continuation { KittyFlag, Spacer, Blank, VteFragment };
 
 std::size_t format_cell(std::string_view format) {
     if (format == "cell8") return 8;
     if (format == "cell12" || format == "foot") return 12;
     if (format == "cell16") return 16;
+    if (format == "cell20") return 20;
     return 24;
 }
 
 Continuation format_continuation(std::string_view format) {
     if (format == "cell12") return Continuation::KittyFlag;
     if (format == "cell16" || format == "cell24") return Continuation::Blank;
+    if (format == "cell20") return Continuation::VteFragment;
     return Continuation::Spacer;
 }
 
 std::string cell_bytes(std::string_view format, char32_t codepoint, bool continuation) {
     const std::size_t cell = format_cell(format);
+    const Continuation style = format_continuation(format);
+    const bool fragment = continuation && style == Continuation::VteFragment;
     std::string output;
-    if (continuation && format_continuation(format) == Continuation::Spacer) {
+    if (continuation && style == Continuation::Spacer) {
         // foot and the 8-byte grids use a code point above Unicode as spacer.
         const char32_t spacer = 0x00200000u;
         for (int shift = 0; shift < 32; shift += 8) {
             output.push_back(static_cast<char>((spacer >> shift) & 0xff));
         }
-    } else if (continuation && format_continuation(format) == Continuation::Blank) {
+    } else if (continuation && style == Continuation::Blank) {
         output.push_back(0x20);
         output.append(3, '\0');
     } else {
@@ -101,11 +118,12 @@ std::string cell_bytes(std::string_view format, char32_t codepoint, bool continu
                                           0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
                                           0x00, 0x00, 0x00, 0x00};
     for (std::size_t index = 4; index < cell; ++index) {
-        output.push_back(static_cast<char>(
-            continuation && format_continuation(format) == Continuation::KittyFlag &&
-                    index == 8
-                ? 0x01
-                : attributes[index - 4]));
+        unsigned char value = attributes[index - 4];
+        if (continuation && style == Continuation::KittyFlag && index == 8) value = 0x01;
+        // VTE repeats the code point in the fragment cell and flags it in the
+        // low attribute byte.
+        if (fragment && index == 4) value = 0x11;
+        output.push_back(static_cast<char>(value));
     }
     return output;
 }
@@ -135,20 +153,22 @@ std::string encode_suffix(std::string_view format, std::string_view text) {
     return output;
 }
 
-std::string format_prefix(std::string_view format) {
+std::string format_prefix(std::string_view format, std::string_view text = "document prefix ") {
     // A leading empty cell / NUL separates the document text from whatever
     // precedes the buffer in the client's heap, exactly like an empty screen
     // cell does in a real terminal row.
-    if (format == "utf8") return std::string("\0", 1) + "document prefix ";
-    if (format == "utf16") return encode_utf16(std::string("\0", 1)) + encode_utf16("document prefix ");
+    if (format == "utf8") return std::string("\0", 1) + std::string(text);
+    if (format == "utf16") return encode_utf16(std::string("\0", 1)) + encode_utf16(text);
     std::string output(format_cell(format), '\0');
-    for (const char value : std::string_view("document prefix ")) {
+    for (const char value : text) {
         output += cell_bytes(format, static_cast<unsigned char>(value), false);
     }
     return output;
 }
 
-FormatClient spawn_client(std::string_view format, std::string_view suffix = {}) {
+FormatClient spawn_client(std::string_view format, std::string_view suffix = {},
+                           bool preedit_prefix = false,
+                           std::string_view document = "document prefix ") {
     int commands[2], responses[2];
     if (::pipe(commands) != 0) return {};
     if (::pipe(responses) != 0) {
@@ -158,10 +178,11 @@ FormatClient spawn_client(std::string_view format, std::string_view suffix = {})
     }
     const pid_t pid = ::fork();
     if (pid == 0) {
+        allow_memory_probe();
         ::close(commands[1]);
         ::close(responses[0]);
         const std::string suffix_bytes = encode_suffix(format, suffix);
-        std::string buffer = format_prefix(format);
+        std::string buffer = format_prefix(format, document);
         const std::size_t composition_start = buffer.size();
         constexpr std::size_t kCompositionBytes = 1024;
         buffer.append(kCompositionBytes + suffix_bytes.size(), '\0');
@@ -175,6 +196,10 @@ FormatClient spawn_client(std::string_view format, std::string_view suffix = {})
             if (step == '3') composition = encode_composition(format, "你");
             if (step == '4') composition = encode_composition(format, "ㄋㄧㄨ");
             if (step == '5') composition = encode_composition(format, "ㄋㄧㄣ");
+            if (preedit_prefix && (step == '4' || step == '5' || step == '6')) {
+                const std::string last = step == '4' ? "ㄋ" : step == '5' ? "ㄋㄧ" : "你";
+                composition = encode_composition(format, "你") + encode_composition(format, last);
+            }
             std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
                         static_cast<std::ptrdiff_t>(kCompositionBytes + suffix_bytes.size()), '\0');
             std::copy(composition.begin(), composition.end(),
@@ -184,6 +209,76 @@ FormatClient spawn_client(std::string_view format, std::string_view suffix = {})
             (void)::write(responses[1], &step, 1);
         }
         ::_exit(0);
+    }
+    ::close(commands[0]);
+    ::close(responses[1]);
+    std::uintptr_t address = 0;
+    if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
+    return {pid, commands[1], responses[0]};
+}
+
+// A client that never draws the composition into its document (Konsole, VTE):
+// the document holds the prefix and, once the engine commits it, the committed
+// text. The composition itself only lives in the client's preedit member,
+// which is outside the scanned document, so only the committed text can
+// locate the caret.
+int run_committed_client(std::string_view format, int commands, int responses) {
+    allow_memory_probe();
+    std::string prefix = "anchor document prefix ";
+    while (prefix.size() < 460) prefix += "anchor document prefix ";
+    std::string buffer;
+    if (format == "utf8") {
+        buffer = std::string("\0", 1) + prefix;
+    } else if (format == "utf16") {
+        buffer = encode_utf16(std::string("\0", 1)) + encode_utf16(prefix);
+    } else {
+        buffer.assign(format_cell(format), '\0');
+        for (const char value : prefix) {
+            buffer += cell_bytes(format, static_cast<unsigned char>(value), false);
+        }
+    }
+    const std::size_t committed_at = buffer.size();
+    buffer.append(256, '\0');
+    [[maybe_unused]] auto* held = new std::string(std::move(buffer));
+    const auto address = reinterpret_cast<std::uintptr_t>(held->data());
+    (void)::write(responses, &address, sizeof(address));
+    char step = 0;
+    while (::read(commands, &step, 1) == 1) {
+        if (step == '4') {
+            const std::string committed = encode_composition(format, "你");
+            std::fill(held->begin() + static_cast<std::ptrdiff_t>(committed_at), held->end(), '\0');
+            std::copy(committed.begin(), committed.end(),
+                      held->begin() + static_cast<std::ptrdiff_t>(committed_at));
+        }
+        (void)::write(responses, &step, 1);
+    }
+    return 0;
+}
+
+FormatClient spawn_committed_client(std::string_view format) {
+    int commands[2], responses[2];
+    if (::pipe(commands) != 0) return {};
+    if (::pipe(responses) != 0) {
+        ::close(commands[0]);
+        ::close(commands[1]);
+        return {};
+    }
+    const pid_t pid = ::fork();
+    if (pid == 0) {
+        ::close(commands[1]);
+        ::close(responses[0]);
+#if defined(__linux__)
+        // Forking keeps prior suites' context and debug logs in the client's
+        // heap. An exec leaves only the document this client actually owns.
+        const std::string name(format);
+        const std::string command_fd = std::to_string(commands[0]);
+        const std::string response_fd = std::to_string(responses[1]);
+        ::execl("/proc/self/exe", "llavon_ime_rawkey_tests", "--committed-client",
+                name.c_str(), command_fd.c_str(), response_fd.c_str(), nullptr);
+        ::_exit(127);
+#else
+        ::_exit(run_committed_client(format, commands[0], responses[1]));
+#endif
     }
     ::close(commands[0]);
     ::close(responses[1]);
@@ -204,6 +299,7 @@ FormatClient spawn_static_client(std::string_view format, std::string_view text)
     }
     const pid_t pid = ::fork();
     if (pid == 0) {
+        allow_memory_probe();
         ::close(commands[1]);
         ::close(responses[0]);
         std::string buffer = format_prefix(format) + encode_suffix(format, text);
@@ -241,6 +337,7 @@ FormatClient spawn_decoy_client(std::string_view format, Decoy decoy) {
     }
     const pid_t pid = ::fork();
     if (pid == 0) {
+        allow_memory_probe();
         ::close(commands[1]);
         ::close(responses[0]);
         std::string buffer = format_prefix(format);
@@ -299,6 +396,7 @@ FormatClient spawn_plain_copy_client() {
     }
     const pid_t pid = ::fork();
     if (pid == 0) {
+        allow_memory_probe();
         ::close(commands[1]);
         ::close(responses[0]);
         const std::string row = "watch 程式 ";
@@ -361,6 +459,112 @@ bool advance(FormatClient& client, char step) {
 
 }  // namespace
 
+int committed_client_main(std::string_view format, int commands, int responses) {
+    return run_committed_client(format, commands, responses);
+}
+
+// A client that never draws the composition into its document (Konsole, VTE)
+// is located through the text the engine committed: that text is in the
+// document, and the caret sits right behind it while the next composition is
+// typed. The composition itself is not in the document at all.
+RAWKEY_SUITE("the committed text locates the caret without client preedit", memory_commit_anchor) {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') {
+        std::printf("[skip] memory commit anchor: set LLAVON_IME_TEST_MEMSCAN to the built helper\n");
+        return;
+    }
+    for (const std::string_view format :
+         {"utf8", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
+        FormatClient client = spawn_committed_client(format);
+        RAWKEY_ASSERT(client.pid > 0);
+        HarnessOptions options;
+        options.memory_helper_path = helper;
+        Harness harness(options);
+        harness.host().set_probe_pids({static_cast<int>(client.pid)});
+        if (format == "cell12") harness.host().set_program("kitty");
+        if (format == "foot") harness.host().set_program("foot");
+        if (format == "cell16") harness.host().set_program("konsole");
+        if (format == "cell20") harness.host().set_program("vte");
+        if (format == "cell24") harness.host().set_program("alacritty");
+        harness.activate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+        // First composition: the engine commits 你 and the client writes it
+        // into its document.
+        harness.type("su3");
+        harness.expect_commit("你");
+        RAWKEY_ASSERT(advance(client, '4'));
+
+        // Second composition: nothing but the committed text is in the
+        // document, so only the committed-text anchor can locate the caret.
+        harness.key("c");
+        RAWKEY_ASSERT(harness.preedit() == "ㄏ");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        harness.key("l");
+        RAWKEY_ASSERT(harness.preedit() == "ㄏㄠ");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        harness.key("3");
+        RAWKEY_ASSERT(harness.preedit() == "好");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+        const bool adopted = harness.pump_until([&] {
+            return harness.context_text().ends_with("anchor document prefix 你");
+        }, std::chrono::milliseconds(2500));
+        std::printf("[%s] commit-anchor format=%.*s adopted=%d context=%s\n",
+                    adopted ? "ok  " : "FAIL", static_cast<int>(format.size()), format.data(),
+                    adopted ? 1 : 0, harness.context_text().c_str());
+        RAWKEY_ASSERT(adopted);
+
+        ::close(client.commands);
+        ::close(client.responses);
+        ::kill(client.pid, SIGKILL);
+        int status = 0;
+        ::waitpid(client.pid, &status, 0);
+    }
+}
+
+// The scanned document ends in a real commit that happens to be identical to
+// the next rendered preedit. It is still document context: the memory provider
+// already excludes the preedit at the match boundary.
+RAWKEY_SUITE("memory context retains a commit matching the next preedit", memory_same_commit) {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') return;
+    for (const std::string_view format : {"utf8", "cell16", "cell20"}) {
+        FormatClient client = spawn_committed_client(format);
+        RAWKEY_ASSERT(client.pid > 0);
+        HarnessOptions options;
+        options.memory_helper_path = helper;
+        Harness harness(options);
+        harness.host().set_probe_pids({static_cast<int>(client.pid)});
+        if (format == "cell16") harness.host().set_program("konsole");
+        if (format == "cell20") harness.host().set_program("vte");
+        harness.activate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        harness.type("su3");
+        harness.expect_commit("你");
+        RAWKEY_ASSERT(advance(client, '4'));
+
+        harness.key("s");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        harness.key("u");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        harness.key("3");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        const bool adopted = harness.pump_until([&] {
+            return harness.context_text().ends_with("anchor document prefix 你");
+        }, std::chrono::milliseconds(2500));
+        std::printf("[%s] repeated-commit format=%.*s context=%s\n", adopted ? "ok  " : "FAIL",
+                    static_cast<int>(format.size()), format.data(), harness.context_text().c_str());
+        RAWKEY_ASSERT(adopted);
+
+        ::close(client.commands);
+        ::close(client.responses);
+        ::kill(client.pid, SIGKILL);
+        int status = 0;
+        ::waitpid(client.pid, &status, 0);
+    }
+}
+
 RAWKEY_SUITE("memory formats validate through raw keys", memory_formats) {
     const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
     if (helper == nullptr || helper[0] == '\0') {
@@ -368,13 +572,18 @@ RAWKEY_SUITE("memory formats validate through raw keys", memory_formats) {
         return;
     }
     for (const std::string_view format :
-         {"utf8", "utf16", "cell8", "cell12", "foot", "cell16", "cell24"}) {
+         {"utf8", "utf16", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
         FormatClient client = spawn_client(format);
         RAWKEY_ASSERT(client.pid > 0);
         HarnessOptions options;
         options.memory_helper_path = helper;
         Harness harness(options);
         harness.host().set_probe_pids({static_cast<int>(client.pid)});
+        if (format == "cell12") harness.host().set_program("kitty");
+        if (format == "foot") harness.host().set_program("foot");
+        if (format == "cell16") harness.host().set_program("konsole");
+        if (format == "cell20") harness.host().set_program("vte");
+        if (format == "cell24") harness.host().set_program("alacritty");
         harness.activate();
         // Let the activation prime (soft-dirty reset) reach the helper before
         // the client starts writing; the prime is asynchronous.
@@ -414,6 +623,173 @@ RAWKEY_SUITE("memory formats validate through raw keys", memory_formats) {
     }
 }
 
+RAWKEY_SUITE("memory context stays in the focused kitty process", memory_focused_process) {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') return;
+    FormatClient focused = spawn_client("cell12", {}, false, "focused kitty document ");
+    FormatClient other = spawn_client("cell12", {}, false, "another kitty window's unrelated text ");
+    RAWKEY_ASSERT(focused.pid > 0 && other.pid > 0);
+    HarnessOptions options;
+    options.memory_helper_path = helper;
+    Harness harness(options);
+    // Both same-program windows render the same natural preedit. X11 focus is
+    // stronger evidence, but both processes must remain available to scan.
+    harness.host().set_probe_pids({static_cast<int>(other.pid), static_cast<int>(focused.pid)});
+    harness.host().set_focused_probe_pid(static_cast<int>(focused.pid));
+    harness.host().set_program("kitty");
+    harness.activate();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    for (const auto [step, key] : std::vector<std::pair<char, char>>{
+             {'1', 's'}, {'2', 'u'}, {'3', '3'}}) {
+        RAWKEY_ASSERT(advance(focused, step));
+        RAWKEY_ASSERT(advance(other, step));
+        harness.key(std::string(1, key));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    const bool adopted = harness.pump_until([&] {
+        return harness.context_text().ends_with("focused kitty document ");
+    });
+    RAWKEY_ASSERT(adopted);
+    RAWKEY_ASSERT(harness.context_text().find("another kitty window") == std::string::npos);
+    for (const auto& client : {focused, other}) {
+        ::close(client.commands);
+        ::close(client.responses);
+        ::kill(client.pid, SIGKILL);
+        int status = 0;
+        ::waitpid(client.pid, &status, 0);
+    }
+}
+
+RAWKEY_SUITE("memory probe abandons a vanished caret and searches the next process", memory_relocate) {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') return;
+    FormatClient old = spawn_client("cell12", {}, true, "old kitty document ");
+    FormatClient next = spawn_client("cell12", {}, true, "new kitty document ");
+    RAWKEY_ASSERT(old.pid > 0 && next.pid > 0);
+    HarnessOptions options;
+    options.memory_helper_path = helper;
+    Harness harness(options);
+    harness.host().set_program("kitty");
+    harness.host().set_probe_pids({static_cast<int>(old.pid)});
+    harness.activate();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    for (const auto [step, key] : std::vector<std::pair<char, char>>{
+             {'1', 's'}, {'2', 'u'}, {'3', '3'}}) {
+        RAWKEY_ASSERT(advance(old, step));
+        RAWKEY_ASSERT(advance(next, step));
+        harness.key(std::string(1, key));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+    RAWKEY_ASSERT(harness.pump_until([&] {
+        return harness.context_text().ends_with("old kitty document ");
+    }));
+    ::kill(old.pid, SIGKILL);
+    int status = 0;
+    ::waitpid(old.pid, &status, 0);
+    ::close(old.commands);
+    ::close(old.responses);
+    harness.host().set_probe_pids({static_cast<int>(old.pid), static_cast<int>(next.pid)});
+    for (const auto [step, key] : std::vector<std::pair<char, char>>{
+             {'4', 's'}, {'5', 'u'}, {'6', '3'}}) {
+        RAWKEY_ASSERT(advance(next, step));
+        harness.key(std::string(1, key));
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    }
+    RAWKEY_ASSERT(harness.pump_until([&] {
+        return harness.context_text().ends_with("new kitty document ");
+    }, std::chrono::milliseconds(5000)));
+    ::close(next.commands);
+    ::close(next.responses);
+    ::kill(next.pid, SIGKILL);
+    ::waitpid(next.pid, &status, 0);
+}
+
+RAWKEY_SUITE("memory probe does not adopt its own diagnostic output", memory_diagnostic_copy) {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') return;
+    FormatClient copy = spawn_client("cell12", {}, false,
+                                     "[CTX] source=memory-probe units=11 text=\"kitty\" ");
+    RAWKEY_ASSERT(copy.pid > 0);
+    HarnessOptions options;
+    options.memory_helper_path = helper;
+    Harness harness(options);
+    harness.host().set_probe_pids({static_cast<int>(copy.pid)});
+    harness.host().set_program("kitty");
+    harness.activate();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    for (const auto [step, key] : std::vector<std::pair<char, char>>{
+             {'1', 's'}, {'2', 'u'}, {'3', '3'}}) {
+        RAWKEY_ASSERT(advance(copy, step));
+        const auto completed = harness.memory_probe_count();
+        harness.key(std::string(1, key));
+        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() > completed; }));
+    }
+    RAWKEY_ASSERT(harness.context_text().empty());
+    ::close(copy.commands);
+    ::close(copy.responses);
+    ::kill(copy.pid, SIGKILL);
+    int status = 0;
+    ::waitpid(copy.pid, &status, 0);
+}
+
+
+// A client can put the *whole* uncommitted composition in its document buffer.
+// The memory anchor is the last segment, so the first segment appears in the
+// scanner's "before" window but belongs in model padding, not context.
+RAWKEY_SUITE("earlier preedit segments stay out of memory context", memory_preedit_prefix) {
+    const char* helper = std::getenv("LLAVON_IME_TEST_MEMSCAN");
+    if (helper == nullptr || helper[0] == '\0') {
+        std::printf("[skip] memory preedit prefix: set LLAVON_IME_TEST_MEMSCAN to the built helper\n");
+        return;
+    }
+    for (const std::string_view format : {"utf8", "cell12", "cell20"}) {
+        FormatClient client = spawn_client(format, {}, true);
+        RAWKEY_ASSERT(client.pid > 0);
+        HarnessOptions options;
+        options.memory_helper_path = helper;
+        Harness harness(options);
+        harness.host().set_probe_pids({static_cast<int>(client.pid)});
+        if (format == "cell12") harness.host().set_program("kitty");
+        if (format == "cell20") harness.host().set_program("vte");
+        harness.activate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+        harness.key("s");
+        harness.key("u");
+        harness.key("3");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() >= 1; }));
+        auto completed = harness.memory_probe_count();
+        RAWKEY_ASSERT(advance(client, '4'));
+        harness.key("s");
+        RAWKEY_ASSERT(harness.preedit() == "你ㄋ");
+        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() > completed; }));
+        completed = harness.memory_probe_count();
+        RAWKEY_ASSERT(advance(client, '5'));
+        harness.key("u");
+        RAWKEY_ASSERT(harness.preedit() == "你ㄋㄧ");
+        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() > completed; }));
+        RAWKEY_ASSERT(advance(client, '6'));
+        harness.key("3");
+        RAWKEY_ASSERT(harness.preedit() == "你你");
+
+        const bool adopted = harness.pump_until([&] {
+            return harness.context_text().ends_with("document prefix ");
+        });
+        std::printf("[%s] preedit-prefix format=%.*s context=%s\n",
+                    adopted ? "ok  " : "FAIL", static_cast<int>(format.size()), format.data(),
+                    harness.context_text().c_str());
+        RAWKEY_ASSERT(adopted);
+        RAWKEY_ASSERT(harness.context_text().find("你") == std::string::npos);
+
+        ::close(client.commands);
+        ::close(client.responses);
+        ::kill(client.pid, SIGKILL);
+        int status = 0;
+        ::waitpid(client.pid, &status, 0);
+    }
+}
+
 // The same growing composition also matches a static string that begins with
 // it. Its tail shrinks as the composition grows, so the provider must not
 // adopt it; a real caret's following text stays the same.
@@ -424,7 +800,7 @@ RAWKEY_SUITE("a static string prefix is not adopted as context", memory_static_p
         return;
     }
     bool all = true;
-    for (const std::string_view format : {"utf8", "cell8", "cell12", "foot", "cell16", "cell24"}) {
+    for (const std::string_view format : {"utf8", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
         FormatClient client = spawn_static_client(format, "ㄋㄧㄣ囉");
         RAWKEY_ASSERT(client.pid > 0);
         HarnessOptions options;

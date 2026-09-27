@@ -53,6 +53,26 @@ public:
         return probe_pids_;
     }
 
+    int focused_probe_process(ContextId) override {
+        std::lock_guard lock(mutex_);
+        return focused_probe_pid_;
+    }
+
+    void set_focused_probe_pid(int pid) {
+        std::lock_guard lock(mutex_);
+        focused_probe_pid_ = pid;
+    }
+
+    std::string program(ContextId) override {
+        std::lock_guard lock(mutex_);
+        return program_;
+    }
+
+    void set_program(std::string program) {
+        std::lock_guard lock(mutex_);
+        program_ = std::move(program);
+    }
+
     void set_probe_pids(std::vector<int> pids) {
         std::lock_guard lock(mutex_);
         probe_pids_ = std::move(pids);
@@ -122,6 +142,8 @@ private:
     HostContext surrounding_;
     bool sensitive_ = false;
     std::vector<int> probe_pids_;
+    int focused_probe_pid_ = 0;
+    std::string program_;
     int redraw_count_ = 0;
     ContextId last_redraw_context_ = 0;
 };

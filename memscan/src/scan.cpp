@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -22,8 +23,8 @@ namespace llavon::memscan {
 namespace {
 
 constexpr std::size_t kChunkBytes = 4 * 1024 * 1024;
-// Enough locations to verify against: more copies only cost scan time. The
-// main heap is scanned first, so the composition is usually among the first.
+// Bound the locations sent to temporal verification; duplicate screen and log
+// copies must not fill these slots before the document buffer is examined.
 constexpr std::size_t kMaxCandidates = 12;
 // A window with at least this many trailing printable bytes is considered a
 // good sample and ends the scan; shorter runs are kept as the best candidate
@@ -103,29 +104,6 @@ bool cell_attributes_vary(const std::vector<std::byte>& raw, std::size_t cell,
     // continuations, a few styles); a misread gives almost every cell its own
     // pattern because the attribute bytes are the skipped characters.
     return distinct * 4 > cells * 3;
-}
-
-// True when any page in [start, end) was written since the last soft-dirty
-// reset. This reads a handful of pagemap entries instead of the whole dirty
-// set, so a verified hint can be checked in microseconds.
-std::optional<bool> pages_written(pid_t pid, std::uintptr_t start, std::uintptr_t end) {
-    if (end <= start) return false;
-    const int pagemap = ::open(("/proc/" + std::to_string(pid) + "/pagemap").c_str(),
-                               O_RDONLY | O_CLOEXEC);
-    if (pagemap < 0) return std::nullopt;
-    const std::uintptr_t first_page = start & ~(kPageBytes - 1);
-    const std::uintptr_t last_page = (end + kPageBytes - 1) & ~(kPageBytes - 1);
-    const std::size_t count = (last_page - first_page) / kPageBytes;
-    std::vector<std::uint64_t> entries(count);
-    const ssize_t got = ::pread(pagemap, entries.data(), count * sizeof(std::uint64_t),
-                                static_cast<off_t>((first_page / kPageBytes) * sizeof(std::uint64_t)));
-    ::close(pagemap);
-    if (got <= 0) return std::nullopt;
-    const std::size_t read_count = static_cast<std::size_t>(got) / sizeof(std::uint64_t);
-    for (std::size_t index = 0; index < read_count; ++index) {
-        if ((entries[index] & (1ull << 55)) != 0) return true;
-    }
-    return false;
 }
 
 struct Deadline {
@@ -394,7 +372,8 @@ char32_t read_cell_codepoint(const std::byte* bytes) {
 // Screen grids interleave a UTF-32 code point with cell attributes. A wide
 // character occupies two cells; the continuation must not be emitted as a
 // second character. Kitty marks its continuation in the attributes, Konsole
-// fills it with a blank, so empty cells are skipped for every grid.
+// fills it with an unreal placeholder, VTE repeats the code point in a
+// fragment cell, so those cells are skipped for every grid.
 std::string decode_utf32_cell(const std::vector<std::byte>& bytes, std::size_t cell) {
     std::string output;
     for (std::size_t offset = 0; offset + cell <= bytes.size(); offset += cell) {
@@ -403,6 +382,11 @@ std::string decode_utf32_cell(const std::vector<std::byte>& bytes, std::size_t c
         // spacer code point above the Unicode range.
         if (codepoint > 0x10FFFF) continue;
         if (cell == 12 && (static_cast<unsigned char>(bytes[offset + 8]) & 0x01) != 0) continue;
+        if (cell == 20 && (static_cast<unsigned char>(bytes[offset + 4]) & 0x10) != 0) continue;
+        if (cell == 16 && bytes[offset + 14] == std::byte{0} &&
+            bytes[offset + 15] == std::byte{0}) {
+            continue;
+        }
         // Empty cells decode to NUL, which trims the heap bytes before a row
         // in decode_window.
         append_utf8(output, codepoint);
@@ -418,6 +402,7 @@ std::string decode(const std::vector<std::byte>& bytes, Encoding encoding) {
         case Encoding::Utf32Cell8Le: return decode_utf32_cell(bytes, 8);
         case Encoding::Utf32Cell12Le: return decode_utf32_cell(bytes, 12);
         case Encoding::Utf32Cell16Le: return decode_utf32_cell(bytes, 16);
+        case Encoding::Utf32Cell20Le: return decode_utf32_cell(bytes, 20);
         case Encoding::Utf32Cell24Le: return decode_utf32_cell(bytes, 24);
     }
     return {};
@@ -433,6 +418,7 @@ std::size_t unit_size(Encoding encoding) {
         case Encoding::Utf32Cell8Le: return 4;
         case Encoding::Utf32Cell12Le: return 4;
         case Encoding::Utf32Cell16Le: return 4;
+        case Encoding::Utf32Cell20Le: return 4;
         case Encoding::Utf32Cell24Le: return 4;
     }
     return 1;
@@ -481,27 +467,68 @@ std::optional<std::size_t> verify_cell12(pid_t pid, std::uintptr_t address,
         if (offset + kCellBytes + 4 <= bytes.size()) {
             const char32_t following =
                 read_cell_codepoint(bytes.data() + offset + kCellBytes);
-            // kitty repeats the code point, foot stores a spacer above the
-            // Unicode range.
-            wide = following == value || following > 0x10FFFF;
+            // kitty repeats the code point and flags the second cell; foot
+            // stores a spacer above the Unicode range.
+            wide = following > 0x10FFFF ||
+                   (following == value && value > 0x2000 &&
+                    offset + kCellBytes + 8 < bytes.size() &&
+                    (static_cast<unsigned char>(bytes[offset + kCellBytes + 8]) & 0x01) != 0);
         }
         offset += wide ? 2 * kCellBytes : kCellBytes;
     }
     return offset / kCellBytes;
 }
 
-// Grids whose continuation convention is not known exactly (Konsole, VTE):
-// the first code point must match, and the remaining characters are walked
-// best effort to find where the composition ends. The temporal verification
-// across natural composition changes is what actually establishes the
-// location; this only bounds the after window.
+// Skip wide-character continuation cells while walking the anchor: Konsole
+// leaves an unreal placeholder behind a wide glyph, VTE repeats the code
+// point in a fragment cell, and a repeated code point in front of a wide
+// character is the same thing. Every code point still has to match; accepting
+// a one-character prefix makes any unrelated screen row beginning with that
+// character a convincing false hit.
 std::size_t skip_cell_continuations(pid_t pid, std::uintptr_t address, std::size_t offset,
-                                    std::size_t cell, char32_t previous) {
+                                    std::size_t cell, char32_t previous, char32_t next) {
     for (;;) {
         const auto current = read_memory(pid, address + offset, cell);
         if (current.size() < cell) return offset;
         const char32_t value = read_cell_codepoint(current.data());
-        if (value > 0x10FFFF || value == previous) {
+        // Each grid marks the continuation in its own way; a repeated code
+        // point is only a continuation when the grid has no explicit marker
+        // (otherwise "你好好" or "ll" would be skipped and the walk misaligned).
+        bool continuation = false;
+        switch (cell) {
+            case 12:
+                // kitty flags the second cell in the attributes; foot stores a
+                // spacer above the Unicode range.
+                continuation = value > 0x10FFFF ||
+                               (static_cast<unsigned char>(current[8]) & 0x01) != 0;
+                break;
+            case 16:
+                // Konsole marks the right half of a wide glyph as an unreal
+                // cell: code point zero with both extra-flag bytes clear.
+                // Older rows use a blank cell after a wide glyph instead; a
+                // real space in the anchor must still be consumed.
+                continuation = (value == 0 && current[14] == std::byte{0} &&
+                                current[15] == std::byte{0}) ||
+                               (previous > 0x2000 && value == U' ' && next != U' ');
+                break;
+            case 20:
+                // VTE repeats the code point in a fragment cell and flags it
+                // in the low attribute byte.
+                continuation = (static_cast<unsigned char>(current[4]) & 0x10) != 0;
+                break;
+            case 24:
+                // Alacritty fills the second cell with a space and sets the
+                // wide-char-spacer flag.
+                continuation = (value == U' ' &&
+                                (static_cast<unsigned char>(current[4]) & 0x40) != 0) ||
+                               (previous > 0x2000 && value == U' ' && next != U' ');
+                break;
+            default:
+                // Unknown grid layout: a spacer or a repeated wide glyph.
+                continuation = value > 0x10FFFF || (value == previous && previous > 0x2000);
+                break;
+        }
+        if (continuation) {
             offset += cell;
             continue;
         }
@@ -517,13 +544,22 @@ std::optional<std::size_t> verify_cell_prefix(pid_t pid, std::uintptr_t address,
     if (first.size() < cell || read_cell_codepoint(first.data()) != codepoints.front()) {
         return std::nullopt;
     }
-    std::size_t offset = skip_cell_continuations(pid, address, cell, cell, codepoints.front());
+    // VTE repeats a wide character in a flagged fragment cell. A one-char
+    // anchor matching that second cell would put the real character in the
+    // reported "before" text and leak the live preedit into context.
+    if (cell == 20 && (static_cast<unsigned char>(first[4]) & 0x10) != 0) {
+        return std::nullopt;
+    }
+    std::size_t offset = skip_cell_continuations(pid, address, cell, cell, codepoints.front(),
+                                                 codepoints.size() > 1 ? codepoints[1] : 0);
     for (std::size_t index = 1; index < codepoints.size(); ++index) {
         const auto current = read_memory(pid, address + offset, cell);
-        if (current.size() < cell) break;
-        if (read_cell_codepoint(current.data()) != codepoints[index]) break;
+        if (current.size() < cell || read_cell_codepoint(current.data()) != codepoints[index]) {
+            return std::nullopt;
+        }
         offset += cell;
-        offset = skip_cell_continuations(pid, address, offset, cell, codepoints[index]);
+        offset = skip_cell_continuations(pid, address, offset, cell, codepoints[index],
+                                         index + 1 < codepoints.size() ? codepoints[index + 1] : 0);
     }
     return offset;
 }
@@ -532,6 +568,39 @@ std::optional<std::size_t> verify_cell_prefix(pid_t pid, std::uintptr_t address,
 // contribute: everything up to the last NUL before the match, nothing after
 // the first NUL behind it, and replacement characters a cut lead byte leaves.
 std::string decode_window(std::vector<std::byte> raw, Encoding encoding) {
+    if (const std::size_t cell = cell_bytes(encoding); cell >= 12) {
+        // A heap object can end immediately before a screen row. In kitty a
+        // few binary cells were followed by one plausible CJK code point
+        // with unrelated attributes, then a uniform ASCII row; decoding
+        // only code points let that orphan byte sequence become the first
+        // character of the context. Require two invalid cells and several
+        // agreeing row attributes before treating this as a boundary.
+        std::size_t invalid = 0;
+        std::size_t cut = 0;
+        const std::size_t count = raw.size() / cell;
+        for (std::size_t index = 0; index < count; ++index) {
+            const char32_t codepoint = read_cell_codepoint(raw.data() + index * cell);
+            if (codepoint > 0x10FFFF) {
+                ++invalid;
+                continue;
+            }
+            if (invalid >= 2 && index + 3 < count && codepoint > 0x7F &&
+                std::memcmp(raw.data() + index * cell + 4,
+                            raw.data() + (index + 1) * cell + 4, cell - 4) != 0) {
+                const auto* attributes = raw.data() + (index + 1) * cell + 4;
+                bool uniform = true;
+                for (std::size_t next = index + 2; next <= index + 3; ++next) {
+                    if (std::memcmp(attributes, raw.data() + next * cell + 4, cell - 4) != 0) {
+                        uniform = false;
+                        break;
+                    }
+                }
+                if (uniform) cut = (index + 1) * cell;
+            }
+            invalid = 0;
+        }
+        if (cut != 0) raw.erase(raw.begin(), raw.begin() + static_cast<std::ptrdiff_t>(cut));
+    }
     std::string decoded = decode(raw, encoding);
     // Terminal grids store a wide character as two cells: the code point and a
     // continuation marker (U+FFFF). Noncharacters are not document text, so
@@ -633,7 +702,7 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                               std::size_t after_bytes, const ScanLimits& limits,
                               const std::vector<Hint>& hints, ScanError& error,
                               std::vector<Match>* candidates, std::uintptr_t* next_address,
-                              ScanStats* stats, bool changed_only) {
+                              ScanStats* stats, bool changed_only, bool reset_dirty_after) {
     if (!same_uid(pid)) {
         error = {"foreign-pid", "process " + std::to_string(pid) + " is not owned by this user"};
         return std::nullopt;
@@ -658,19 +727,11 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
             hint_regions.push_back(Region{hint.start, hint.end, true});
         }
     }
-    if (changed_only && !hint_regions.empty()) {
-        std::vector<Region> written;
-        bool known = true;
-        for (const auto& range : hint_regions) {
-            const auto state = pages_written(pid, range.start, range.end);
-            if (!state.has_value()) {
-                known = false;
-                break;
-            }
-            if (*state) written.push_back(range);
-        }
-        if (known) hint_regions = std::move(written);
-    }
+    // Hints are read directly, even when their pages were not written since
+    // the last reset: the text in front of the caret does not change while the
+    // composition does, and a committed-text anchor is never rewritten at all.
+    // A stale hint is harmless — the anchor still has to match there and the
+    // dirty set is scanned afterwards.
     const std::size_t hint_count = hint_regions.size();
     std::vector<Region> regions = hint_regions;
     // The dirty fallback is read lazily: a matching hint ends the scan first.
@@ -683,8 +744,10 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
             regions = dirty_pages(pid, regions);
             // Reset after the dirty set was read, before scanning it. A write
             // that lands while the scan runs is then recorded for the next
-            // request instead of being cleared by a reset afterwards.
-            reset_soft_dirty(pid);
+            // request instead of being cleared by a reset afterwards. A
+            // multi-anchor request defers the reset until every anchor has
+            // read the same dirty set.
+            if (reset_dirty_after) reset_soft_dirty(pid);
         }
     }
 
@@ -693,7 +756,6 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
     // Candidate slots filled by hits whose following text is a boundary. A
     // word-continuation hit may be a static string prefix, so it must not end
     // the scan before the real document buffer was seen.
-    std::size_t strong_candidates = 0;
     // Keep enough of the previous chunk that a hit's context window is
     // usually already in the buffer, so most hits need no extra syscalls.
     const std::size_t overlap =
@@ -721,7 +783,12 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 truncated = true;
                 break;
             }
-            const std::size_t request = std::min({kChunkBytes, static_cast<std::size_t>(region.end - position),
+            // A hint is a neighbourhood, not a mapped range. Its start can
+            // fall in an unmapped page just before the client's buffer; one
+            // large failed read would skip the actual anchor altogether.
+            const std::size_t chunk_limit = region_index < hint_count
+                                                ? kPageBytes - position % kPageBytes : kChunkBytes;
+            const std::size_t request = std::min({chunk_limit, static_cast<std::size_t>(region.end - position),
                                                   limits.max_bytes_per_pid - scanned});
             int read_error = 0;
             auto chunk = read_memory(pid, position, request, &read_error);
@@ -755,14 +822,28 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 const std::size_t unit = unit_size(encoding);
                 std::size_t search_from = 0;
                 for (;;) {
-                const void* found = search_from < area.size()
-                                        ? memmem(area.data() + search_from, area.size() - search_from,
-                                                 pattern.data(), pattern.size())
-                                        : nullptr;
+                // Most text patterns have a nonzero leading byte. SIMD-optimized
+                // memchr finds that byte cheaply; compare the full pattern only
+                // at those locations. A zero leading byte is common in UTF-16/
+                // UTF-32 heap data, so use memmem there to avoid excessive
+                // comparisons of zero-filled pages.
+                const void* found = nullptr;
+                if (search_from < area.size()) {
+                    found = pattern[0] == std::byte{0}
+                                ? memmem(area.data() + search_from, area.size() - search_from,
+                                         pattern.data(), pattern.size())
+                                : std::memchr(area.data() + search_from,
+                                              static_cast<unsigned char>(pattern[0]),
+                                              area.size() - search_from);
+                }
                 if (found == nullptr) break;
                 const auto offset = static_cast<std::size_t>(
                     static_cast<const std::byte*>(found) - area.data());
                 search_from = offset + 1;
+                if (area.size() - offset < pattern.size() ||
+                    std::memcmp(area.data() + offset, pattern.data(), pattern.size()) != 0) {
+                    continue;
+                }
                 const auto address = area_start + offset;
                 // Genuine char16_t/char32_t buffers are aligned to their
                 // code-unit width. Misaligned byte coincidences (observed
@@ -774,6 +855,23 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 std::size_t match_bytes = pattern.size();
                 if (const std::size_t cell = cell_bytes(encoding); cell != 0) {
                     if (cell == kCellBytes) {
+                        // The cell pattern contains only the first code point.
+                        // Common first letters occur hundreds of times in a
+                        // terminal screen. Reject them from the already-read
+                        // chunk before doing process_vm_readv for each one.
+                        // At a chunk boundary, leave verification to the
+                        // existing cross-process walk instead.
+                        if (anchor.codepoints.size() > 1 &&
+                            offset <= area.size() &&
+                            area.size() - offset >= 2 * cell + 4) {
+                            const char32_t first = anchor.codepoints.front();
+                            const char32_t following = read_cell_codepoint(area.data() + offset + cell);
+                            const std::size_t next = cell * (following == first || following > 0x10FFFF ? 2 : 1);
+                            if (area.size() - offset >= next + 4 &&
+                                read_cell_codepoint(area.data() + offset + next) != anchor.codepoints[1]) {
+                                continue;
+                            }
+                        }
                         const auto cells = verify_cell12(pid, address, anchor.codepoints);
                         if (!cells) continue;
                         match_bytes = *cells * kCellBytes;
@@ -795,17 +893,34 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 // following text; a 16-byte request cannot cover a 24-byte
                 // cell and would make that grid blind to static prefixes.
                 if (after_bytes > 0) after_window = std::max(after_window, window_unit);
-                const std::uintptr_t left_edge = std::max<std::uintptr_t>(
-                    region.start, address >= before_window ? address - before_window : 0);
-                const std::uintptr_t right_edge = std::min<std::uintptr_t>(
-                    region.end, address + match_bytes + after_window);
+                // The hit may be on a dirty page while the preceding row is
+                // on an unchanged page. Restricting the *window* to the dirty
+                // region silently drops its first characters. Searching is
+                // still confined to the region; read adjacent bytes only
+                // after a matching anchor has been located.
+                const std::uintptr_t left_edge = address >= before_window ? address - before_window : 0;
+                const std::uintptr_t right_edge = address + match_bytes + after_window;
                 auto before_raw = address > left_edge
                                       ? slice_or_read(left_edge, address - left_edge)
                                       : std::vector<std::byte>{};
                 auto after_raw = right_edge > address + match_bytes
-                                     ? slice_or_read(address + match_bytes,
-                                                     right_edge - address - match_bytes)
-                                     : std::vector<std::byte>{};
+                                      ? slice_or_read(address + match_bytes,
+                                                      right_edge - address - match_bytes)
+                                      : std::vector<std::byte>{};
+                if (before_raw.empty() && address > left_edge) {
+                    // The requested window can begin in an unmapped page.
+                    // Recover the readable part of the hit's own page.
+                    const auto page_start = address - address % kPageBytes;
+                    if (page_start < address && page_start > left_edge) {
+                        before_raw = slice_or_read(page_start, address - page_start);
+                    }
+                    if (before_raw.empty() && address > region.start && left_edge < region.start) {
+                        before_raw = slice_or_read(region.start, address - region.start);
+                    }
+                }
+                if (after_raw.empty() && region.end > address + match_bytes && right_edge > region.end) {
+                    after_raw = slice_or_read(address + match_bytes, region.end - address - match_bytes);
+                }
                 // Keep the windows aligned to the encoding unit so the decoder
                 // starts at a code unit boundary.
                 if (before_raw.size() % window_unit != 0) {
@@ -813,32 +928,6 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                                      before_raw.begin() + static_cast<std::ptrdiff_t>(before_raw.size() % window_unit));
                 }
 
-#ifdef LLAVON_IME_DEBUG
-                // The raw window can contain the composition itself; the log
-                // is often displayed in a terminal, so only dump it when the
-                // extra switch is set.
-                static const bool dump_raw = std::getenv("LLAVON_IME_DEBUG_RAW") != nullptr;
-                if (dump_raw) {
-                    // One write so the dump cannot interleave with the
-                    // input method's own stderr lines.
-                    char head[160];
-                    std::snprintf(head, sizeof(head),
-                                  "hit pid=%d enc=%s addr=0x%lx before=%zu after=%zu raw=",
-                                  static_cast<int>(pid), encoding_name(encoding),
-                                  static_cast<unsigned long>(address), before_raw.size(),
-                                  after_raw.size());
-                    static constexpr char kHex[] = "0123456789abcdef";
-                    std::string line = head;
-                    line.reserve(line.size() + before_raw.size() * 2 + 1);
-                    for (const std::byte byte : before_raw) {
-                        const auto value = static_cast<unsigned>(byte);
-                        line.push_back(kHex[value >> 4]);
-                        line.push_back(kHex[value & 0xF]);
-                    }
-                    line.push_back('\n');
-                    std::fwrite(line.data(), 1, line.size(), stderr);
-                }
-#endif
                 Match match;
                 match.pid = pid;
                 match.encoding = encoding;
@@ -863,6 +952,29 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 // or protocol buffers.
                 match.confidence = std::min(score, 32) +
                                    (cell_bytes(encoding) != 0 ? 32 : 0);
+#ifdef LLAVON_IME_DEBUG
+                // Dump usable text windows only. Logging every binary hit
+                // creates many copies of the anchor in the scanned client
+                // and can drown out the document buffer itself.
+                if (score >= kGoodTextRun && !run.suspicious && !misread_attributes) {
+                    char head[160];
+                    std::snprintf(head, sizeof(head),
+                                  "hit pid=%d enc=%s addr=0x%lx before=%zu after=%zu raw=",
+                                  static_cast<int>(pid), encoding_name(encoding),
+                                  static_cast<unsigned long>(address), before_raw.size(),
+                                  match.after_bytes);
+                    static constexpr char kHex[] = "0123456789abcdef";
+                    std::string line = head;
+                    line.reserve(line.size() + before_raw.size() * 2 + 1);
+                    for (const std::byte byte : before_raw) {
+                        const auto value = static_cast<unsigned>(byte);
+                        line.push_back(kHex[value >> 4]);
+                        line.push_back(kHex[value & 0xF]);
+                    }
+                    line.push_back('\n');
+                    std::fwrite(line.data(), 1, line.size(), stderr);
+                }
+#endif
                 if (stats != nullptr && score >= kGoodTextRun && !word_continuation &&
                     !run.suspicious && !misread_attributes) {
                     ++stats->qualified;
@@ -882,9 +994,20 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                     // after it is stable across composition states, which a
                     // static string's shrinking tail cannot be.
                     match.continuation = word_continuation;
-                    if (!word_continuation) ++strong_candidates;
                     if (candidates->size() < kMaxCandidates) {
                         candidates->push_back(match);
+                    } else if (cell_bytes(encoding) != 0 &&
+                               !std::ranges::any_of(*candidates, [](const Match& item) {
+                                   return cell_bytes(item.encoding) != 0;
+                               })) {
+                        // Byte strings copied by the client (including its
+                        // debug output) can fill every slot before the screen
+                        // grid is visited. Keep a slot for the first real
+                        // grid location so it can be verified next state.
+                        const auto plain = std::ranges::find_if(*candidates, [](const Match& item) {
+                            return cell_bytes(item.encoding) == 0;
+                        });
+                        if (plain != candidates->end()) *plain = match;
                     } else if (region_index < hint_count &&
                                std::ranges::any_of(hints, [&](const Hint& hint) {
                                    return hint.pid == pid && hint.match_address == match.address;
@@ -898,9 +1021,50 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                         // buffer.
                         const auto weak = std::ranges::find_if(
                             *candidates, [](const Match& item) { return item.continuation; });
-                        if (weak != candidates->end()) *weak = match;
+                        if (weak != candidates->end()) {
+                            *weak = match;
+                        } else {
+                            // When copies have filled the slots, prefer the
+                            // one closest to the validated address. In
+                            // particular, an old copy inside a narrow hint
+                            // must not crowd out the adjacent document row.
+                            const auto distance = [&](std::uintptr_t address) {
+                                std::uintptr_t nearest = std::numeric_limits<std::uintptr_t>::max();
+                                for (const auto& hint : hints) {
+                                    if (hint.pid != pid || hint.match_address == 0) continue;
+                                    const auto delta = address > hint.match_address
+                                                           ? address - hint.match_address
+                                                           : hint.match_address - address;
+                                    nearest = std::min(nearest, delta);
+                                }
+                                return nearest;
+                            };
+                            const auto duplicate = std::ranges::find_if(*candidates, [&](const Match& item) {
+                                return item.before == match.before &&
+                                       std::ranges::count_if(*candidates, [&](const Match& other) {
+                                           return other.before == item.before;
+                                       }) > 1 && distance(match.address) < distance(item.address);
+                            });
+                            if (duplicate != candidates->end()) *duplicate = match;
+                        }
                     }
-                    if (strong_candidates == kMaxCandidates && region_index >= hint_count) {
+                    // A process can keep many copies of the same row (and
+                    // debug logs can create still more). Keep looking until
+                    // the slots represent distinct prefixes; otherwise the
+                    // real document copy may sit just beyond the first 12.
+                    if (candidates->size() == kMaxCandidates && region_index >= hint_count &&
+                        (!limits.stop_at_strong_grid_candidate ||
+                         std::ranges::any_of(*candidates, [](const Match& item) {
+                             return cell_bytes(item.encoding) != 0;
+                         })) &&
+                        std::ranges::all_of(*candidates, [](const Match& item) {
+                            return !item.continuation;
+                        }) &&
+                        std::ranges::all_of(*candidates, [&](const Match& item) {
+                            return std::ranges::count_if(*candidates, [&](const Match& other) {
+                                return item.before == other.before;
+                            }) == 1;
+                        })) {
                         resume_at(position + request);
                         return std::nullopt;
                     }
@@ -921,31 +1085,30 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 tail = chunk;
             }
             position += request;
+            // For a known terminal, the first complete, plausible screen row
+            // is enough to start temporal verification. Finish the chunk to
+            // retain competing copies nearby, rather than reading every map
+            // before the next raw key can be examined.
+            if (candidates != nullptr && limits.stop_at_strong_grid_candidate &&
+                region_index >= hint_count &&
+                std::ranges::any_of(*candidates, [](const Match& item) {
+                    return !item.continuation && cell_bytes(item.encoding) != 0;
+                })) {
+                if (next_address != nullptr) *next_address = 0;
+                return std::nullopt;
+            }
         }
         if (truncated) break;
-        // A validated address is a much better lead than a full-process
-        // search. Return the nearby candidates without scanning every map.
-        if (candidates != nullptr && region_index < hint_count &&
-            std::ranges::any_of(*candidates, [&](const Match& match) {
-                return std::ranges::any_of(hints, [&](const Hint& hint) {
-                    return hint.pid == pid && hint.match_address == match.address &&
-                           !hint.before.empty() && hint.before == match.before;
-                });
-            })) {
-            // Consume this state's dirty bits: the next request must only see
-            // writes that happen after this point.
-            if (changed_only) reset_soft_dirty(pid);
-            return std::nullopt;
-        }
-        // None of the hinted copies was the verified one. Their positions
-        // must not consume the candidate budget of the dirty scan.
-        if (candidates != nullptr && region_index + 1 == hint_count) candidates->clear();
+        // The hinted region was scanned first, but the scan continues: a
+        // validated hint can be an old copy of the row (scrollback, an older
+        // screen state) while the current row sits elsewhere, and the engine
+        // has to be able to compare them.
         if (region_index + 1 == regions.size() && !fallback_added) {
             fallback_added = true;
             auto fallback = read_regions(pid, next_address ? *next_address : 0);
             if (changed_only) {
                 fallback = dirty_pages(pid, fallback);
-                reset_soft_dirty(pid);
+                if (reset_dirty_after) reset_soft_dirty(pid);
             }
             regions.insert(regions.end(), fallback.begin(), fallback.end());
         }
@@ -966,6 +1129,61 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
     return std::nullopt;
 }
 
+void scan_pid_anchors(pid_t pid, const std::vector<AnchorRequest>& anchors,
+                      std::size_t before_bytes, std::size_t after_bytes,
+                      const ScanLimits& limits, const std::vector<Hint>& hints,
+                      ScanError& error, std::vector<Match>* candidates,
+                      std::uintptr_t* next_address, ScanStats* stats, bool changed_only) {
+    if (anchors.empty()) {
+        error = {"not-found", "no anchor"};
+        return;
+    }
+    // The same dirty set is used for every anchor: a changed-only scan reads
+    // it once and the caller resets the baseline after this function returns.
+    bool denied = false;
+    ScanError reported;
+    for (std::size_t index = 0; index < anchors.size(); ++index) {
+        const Anchor* use =
+            anchors[index].narrowed != nullptr ? anchors[index].narrowed : anchors[index].full;
+        if (use == nullptr) continue;
+        const std::size_t before_count = candidates != nullptr ? candidates->size() : 0;
+        ScanError local;
+        // Only the first anchor keeps the resume cursor: the others read the
+        // dirty set from the start, which is what a fresh state needs.
+        (void)scan_pid(pid, *use, before_bytes, after_bytes, limits, hints, local, candidates,
+                       index == 0 ? next_address : nullptr, stats, changed_only, false);
+        if (anchors[index].narrowed != nullptr && anchors[index].full != nullptr &&
+            (candidates == nullptr || candidates->size() == before_count)) {
+            // The client's layout may differ from the table; try every encoding
+            // before giving up on this anchor.
+            (void)scan_pid(pid, *anchors[index].full, before_bytes, after_bytes, limits, hints,
+                           local, candidates, nullptr, stats, changed_only, false);
+        }
+        if (local.code == "denied") denied = true;
+        if (!local.code.empty() && local.code != "not-found" && reported.code.empty()) {
+            reported = local;
+        }
+        if (candidates != nullptr) {
+            for (std::size_t i = before_count; i < candidates->size(); ++i) {
+                (*candidates)[i].anchor_index = index;
+            }
+        }
+    }
+    // Every anchor has read the same dirty set; consume it now.
+    if (changed_only) reset_soft_dirty(pid);
+    if (candidates != nullptr && !candidates->empty()) {
+        error = {};
+        return;
+    }
+    if (denied) {
+        error = {"denied", "process memory read denied; grant CAP_SYS_PTRACE to the helper "
+                            "or set kernel.yama.ptrace_scope=0"};
+    } else if (!reported.code.empty()) {
+        error = std::move(reported);
+    } else {
+        error = {"not-found", "composition not found"};
+    }
+}
 
 
 }  // namespace llavon::memscan

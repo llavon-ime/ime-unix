@@ -415,6 +415,10 @@ std::string Harness::context_text() const {
     return u16_to_utf8(engine_->context_text(context_));
 }
 
+std::size_t Harness::memory_probe_count() const {
+    return engine_->memory_probe_count();
+}
+
 void Harness::activate() {
     engine_->activate(context_);
 }

@@ -76,6 +76,11 @@ if(Fcitx5_FOUND AND NOT WIN32)
         fcitx5/ime_config.cpp)
     target_include_directories(llavon-ime-addon PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(llavon-ime-addon PRIVATE Fcitx5::Core llavon_ime_engine)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
+        target_link_libraries(llavon-ime-addon PRIVATE PkgConfig::XCB)
+    endif()
     target_compile_definitions(llavon-ime-addon PRIVATE
         LLAVON_IME_SOURCE_TABLE_PATH="${LLAVON_IME_TABLE_SOURCE_DIR}/bopomofo_char.json"
         LLAVON_IME_INSTALLED_TABLE_PATH="${LLAVON_IME_INSTALLED_TABLE_PATH}"

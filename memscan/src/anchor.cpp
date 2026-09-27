@@ -138,6 +138,7 @@ const char* encoding_name(Encoding encoding) {
         case Encoding::Utf32Cell8Le: return "utf32cell8le";
         case Encoding::Utf32Cell12Le: return "utf32cell12le";
         case Encoding::Utf32Cell16Le: return "utf32cell16le";
+        case Encoding::Utf32Cell20Le: return "utf32cell20le";
         case Encoding::Utf32Cell24Le: return "utf32cell24le";
     }
     return "unknown";
@@ -148,6 +149,7 @@ std::size_t cell_bytes(Encoding encoding) {
         case Encoding::Utf32Cell8Le: return 8;
         case Encoding::Utf32Cell12Le: return 12;
         case Encoding::Utf32Cell16Le: return 16;
+        case Encoding::Utf32Cell20Le: return 20;
         case Encoding::Utf32Cell24Le: return 24;
         default: return 0;
     }
@@ -184,10 +186,11 @@ std::optional<Anchor> parse_anchor(const std::string& utf8, AnchorError& error) 
     const auto first_cell = to_utf32_cell_bytes(codepoints.front());
     anchor.encodings = {Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf32Le,
                         Encoding::Utf32Cell8Le, Encoding::Utf32Cell12Le,
-                        Encoding::Utf32Cell16Le, Encoding::Utf32Cell24Le};
+                        Encoding::Utf32Cell16Le, Encoding::Utf32Cell20Le,
+                        Encoding::Utf32Cell24Le};
     anchor.patterns = {to_utf8_bytes(codepoints), to_utf16_bytes(codepoints),
                        to_utf32_bytes(codepoints), first_cell, first_cell, first_cell,
-                       first_cell};
+                       first_cell, first_cell};
     for (const auto& pattern : anchor.patterns) {
         anchor.max_pattern_bytes = std::max(anchor.max_pattern_bytes, pattern.size());
     }

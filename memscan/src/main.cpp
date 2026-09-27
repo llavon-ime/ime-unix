@@ -125,11 +125,11 @@ std::vector<llavon::memscan::Encoding> preferred_encodings(std::string_view prog
         return list;
     };
     if (has("kitty") || has("foot")) return with(Encoding::Utf32Cell12Le);
-    if (has("konsole")) return with(Encoding::Utf32Cell8Le);
+    if (has("konsole")) return with(Encoding::Utf32Cell16Le);
     if (has("alacritty")) return with(Encoding::Utf32Cell24Le);
     if (has("gnome-terminal") || has("vte") || has("xfce4-terminal") ||
         has("mate-terminal") || has("tilix") || has("terminator")) {
-        return with(Encoding::Utf32Cell8Le);
+        return with(Encoding::Utf32Cell20Le);
     }
     return {};
 }
@@ -169,27 +169,52 @@ void serve() {
                 std::cout << response.dump() << '\n' << std::flush;
                 continue;
             }
-            const auto text = request.at("anchor").get<std::string>();
-            AnchorError anchor_error;
-            const auto anchor = llavon::memscan::parse_anchor(text, anchor_error);
-            if (!anchor) throw std::runtime_error(anchor_error.detail);
+            // One request may carry several anchors: the composition on screen
+            // and the text committed just before it. They are scanned over the
+            // same dirty set, so a commit and the composition that follows can
+            // both be found by the same request.
+            std::vector<std::string> anchor_texts;
+            if (request.contains("anchors") && request["anchors"].is_array()) {
+                for (const auto& entry : request["anchors"]) {
+                    if (entry.is_string()) anchor_texts.push_back(entry.get<std::string>());
+                    if (anchor_texts.size() >= 4) break;
+                }
+            }
+            if (anchor_texts.empty()) anchor_texts.push_back(request.at("anchor").get<std::string>());
             // A known client stores its screen with one cell width; trying
             // only that width avoids reading the same bytes with a wrong
             // stride, which produces plausible but wrong text.
             const auto program = request.value("program", std::string{});
             const auto preferred = preferred_encodings(program);
-            std::optional<Anchor> narrowed;
-            if (!preferred.empty()) {
-                narrowed = anchor;
-                narrowed->patterns.clear();
-                narrowed->encodings.clear();
-                for (std::size_t index = 0; index < anchor->encodings.size(); ++index) {
-                    if (std::ranges::find(preferred, anchor->encodings[index]) != preferred.end()) {
-                        narrowed->encodings.push_back(anchor->encodings[index]);
-                        narrowed->patterns.push_back(anchor->patterns[index]);
+            std::vector<Anchor> anchors;
+            std::vector<llavon::memscan::AnchorRequest> requests;
+            // Pointers into `anchors` are kept, so reserve up front.
+            anchors.reserve(anchor_texts.size() * 2);
+            for (const auto& text : anchor_texts) {
+                AnchorError anchor_error;
+                auto parsed = llavon::memscan::parse_anchor(text, anchor_error);
+                if (!parsed) continue;
+                llavon::memscan::AnchorRequest entry;
+                entry.full = &anchors.emplace_back(std::move(*parsed));
+                if (!preferred.empty()) {
+                    Anchor narrowed = *entry.full;
+                    narrowed.patterns.clear();
+                    narrowed.encodings.clear();
+                    for (std::size_t index = 0; index < entry.full->encodings.size(); ++index) {
+                        if (std::ranges::find(preferred, entry.full->encodings[index]) !=
+                            preferred.end()) {
+                            narrowed.encodings.push_back(entry.full->encodings[index]);
+                            narrowed.patterns.push_back(entry.full->patterns[index]);
+                        }
                     }
+                    entry.narrowed = &anchors.emplace_back(std::move(narrowed));
                 }
+                requests.push_back(entry);
             }
+            if (requests.empty()) throw std::runtime_error("anchor-invalid");
+            // A commit may have written the text before the dirty baseline
+            // was reset, so the first scan after it reads everything.
+            const bool force_full = request.value("full", false);
             const auto request_epoch = request.value("epoch", std::uint64_t{0});
             if (request_epoch != epoch) {
                 next_address.clear();
@@ -214,6 +239,7 @@ void serve() {
             // Effectively a full scan of the writable address space; the
             // per-request deadline still bounds the work.
             limits.max_bytes_per_pid = 8ull * 1024 * 1024 * 1024;
+            limits.stop_at_strong_grid_candidate = !preferred.empty();
             nlohmann::json matches = nlohmann::json::array();
             nlohmann::json progress = nlohmann::json::array();
             std::string error_code = "not-found";
@@ -231,16 +257,10 @@ void serve() {
                 std::vector<Match> candidates;
                 // Enough context for the model: 1024 bytes is 85 terminal
                 // grid cells, or 1024/512/256 units in the byte encodings.
-                (void)llavon::memscan::scan_pid(pid, narrowed ? *narrowed : *anchor, 1024, 16,
-                                                limits, hints, error, &candidates,
-                                                &next_address[pid], &stats, changed_only[pid]);
-                if (narrowed && candidates.empty()) {
-                    // The client's layout may differ from the table; try every
-                    // encoding before giving up on this state.
-                    (void)llavon::memscan::scan_pid(pid, *anchor, 1024, 16, limits, hints, error,
-                                                    &candidates, &next_address[pid], &stats,
-                                                    changed_only[pid]);
-                }
+                if (force_full) next_address[pid] = 0;
+                llavon::memscan::scan_pid_anchors(pid, requests, 1024, 16, limits, hints, error,
+                                                  &candidates, &next_address[pid], &stats,
+                                                  changed_only[pid] && !force_full);
                 // The first request for a PID is a full scan; reset afterwards
                 // so later requests only read what the client writes. A
                 // changed-only scan resets internally, right after reading the
@@ -270,6 +290,7 @@ void serve() {
                                        {"confidence", match.confidence},
                                        {"before", match.before},
                                        {"after", match.after},
+                                       {"anchor_index", match.anchor_index},
                                        {"continuation", match.continuation}});
                 }
                 if (!error.code.empty()) error_code = error.code;
