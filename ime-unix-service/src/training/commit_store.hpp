@@ -61,8 +61,10 @@ private:
 
 // When protection is configured the cipher must be unlocked and every row must
 // be encrypted. Without protection the legacy plaintext rows stay readable.
+// manual_only keeps only records that explicitly selected a candidate.
 std::vector<CommitRecord> read_commits(sqlite3* db, const std::string& state,
-                                       const CommitCipher& cipher, int offset, int limit);
+                                       const CommitCipher& cipher, int offset, int limit,
+                                       bool manual_only = false);
 std::vector<CommitRecord> read_commits_by_id(sqlite3* db, const std::vector<std::string>& ids,
                                              const CommitCipher& cipher);
 

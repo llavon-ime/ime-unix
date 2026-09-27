@@ -1,4 +1,6 @@
 #include "commit_store.hpp"
+#include "libtorch_cache.hpp"
+#include "lora_presets.hpp"
 #include "numeric_dataset.hpp"
 
 #include <nlohmann/json.hpp>
@@ -368,6 +370,51 @@ void check_model(const fs::path& output) {
     fs::remove(metadata);
 }
 
+// One non-blocking look at the rolling manifest for the pinned commit. The
+// immutable per-commit manifest is still the authority; callers re-validate
+// the version, asset name, and SHA-256 before installing anything.
+nlohmann::json fetch_rolling_candidate(const fs::path& output, std::string_view expected_commit, int attempt) {
+    const auto manifest_file = output / "release.json.partial";
+    try {
+        run_tool("curl", {"--fail", "--location", "--retry", "3", "--header", "Cache-Control: no-cache",
+                          "--output", manifest_file.string(),
+                          "https://github.com/llavon-ime/lora-trainer/releases/download/latest/latest.json?commit=" +
+                          std::string(expected_commit) + "&attempt=" + std::to_string(attempt)});
+        auto candidate = nlohmann::json::parse(std::ifstream(manifest_file));
+        fs::remove(manifest_file);
+        if (candidate.is_object() && candidate.value("commit", "") == expected_commit) return candidate;
+    } catch (...) {}
+    fs::remove(manifest_file);
+    return nlohmann::json::object();
+}
+
+// Reports the installed trainer and the release of the pinned commit without
+// changing anything, so the manager page can show the version and whether an
+// update is available (the same fields the Windows manager exposes).
+void check_trainer(const fs::path& output) {
+    fs::create_directories(output);
+    constexpr std::string_view expected_commit = LLAVON_IME_LORA_PINNED_COMMIT;
+    const bool usable = trainer_usable(output / "llavon-lora");
+    std::string installed_version, installed_commit;
+    try {
+        const auto stamp = nlohmann::json::parse(std::ifstream(output / "trainer-release.json"));
+        installed_version = stamp.value("version", "");
+        installed_commit = stamp.value("commit", "");
+    } catch (...) {}
+    auto candidate = fetch_rolling_candidate(output, expected_commit, 1);
+    if (candidate.value("commit", "") != expected_commit)
+        candidate = trainer_release_for_commit(output, expected_commit);
+    const std::string release_version =
+        candidate.value("commit", "") == expected_commit ? candidate.value("version", "") : std::string{};
+    const bool update = !usable || installed_commit != expected_commit ||
+                        (!release_version.empty() && installed_version != release_version);
+    std::cout << "installed=" << (usable ? "true" : "false")
+              << " version=" << (installed_version.empty() ? "none" : installed_version)
+              << " commit=" << (installed_commit.empty() ? "none" : installed_commit)
+              << " release=" << (release_version.empty() ? "unknown" : release_version)
+              << " update-available=" << (update ? "true" : "false") << '\n';
+}
+
 void install_trainer(const fs::path& output) {
     // Every platform declares the name so the function still compiles where no
     // release exists (macOS x86_64); the check below reports those.
@@ -412,7 +459,6 @@ void install_trainer(const fs::path& output) {
                 }
             }
         } catch (...) {}
-        const std::string rolling_url = "https://github.com/llavon-ime/lora-trainer/releases/download/latest/latest.json";
         int attempts = 30;
         if (const char* setting = std::getenv("LLAVON_IME_LORA_RELEASE_ATTEMPTS")) {
             const std::string value(setting);
@@ -422,16 +468,9 @@ void install_trainer(const fs::path& output) {
         }
         nlohmann::json candidate;
         for (int attempt = 1; attempt <= attempts; ++attempt) {
-            try {
-                run_tool("curl", {"--fail", "--location", "--retry", "3", "--header", "Cache-Control: no-cache",
-                                  "--output", manifest_file.string(), rolling_url + "?commit=" +
-                                  std::string(expected_commit) + "&attempt=" + std::to_string(attempt)});
-                candidate = nlohmann::json::parse(std::ifstream(manifest_file));
-                if (candidate.value("commit", "") == expected_commit) break;
-                std::cerr << "Waiting for LoRA Trainer release of pinned commit " << expected_commit << '\n';
-            } catch (const std::exception& error) {
-                std::cerr << "Waiting for LoRA Trainer release: " << error.what() << '\n';
-            }
+            candidate = fetch_rolling_candidate(output, expected_commit, attempt);
+            if (candidate.value("commit", "") == expected_commit) break;
+            std::cerr << "Waiting for LoRA Trainer release of pinned commit " << expected_commit << '\n';
             // The pinned commit falls off the rolling manifest as soon as the
             // trainer cuts a newer release, so consult the release listing
             // before sleeping on a manifest that may never match again.
@@ -518,6 +557,14 @@ void install_trainer(const fs::path& output) {
             fs::rename(entry.path(), output / entry.path().filename());
         fs::remove_all(staging);
         std::cout << "trainer=" << (output / "llavon-lora") << " version=" << version << '\n';
+        // Give the fresh installation the accelerator libraries of this machine
+        // (a no-op on machines without one). A failure here only costs GPU
+        // training, so it is reported instead of failing the installation.
+        try {
+            ime::unix_service::ensure_trainer_libtorch(output);
+        } catch (const std::exception& error) {
+            std::cerr << "warning: cannot install the GPU libtorch: " << error.what() << '\n';
+        }
     } catch (...) { fs::remove_all(staging); fs::remove(archive); fs::remove(manifest_file);
                     fs::remove(pinned_manifest_file); throw; }
     fs::remove(archive);
@@ -612,25 +659,19 @@ void ensure_run_history(Database& db) {    std::set<std::string> columns;
              {"rank", "INTEGER NOT NULL DEFAULT 8"}, {"alpha", "REAL NOT NULL DEFAULT 16"},
              {"dropout", "REAL NOT NULL DEFAULT 0"}, {"target_modules", "TEXT NOT NULL DEFAULT 'q_proj,v_proj'"},
              {"optimizer_steps", "INTEGER NOT NULL DEFAULT 0"}, {"parent_id", "INTEGER"},
-             {"cumulative_record_count", "INTEGER NOT NULL DEFAULT 0"}}) {
+             {"cumulative_record_count", "INTEGER NOT NULL DEFAULT 0"},
+             {"training_request_json", "TEXT"}}) {
         if (!columns.contains(name)) db.exec(("ALTER TABLE lora_runs ADD COLUMN " + name + " " + definition).c_str());
     }
 }
 
 void publish_run(Database& db, const ime::unix_service::NumericDataset& dataset,
                  const fs::path& adapter, const fs::path& model, const std::string& revision,
-                 int rank, double alpha, double dropout, const std::string& modules) {
+                 int rank, double alpha, double dropout, const std::string& modules,
+                 std::int64_t parent_id, std::int64_t base_cumulative, const std::string& request_json) {
     int steps = 0;
     if (fs::is_regular_file(adapter / "training_state.json"))
         steps = nlohmann::json::parse(std::ifstream(adapter / "training_state.json")).at("step").get<int>();
-    sqlite3_int64 previous_id = 0, cumulative = 0;
-    {
-        Statement previous(db.get(), "SELECT id,(SELECT COALESCE(SUM(record_count),0) FROM lora_runs) FROM lora_runs ORDER BY id DESC LIMIT 1");
-        if (previous.next() == SQLITE_ROW) {
-            previous_id = sqlite3_column_int64(previous.get(), 0);
-            cumulative = sqlite3_column_int64(previous.get(), 1);
-        }
-    }
     db.exec("BEGIN IMMEDIATE");
     try {
         Statement update(db.get(), "UPDATE commits SET state='trained' WHERE id=? AND state='pending'");
@@ -640,7 +681,7 @@ void publish_run(Database& db, const ime::unix_service::NumericDataset& dataset,
             (void)update.next();
             if (sqlite3_changes(db.get()) != 1) throw std::runtime_error("training records changed during export");
         }
-        Statement insert(db.get(), "INSERT INTO lora_runs(base_revision,adapter_path,model_path,record_count,rank,alpha,dropout,target_modules,optimizer_steps,parent_id,cumulative_record_count) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+        Statement insert(db.get(), "INSERT INTO lora_runs(base_revision,adapter_path,model_path,record_count,rank,alpha,dropout,target_modules,optimizer_steps,parent_id,cumulative_record_count,training_request_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
         insert.bind(1, revision); insert.bind(2, adapter.string()); insert.bind(3, model.string());
         sqlite3_bind_int64(insert.get(), 4, static_cast<sqlite3_int64>(dataset.included_ids.size()));
         sqlite3_bind_int(insert.get(), 5, rank);
@@ -648,12 +689,133 @@ void publish_run(Database& db, const ime::unix_service::NumericDataset& dataset,
         sqlite3_bind_double(insert.get(), 7, dropout);
         insert.bind(8, modules);
         sqlite3_bind_int(insert.get(), 9, steps);
-        if (previous_id) sqlite3_bind_int64(insert.get(), 10, previous_id);
+        // A run that branches from an earlier adapter records that parent; a
+        // run from the base model keeps no parent at all.
+        if (parent_id) sqlite3_bind_int64(insert.get(), 10, parent_id);
         else sqlite3_bind_null(insert.get(), 10);
-        sqlite3_bind_int64(insert.get(), 11, cumulative + static_cast<sqlite3_int64>(dataset.included_ids.size()));
+        sqlite3_bind_int64(insert.get(), 11, base_cumulative + static_cast<sqlite3_int64>(dataset.included_ids.size()));
+        insert.bind(12, request_json);
         (void)insert.next();
         db.exec("COMMIT");
     } catch (...) { sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw; }
+}
+
+// The full parameter set of a run. Every run records these fields in its
+// training_request_json so the history can show what produced an adapter and
+// so a later run can continue exactly from it, mirroring the Windows manager.
+struct TrainingParameters {
+    int rank = 8;
+    double alpha = 16;
+    double dropout = 0;
+    int batch = 1;
+    int accumulation = 1;
+    int epochs = 5;
+    int max_steps = -1;
+    double learning_rate = 0.0001;
+    double weight_decay = 0;
+    int warmup = 0;
+    double norm = 1;
+    int save_every = 0;
+    int seed = 42;
+    int shuffle = 1;
+    int max_length = 384;
+    std::string device = "auto";
+    std::string dtype = "float32";
+    std::string modules = "q_proj,v_proj";
+};
+
+std::int64_t integer64_option(const Options& options, const char* key, std::int64_t fallback,
+                              std::int64_t minimum, std::int64_t maximum) {
+    const auto text = optional(options, key, "");
+    if (text.empty()) return fallback;
+    std::int64_t value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc() || parsed.ptr != text.data() + text.size() || value < minimum || value > maximum)
+        throw std::invalid_argument(std::string("invalid ") + key);
+    return value;
+}
+
+// Non-advanced strengths always train the preset structure and ignore the
+// individual fields, exactly like the Windows manager resets them.
+TrainingParameters resolve_parameters(const Options& options, ime::unix_service::LoraTrainingStrength strength) {
+    TrainingParameters parameters;
+    if (strength != ime::unix_service::LoraTrainingStrength::advanced) {
+        const auto preset = ime::unix_service::lora_training_preset(strength);
+        parameters.epochs = preset.epochs;
+        parameters.learning_rate = preset.learning_rate;
+        return parameters;
+    }
+    parameters.device = optional(options, "--device", "auto");
+    if (parameters.device != "cpu" && parameters.device != "cuda" && parameters.device != "mps" && parameters.device != "auto")
+        throw std::invalid_argument("invalid --device");
+    parameters.dtype = optional(options, "--dtype", "float32");
+    if (parameters.dtype != "float32" && parameters.dtype != "bfloat16") throw std::invalid_argument("invalid --dtype");
+    parameters.modules = optional(options, "--target-modules", "q_proj,v_proj");
+    if (parameters.modules.empty() || parameters.modules.find_first_not_of("abcdefghijklmnopqrstuvwxyz_,") != std::string::npos)
+        throw std::invalid_argument("invalid --target-modules");
+    parameters.max_length = integer_option(options, "--max-seq-length", 384, 2, 384);
+    parameters.rank = integer_option(options, "--rank", 8, 1, INT_MAX);
+    parameters.alpha = real_option(options, "--alpha", 16, std::numeric_limits<double>::denorm_min(),
+                                   std::numeric_limits<double>::max());
+    parameters.dropout = real_option(options, "--dropout", 0, 0, 1);
+    if (parameters.dropout >= 1) throw std::invalid_argument("invalid --dropout");
+    parameters.batch = integer_option(options, "--batch-size", 1, 1, INT_MAX);
+    parameters.accumulation = integer_option(options, "--gradient-accumulation", 1, 1, INT_MAX);
+    parameters.epochs = integer_option(options, "--epochs", 5, 1, INT_MAX);
+    parameters.max_steps = integer_option(options, "--max-steps", -1, -1, INT_MAX);
+    if (parameters.max_steps == 0) throw std::invalid_argument("invalid --max-steps");
+    parameters.learning_rate = real_option(options, "--learning-rate", 0.0001,
+                                           std::numeric_limits<double>::denorm_min(),
+                                           std::numeric_limits<double>::max());
+    parameters.weight_decay = real_option(options, "--weight-decay", 0, 0, std::numeric_limits<double>::max());
+    parameters.warmup = integer_option(options, "--warmup-steps", 0, 0, INT_MAX);
+    parameters.norm = real_option(options, "--max-grad-norm", 1, 0, std::numeric_limits<double>::max());
+    parameters.save_every = integer_option(options, "--save-every", 0, 0, INT_MAX);
+    parameters.seed = integer_option(options, "--seed", 42, INT_MIN, INT_MAX);
+    parameters.shuffle = integer_option(options, "--shuffle", 1, 0, 1);
+    return parameters;
+}
+
+// The adapter a run continues from. Without --base-run-id the newest run is
+// used (the historical behaviour); an explicit 0 starts from the base model
+// and an explicit ID branches from that earlier run.
+struct TrainingBase {
+    std::int64_t id = 0;
+    std::string revision;
+    int rank = 0;
+    double alpha = 0;
+    double dropout = 0;
+    std::string modules;
+    std::string adapter_path;
+    std::int64_t cumulative = 0;
+};
+
+TrainingBase resolve_training_base(Database& db, const Options& options) {
+    TrainingBase base;
+    const bool explicit_choice = options.contains("--base-run-id");
+    const std::int64_t requested = integer64_option(options, "--base-run-id", 0, 0,
+                                                    std::numeric_limits<std::int64_t>::max());
+    Statement query(db.get(), explicit_choice
+        ? "SELECT id,base_revision,rank,alpha,dropout,target_modules,adapter_path,"
+          "COALESCE(cumulative_record_count,0) FROM lora_runs WHERE id=?"
+        : "SELECT id,base_revision,rank,alpha,dropout,target_modules,adapter_path,"
+          "COALESCE(cumulative_record_count,0) FROM lora_runs ORDER BY id DESC LIMIT 1");
+    if (explicit_choice) sqlite3_bind_int64(query.get(), 1, requested);
+    if (query.next() != SQLITE_ROW) {
+        // An explicit ID that does not exist is an error; an absent run
+        // history or an explicit 0 both mean the base model.
+        if (explicit_choice && requested != 0) throw std::runtime_error("training base run not found");
+        return base;
+    }
+    base.id = sqlite3_column_int64(query.get(), 0);
+    base.revision = query.text(1);
+    base.rank = sqlite3_column_int(query.get(), 2);
+    base.alpha = sqlite3_column_double(query.get(), 3);
+    base.dropout = sqlite3_column_double(query.get(), 4);
+    base.modules = query.text(5);
+    base.adapter_path = query.text(6);
+    base.cumulative = sqlite3_column_int64(query.get(), 7);
+    return base;
 }
 
 void train(Database& db, const Options& options, const fs::path& model_dir, const fs::path& tables,
@@ -668,53 +830,46 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         if (!has_trainer_libraries(trainer.parent_path()))
             throw std::runtime_error("installed trainer is missing its native libraries; reinstall the pinned trainer");
     }
+    // Make sure the trainer can use this machine's GPU; machines without an
+    // accelerator are left alone, and a failure only costs GPU training.
+    try {
+        ime::unix_service::ensure_trainer_libtorch(trainer.parent_path());
+    } catch (const std::exception& error) {
+        std::cerr << "warning: cannot install the GPU libtorch: " << error.what() << '\n';
+    }
+    const auto strength_name = optional(options, "--strength", "advanced");
+    const auto strength = ime::unix_service::lora_strength_from_name(strength_name);
+    if (!strength) throw std::invalid_argument("invalid --strength");
+    ensure_run_history(db);
+    auto parameters = resolve_parameters(options, *strength);
+    auto base = resolve_training_base(db, options);
+    if (base.id != 0) {
+        if (*strength != ime::unix_service::LoraTrainingStrength::advanced) {
+            // A preset continues the adapter it was started from; the adapter
+            // structure cannot change between runs.
+            parameters.rank = base.rank;
+            parameters.alpha = base.alpha;
+            parameters.dropout = base.dropout;
+            parameters.modules = base.modules;
+        } else if (parameters.rank != base.rank || parameters.alpha != base.alpha ||
+                   parameters.dropout != base.dropout || parameters.modules != base.modules) {
+            throw std::runtime_error("parameters differ from the base adapter");
+        }
+    }
     std::string revision = require(options, "--revision");
     fs::path training_model_dir = model_dir;
     if (revision.size() != 40 || revision.find_first_not_of("0123456789abcdef") != std::string::npos ||
         (model_dir.filename().string().size() == 40 && model_dir.filename() != revision))
         throw std::invalid_argument("--revision must match the pinned checkpoint directory");
-    const std::string device = optional(options, "--device", "auto");
-    if (device != "cpu" && device != "cuda" && device != "mps" && device != "auto")
-        throw std::invalid_argument("invalid --device");
-    const std::string dtype = optional(options, "--dtype", "float32");
-    if (dtype != "float32" && dtype != "bfloat16") throw std::invalid_argument("invalid --dtype");
-    const std::string modules = optional(options, "--target-modules", "q_proj,v_proj");
-    if (modules.empty() || modules.find_first_not_of("abcdefghijklmnopqrstuvwxyz_,") != std::string::npos)
-        throw std::invalid_argument("invalid --target-modules");
-    const int max_length = integer_option(options, "--max-seq-length", 384, 2, 384);
-    const int rank = integer_option(options, "--rank", 8, 1, INT_MAX);
-    const double alpha = real_option(options, "--alpha", 16, std::numeric_limits<double>::denorm_min(),
-                                     std::numeric_limits<double>::max());
-    const double dropout = real_option(options, "--dropout", 0, 0, 1);
-    if (dropout >= 1) throw std::invalid_argument("invalid --dropout");
-    const int batch = integer_option(options, "--batch-size", 1, 1, INT_MAX);
-    const int accumulation = integer_option(options, "--gradient-accumulation", 1, 1, INT_MAX);
-    const int epochs = integer_option(options, "--epochs", 5, 1, INT_MAX);
-    const int max_steps = integer_option(options, "--max-steps", -1, -1, INT_MAX);
-    if (max_steps == 0) throw std::invalid_argument("invalid --max-steps");
-    const double learning_rate = real_option(options, "--learning-rate", 0.0001,
-                                             std::numeric_limits<double>::denorm_min(), std::numeric_limits<double>::max());
-    const double weight_decay = real_option(options, "--weight-decay", 0, 0, std::numeric_limits<double>::max());
-    const int warmup = integer_option(options, "--warmup-steps", 0, 0, INT_MAX);
-    const double norm = real_option(options, "--max-grad-norm", 1, 0, std::numeric_limits<double>::max());
-    const int save_every = integer_option(options, "--save-every", 0, 0, INT_MAX);
-    const int seed = integer_option(options, "--seed", 42, INT_MIN, INT_MAX);
-    const int shuffle = integer_option(options, "--shuffle", 1, 0, 1);
-    ensure_run_history(db);
-    {
-        Statement previous(db.get(), "SELECT base_revision,rank,alpha,dropout,target_modules FROM lora_runs ORDER BY id DESC LIMIT 1");
-        if (previous.next() == SQLITE_ROW) {
-            if (rank != sqlite3_column_int(previous.get(), 1) || alpha != sqlite3_column_double(previous.get(), 2) ||
-                dropout != sqlite3_column_double(previous.get(), 3) || modules != previous.text(4))
-                throw std::runtime_error("parameters differ from previous adapter");
-            revision = previous.text(0);
-            training_model_dir = model_dir.parent_path() / revision;
-            if (!fs::is_regular_file(training_model_dir / "config.json") ||
-                !fs::is_regular_file(training_model_dir / "ime_vocab.json") ||
-                !fs::is_regular_file(training_model_dir / "model.safetensors"))
-                throw std::runtime_error("previous adapter's base checkpoint is missing");
-        }
+    if (base.id != 0) {
+        revision = base.revision;
+        training_model_dir = model_dir.parent_path() / revision;
+        if (!fs::is_regular_file(training_model_dir / "config.json") ||
+            !fs::is_regular_file(training_model_dir / "ime_vocab.json") ||
+            !fs::is_regular_file(training_model_dir / "model.safetensors"))
+            throw std::runtime_error("base run's base checkpoint is missing");
     }
+    const bool manual_only = integer_option(options, "--only-manually-selected", 0, 0, 1) != 0;
     std::unordered_set<std::string> selected;
     if (options.contains("--selected-ids")) {
         const auto selection = nlohmann::json::parse(std::ifstream(require(options, "--selected-ids")));
@@ -759,8 +914,32 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
     const auto dataset_path = output / "training.jsonl";
     const auto decryption = cipher.decryption();
     const auto dataset = ime::unix_service::write_numeric_dataset(db.get(), tables, training_model_dir / "config.json",
-        dataset_path, max_length, options.contains("--selected-ids") ? &selected : nullptr, &decryption);
+        dataset_path, parameters.max_length, options.contains("--selected-ids") ? &selected : nullptr, &decryption,
+        manual_only);
     std::cout << "trainable=" << dataset.included_ids.size() << " skipped=" << dataset.skipped << std::endl;
+    // The manager keeps the full parameter set of every run so the history
+    // page and a later branched run agree on what was trained.
+    const nlohmann::json request{
+        {"preset_version", 1},
+        {"strength", ime::unix_service::lora_strength_name(*strength)},
+        {"only_manually_selected", manual_only},
+        {"parent_id", base.id},
+        {"base_model_revision", revision},
+        {"trainer_commit", LLAVON_IME_LORA_PINNED_COMMIT},
+        {"trainer_version", trainer_version.value("version", "")},
+        {"record_count", dataset.included_ids.size()},
+        {"skipped_record_count", dataset.skipped},
+        {"pad_token_id", dataset.pad_token_id},
+        {"rank", parameters.rank}, {"alpha", parameters.alpha}, {"dropout", parameters.dropout},
+        {"batch_size", parameters.batch}, {"gradient_accumulation", parameters.accumulation},
+        {"epochs", parameters.epochs}, {"max_steps", parameters.max_steps},
+        {"learning_rate", parameters.learning_rate}, {"weight_decay", parameters.weight_decay},
+        {"warmup_steps", parameters.warmup}, {"max_gradient_norm", parameters.norm},
+        {"save_every", parameters.save_every}, {"device", parameters.device},
+        {"seed", parameters.seed}, {"shuffle", parameters.shuffle != 0},
+        {"max_sequence_length", parameters.max_length}, {"dtype", parameters.dtype},
+        {"target_modules", parameters.modules},
+    };
     const auto adapter = output / "adapter";
     const auto f16 = output / "personalized-f16.gguf";
     const auto gguf = output / "personalized-Q4_K_M.gguf";
@@ -769,30 +948,28 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
     // next run and the manager remove.
     try {
         run(trainer, {"validate", "--train-data", dataset_path.string(), "--vocab-size",
-                       std::to_string(dataset.vocab_size), "--max-seq-length", std::to_string(max_length)});
+                       std::to_string(dataset.vocab_size), "--max-seq-length", std::to_string(parameters.max_length)});
         std::vector<std::string> args{
             "train", "--model-config", (training_model_dir / "config.json").string(), "--model", training_model_dir.string(),
             "--train-data", dataset_path.string(), "--output-dir", adapter.string(),
-            "--target-modules", modules, "--pad-token-id", std::to_string(dataset.pad_token_id),
-            "--max-seq-length", std::to_string(max_length), "--rank", std::to_string(rank),
-            "--alpha", as_argument(alpha), "--dropout", as_argument(dropout),
-            "--batch-size", std::to_string(batch), "--gradient-accumulation", std::to_string(accumulation),
-            "--epochs", std::to_string(epochs), "--max-steps", std::to_string(max_steps),
-            "--learning-rate", as_argument(learning_rate), "--weight-decay", as_argument(weight_decay),
-            "--warmup-steps", std::to_string(warmup), "--max-grad-norm", as_argument(norm),
-            "--save-every", std::to_string(save_every), "--seed", std::to_string(seed),
-            "--device", device, "--dtype", dtype
+            "--target-modules", parameters.modules, "--pad-token-id", std::to_string(dataset.pad_token_id),
+            "--max-seq-length", std::to_string(parameters.max_length), "--rank", std::to_string(parameters.rank),
+            "--alpha", as_argument(parameters.alpha), "--dropout", as_argument(parameters.dropout),
+            "--batch-size", std::to_string(parameters.batch), "--gradient-accumulation", std::to_string(parameters.accumulation),
+            "--epochs", std::to_string(parameters.epochs), "--max-steps", std::to_string(parameters.max_steps),
+            "--learning-rate", as_argument(parameters.learning_rate), "--weight-decay", as_argument(parameters.weight_decay),
+            "--warmup-steps", std::to_string(parameters.warmup), "--max-grad-norm", as_argument(parameters.norm),
+            "--save-every", std::to_string(parameters.save_every), "--seed", std::to_string(parameters.seed),
+            "--device", parameters.device, "--dtype", parameters.dtype
         };
-        if (!shuffle) args.push_back("--no-shuffle");
-        {
-            Statement previous(db.get(), "SELECT base_revision,adapter_path FROM lora_runs ORDER BY id DESC LIMIT 1");
-            if (previous.next() == SQLITE_ROW) {
-                if (revision != previous.text(0)) throw std::runtime_error("previous adapter uses a different base revision");
-                const fs::path path = previous.text(1);
-                if (!fs::is_regular_file(path / "adapter_model.safetensors"))
-                    throw std::runtime_error("previous adapter is missing");
-                args.insert(args.end(), {"--resume-adapter", path.string()});
-            }
+        if (!parameters.shuffle) args.push_back("--no-shuffle");
+        if (base.id != 0) {
+            // Continue the adapter the user selected; a run from the base
+            // model starts a fresh adapter instead.
+            const fs::path path = base.adapter_path;
+            if (!fs::is_regular_file(path / "adapter_model.safetensors"))
+                throw std::runtime_error("base run's adapter is missing");
+            args.insert(args.end(), {"--resume-adapter", path.string()});
         }
         run(trainer, args);
         run(trainer, {"export-gguf", "--model-config", (training_model_dir / "config.json").string(),
@@ -807,7 +984,8 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         discard_plaintext_dataset(dataset_path);
         throw;
     }
-    publish_run(db, dataset, adapter, gguf, revision, rank, alpha, dropout, modules);
+    publish_run(db, dataset, adapter, gguf, revision, parameters.rank, parameters.alpha, parameters.dropout,
+                parameters.modules, base.id, base.cumulative, request.dump());
     std::cout << "model=" << gguf << '\n';
 }
 
@@ -816,10 +994,14 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
 int main(int argc, char** argv) {
     try {
         ::umask(0077);  // Datasets and adapter outputs contain user typing.
-        if (argc < 2) throw std::invalid_argument("usage: llavon-ime-lora check-model|fetch-model|install-trainer|protection-status|configure-password|set-recording|reset-conversation-data|list|exclude|delete|dataset|train [--option value ...]");
+        if (argc < 2) throw std::invalid_argument("usage: llavon-ime-lora check-model|fetch-model|check-trainer|install-trainer|protection-status|configure-password|set-recording|reset-conversation-data|list|exclude|delete|dataset|train [--option value ...]");
         const auto options = parse(argc, argv);
         if (std::string_view(argv[1]) == "install-trainer") {
             install_trainer(fs::absolute(require(options, "--output-dir")));
+            return EXIT_SUCCESS;
+        }
+        if (std::string_view(argv[1]) == "check-trainer") {
+            check_trainer(fs::absolute(require(options, "--output-dir")));
             return EXIT_SUCCESS;
         }
         if (std::string_view(argv[1]) == "check-model") {
@@ -873,7 +1055,7 @@ int main(int argc, char** argv) {
                 const auto decryption = cipher.decryption();
                 const auto dataset = ime::unix_service::write_numeric_dataset(
                     db.get(), tables, model_dir / "config.json", require(options, "--output"), 384, nullptr,
-                    &decryption);
+                    &decryption, integer_option(options, "--only-manually-selected", 0, 0, 1) != 0);
                 std::cout << "trainable=" << dataset.included_ids.size() << " skipped=" << dataset.skipped << '\n';
             }
         } else throw std::invalid_argument("unknown action");

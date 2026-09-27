@@ -23,6 +23,7 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
                                       const std::filesystem::path& model_config,
                                       const std::filesystem::path& output, int max_sequence_length,
                                       const std::unordered_set<std::string>* selected_ids = nullptr,
-                                      const commit_crypto::Decryption* decryption = nullptr);
+                                      const commit_crypto::Decryption* decryption = nullptr,
+                                      bool manual_only = false);
 
 }  // namespace ime::unix_service

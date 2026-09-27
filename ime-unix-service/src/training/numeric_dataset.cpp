@@ -207,7 +207,8 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
                                       const std::filesystem::path& model_config,
                                       const std::filesystem::path& output, int max_sequence_length,
                                       const std::unordered_set<std::string>* selected_ids,
-                                      const commit_crypto::Decryption* decryption) {
+                                      const commit_crypto::Decryption* decryption,
+                                      bool manual_only) {
     const auto config = load(model_config);
     NumericDataset result;
     result.vocab_size = config.at("vocab_size").get<int>();
@@ -239,6 +240,10 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         Row row;
         auto flush = [&]() {
             if (row.id.empty()) return;
+            // The manual filter mirrors the Windows manager: a record takes
+            // part only when a candidate was explicitly selected somewhere in
+            // it. Records that only typed literal positions are skipped whole.
+            if (manual_only && !row.manually_selected) return;
             if (selected_ids && !selected_ids->contains(row.id)) return;
             if (auto numeric = build_row(row, tables, max_sequence_length)) {
                 for (int copy = 0; copy < (row.manually_selected ? 3 : 1); ++copy)

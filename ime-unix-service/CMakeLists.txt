@@ -85,6 +85,7 @@ set(LLAVON_IME_INSTALLED_LORA_TRAINER_PATH
 
 add_executable(llavon-ime-lora
     src/training/lora_cli.cpp
+    src/training/libtorch_cache.cpp
     src/training/numeric_dataset.cpp
     src/training/commit_store.cpp
     src/pipe/protocol.cpp

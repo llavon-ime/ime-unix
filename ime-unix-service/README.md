@@ -56,12 +56,19 @@ macOS 的 `~/Library/Application Support/llavon-ime/training/commits.sqlite3`。
 
 輸入法選單的「**管理個人化訓練…**」動作會啟動 `llavon-ime-lora-gui`，這是一個
 獨立的本機網頁介面。macOS 的設定視窗有「**使用我的輸入改進模型**」按鈕；Linux 的
-同一個按鈕位於 Fcitx5 輸入法設定中。與 Windows 相同，頁面會挑選待訓練紀錄
-（預設全選）、檢查或下載固定的 checkpoint、提供相同的訓練預設值
-（rank/alpha 8/16、dropout 0、batch size 與 accumulation 1、5 epochs、
-max steps -1、learning rate 1e-4、FP32、`q_proj,v_proj`、device `auto`），
-顯示進度與執行歷史，並可取消自己的行程群組。頁面會輪詢資料庫，因此開啟期間輸入的
-紀錄會自動出現並預設加入選取；開始訓練時會排除畫面上未勾選的紀錄。
+同一個按鈕位於 Fcitx5 輸入法設定中。與 Windows 相同，頁面會檢查或下載固定的
+checkpoint，並提供相同的訓練設定：五種**訓練強度**（極低、低、中、高、進階；預設
+極低）。非進階強度會套用共用的 preset（rank/alpha 8/16、dropout 0、batch size 與
+gradient accumulation 1、固定 adapter 結構、FP32、`q_proj,v_proj`、device `auto`），
+進階則可自行調整 rank、alpha、dropout、batch size、gradient accumulation、epochs、
+max steps、learning rate、weight decay、warmup、max gradient norm、save every、
+seed、max sequence length、target modules、device 與 dtype。另外有
+「**只訓練曾手動選字的句子**」（預設開；沒有手動選字的紀錄整筆跳過）與
+「**訓練基底**」選擇：預設接續最新一次完成的訓練，也可指定任一歷史 run 續訓，
+或從 Base model 重新開始。「**僅顯示手動選字過資料**」只篩選檢視畫面。
+待訓練紀錄全部會加入下一次訓練，不需要的紀錄在頁面上刪除。
+頁面會輪詢資料庫，因此開啟期間輸入的紀錄會自動出現；顯示進度與執行歷史
+（訓練強度、資料範圍、基底與完整參數），並可取消自己的行程群組。
 無法轉換的紀錄會維持待處理。手動明確選擇候選字會貢獻三個樣本，其他紀錄則貢獻
 一個。完成的 GGUF 可以直接從其歷史列選為推論模型。每筆紀錄會以驗證網頁介面的
 風格渲染成附帶注音的預覽；頁面會到已安裝的字表（`bopomofo_char.json`）查讀音，
@@ -76,9 +83,11 @@ Linux 套件用 `xdg-open`、macOS 用 `/usr/bin/open` 開啟預設瀏覽器。�
 `llavon-ime-lora` 是獨立的命令列管理器；不會在輸入法或預測服務裡執行 Torch。
 GUI 的「**安裝／更新 LoRA Trainer**」動作會從
 [lora-trainer](https://github.com/llavon-ime/lora-trainer) 下載該平台官方、
-經 SHA-256 驗證的 CPU 發行版，安裝到使用者的訓練狀態目錄下並自動使用。
-安裝的是整個發行目錄，因為 TorchSharp 會載入隨執行檔附帶的原生函式庫；只含
-執行檔的壓縮檔會被拒絕，缺少那些函式庫的安裝永遠不會被視為可用。
+經 SHA-256 驗證的 CPU 發行版，安裝到使用者的訓練狀態目錄下並自動使用；
+「**檢查版本**」按鈕（`llavon-ime-lora check-trainer`）只查詢固定 commit 的發行版
+並顯示已安裝版本與是否有更新，不會下載任何東西；頁面開啟時也會自動檢查一次。安裝的是整個發行目錄，因為
+TorchSharp 會載入隨執行檔附帶的原生函式庫；只含執行檔的壓縮檔會被拒絕，缺少那些
+函式庫的安裝永遠不會被視為可用。
 安裝器是冪等的：已安裝的執行檔仍符合固定的 commit 與其記錄的 SHA-256 時不會
 下載任何東西；已驗證的壓縮檔會快取在
 `${XDG_CACHE_HOME:-$HOME/.cache}/llavon-ime/lora-trainer`，讓第二個目標或之後
@@ -117,7 +126,13 @@ llavon-ime-lora dataset --model-dir "$model_dir" \
 llavon-ime-lora train --model-dir "$model_dir" \
   --tables-dir /path/to/installed/share/llavon-ime/tables \
   --revision "$revision" \
+  --strength low --only-manually-selected 1 \
   --output-dir "$state/runs/first"
+# 續訓指定的歷史 run（省略 --base-run-id 則接續最新一次；0 代表 Base model）
+llavon-ime-lora train --model-dir "$model_dir" \
+  --tables-dir /path/to/installed/share/llavon-ime/tables \
+  --revision "$revision" --strength advanced --base-run-id 3 \
+  --output-dir "$state/runs/branch"
 ```
 
 管理器會檢查 checkpoint 版本、模型詞彙與相容的表格式，然後在開始前用 trainer
@@ -125,13 +140,20 @@ llavon-ime-lora train --model-dir "$model_dir" \
 管理器會把已知的新增項目投影回與 checkpoint 相容的表，並讓不支援的提交維持
 待處理。訓練預設為 auto/float32。`--device` 可選 `auto`、`cpu`、`cuda` 與
 `mps`：`auto` 會依序選擇 CUDA（含 ROCm）、Apple Silicon 的 Metal 與 CPU，
-`cuda` 需要支援 CUDA 或 ROCm 的 trainer，`mps` 需要 macOS 的 Metal 版
-trainer。要用自己建置的 trainer（例如 ROCm 版本）時，把
-`LLAVON_IME_LORA_CLI_PATH` 指向該執行檔即可。
-每次執行會寫出一個 adapter 與一個 Q4_K_M GGUF 模型。與 Windows 相同，之後的
-執行在 rank、alpha、dropout 與 target modules 相符時會從最後一個 adapter 繼續，
-並沿用該 adapter 記錄的基礎 checkpoint 版本，而不是剛傳入的目錄。訓練歷史會記錄
-父執行、累計紀錄數、optimizer 步數與 LoRA 參數。紀錄只會在模型匯出後標記為已
+`mps` 需要 macOS 的 Metal 版 trainer。「安裝／更新 LoRA Trainer」以及每次訓練
+前，管理器會偵測顯示卡：AMD 會下載 PyTorch 官方的 ROCm libtorch、NVIDIA 會下載
+CUDA libtorch（分別約 9.4 GB 與 3.9 GB，只下載一次，快取在
+`~/.cache/llavon-ime/lora-libtorch`），並以硬連結放進已安裝的 trainer 目錄
+（需要 `unzip`），因此不需要另一種 trainer 發行版就能用 GPU；沒有可用的顯示卡時
+維持 CPU 訓練，macOS 的 CPU 產物本身已內建 Metal。要用自己建置的 trainer 時，
+把 `LLAVON_IME_LORA_CLI_PATH` 指向該執行檔即可。
+每次執行會寫出一個 adapter 與一個 Q4_K_M GGUF 模型。與 Windows 相同，預設會從
+最新一次完成的 adapter 繼續；`--base-run-id` 可以指定任一歷史 run 作為續訓基底，
+或填 0 從 Base model 重新開始。非進階強度會沿用基底的 rank、alpha、dropout 與
+target modules（adapter 結構不能改變），進階強度則要求與基底相符。基底記錄的
+基礎 checkpoint 版本會被沿用，而不是剛傳入的目錄。訓練歷史會記錄父執行、
+累計紀錄數、optimizer 步數、LoRA 參數與完整的訓練參數
+（`training_request_json`，含強度與資料範圍）。紀錄只會在模型匯出後標記為已
 訓練；在 GUI 歷史中選用產生的 GGUF 之前，原本的推論模型會保持使用中。Linux 會
 重新載入 Fcitx5 設定並為新模型重建推論傳輸；macOS 會收到本機通知、重新讀取已
 儲存的設定並重新啟動預測服務。

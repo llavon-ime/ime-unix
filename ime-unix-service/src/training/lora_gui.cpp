@@ -1,4 +1,6 @@
 #include "commit_store.hpp"
+#include "gpu_vendor.hpp"
+#include "lora_presets.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -207,6 +209,7 @@ progress{width:100%;height:6px;accent-color:var(--accent);border:none;border-rad
         <span class="field-label">待訓練資料</span>
         <span id="selection-summary"></span>
       </div>
+      <label class="switch"><input type="checkbox" id="only-manual-records">僅顯示手動選字過資料</label>
       <div id="protection" class="protection"></div>
       <div id="password-setup" class="protection-setup" hidden>
         <label class="field"><span>密碼</span><input id="setup-password" type="password" autocomplete="new-password"></label>
@@ -238,13 +241,20 @@ progress{width:100%;height:6px;accent-color:var(--accent);border:none;border-rad
       <div class="field-label-row">
         <span class="field-label">訓練設定</span>
       </div>
+      <label class="field"><span>訓練強度</span><select id="strength"></select></label>
+      <p class="field-hint" id="strength-hint"></p>
+      <div id="parameter-fields">
       <div id="training-options" class="options"></div>
       <details class="advanced"><summary>進階訓練設定</summary><div id="advanced-options" class="options"></div></details>
+      </div>
+      <label class="switch"><input type="checkbox" id="only-manually-selected" checked>只訓練曾手動選字的句子</label>
+      <label class="field"><span>訓練基底</span><select id="base-run"></select></label>
       <label class="field" id="train-password-field" hidden><span>訓練密碼</span><input id="train-password" type="password" autocomplete="current-password"></label>
       <p class="field-hint" id="train-password-hint" hidden>開始訓練時須重新輸入密碼；檢視資料的解鎖狀態不會共用。</p>
       <div class="estimate"><span id="estimated-steps">預計 steps：0</span><progress id="progress" max="100" style="display:none"></progress></div>
       <div class="row"><button id="train" class="primary">開始訓練</button><button id="cancel" class="ghost">取消目前工作</button></div>
-      <div class="row" style="margin-top:16px"><button id="install-trainer" class="ghost">安裝／更新 LoRA Trainer</button></div>
+      <div class="row" style="margin-top:16px"><button id="check-trainer" class="ghost">檢查版本</button><button id="install-trainer" class="ghost">安裝／更新 LoRA Trainer</button></div>
+      <small id="gpu-status" class="hint"></small>
       <small id="trainer-status" class="hint"></small>
       <pre id="log" class="log"></pre>
     </div>
@@ -266,8 +276,18 @@ if (location.hash) { sessionStorage.setItem('llavon-token', token); history.repl
 const message = document.getElementById('message');
 let recordOffset=0;
 const PAGE_SIZE=20;
+// Feedback for a click must stay readable; the poll only writes the job status
+// while no fresh notice is pinned.
+let noticeUntil=0;
+let lastJobSignature='';
+let trainerCheckRequested=false;
+function showNotice(text, error=false){
+  noticeUntil=Date.now()+15000;
+  message.hidden=false;message.className='notice'+(error?' error':'');message.textContent=text;
+}
 
-let pendingIds=[];
+let pendingCount=0;
+let pendingManual=0;
 let readingsTable={};
 let activeModelPath='';
 let protectionInfo={configured:false,enabled:false,unlocked:false};
@@ -280,12 +300,23 @@ for(const tab of document.querySelectorAll('.tabs button')){
     }
   };
 }
+function manualOnlyTraining(){
+  return document.getElementById('only-manually-selected').checked;
+}
+function effectivePendingCount(){
+  return manualOnlyTraining()?pendingManual:pendingCount;
+}
 function updateEstimate(){
-  // Every pending record takes part in the next run; unwanted ones are
-  // deleted, matching the Windows manager.
-  const count=pendingIds.length;
-  document.getElementById('selection-summary').textContent='共 '+count+' 筆';
-  const values=['batch-size','gradient-accumulation','epochs','max-steps'].map(name=>Number(document.getElementById(name).value));
+  // Pending records all take part in the next run; the manual filter mirrors
+  // the Windows manager's "only train manually selected sentences" default.
+  const count=effectivePendingCount();
+  document.getElementById('selection-summary').textContent=manualOnlyTraining()
+    ? '共 '+pendingCount+' 筆（符合條件 '+pendingManual+' 筆）'
+    : '共 '+pendingCount+' 筆';
+  const presets={'ultra-low':1,'low':1,'medium':2,'high':5};
+  const values=strengthSelect.value==='advanced'
+    ? ['batch-size','gradient-accumulation','epochs','max-steps'].map(name=>Number(document.getElementById(name).value))
+    : [1,1,presets[strengthSelect.value],-1];
   if(values.every(Number.isInteger)&&values[0]>0&&values[1]>0&&values[2]>0&&(values[3]===-1||values[3]>0)){
     const epochs=Math.ceil(Math.ceil(count/values[0])/values[1])*values[2];
     document.getElementById('estimated-steps').textContent='預計 steps：'+(values[3]>0?Math.min(epochs,values[3]):epochs);
@@ -322,6 +353,25 @@ for(const [name,label,choices] of [['device','運算裝置',['auto','cuda','mps'
 const shuffleLabel=document.createElement('label');shuffleLabel.className='switch';
 const shuffle=document.createElement('input');shuffle.type='checkbox';shuffle.id='shuffle';shuffle.checked=true;
 shuffleLabel.append(shuffle,document.createTextNode('打亂訓練資料'));advancedView.append(shuffleLabel);
+// Training strengths are shared with the Windows manager; the individual
+// fields only apply to the advanced strength.
+const strengthLabels=[['ultra-low','極低'],['low','低'],['medium','中'],['high','高'],['advanced','進階']];
+const strengthSelect=document.getElementById('strength');
+for(const [value,label] of strengthLabels){
+  const item=document.createElement('option');item.value=value;item.textContent=label;strengthSelect.append(item);
+}
+strengthSelect.value='ultra-low';
+function applyStrength(){
+  const advanced=strengthSelect.value==='advanced';
+  document.getElementById('parameter-fields').style.display=advanced?'':'none';
+  document.getElementById('strength-hint').textContent=advanced
+    ? '可自行調整訓練參數。'
+    : '訓練強度越高，個人化效果與原有選字能力的變化都可能增加。';
+  updateEstimate();
+}
+strengthSelect.onchange=applyStrength;
+document.getElementById('only-manually-selected').onchange=updateEstimate;
+applyStrength();
 async function api(path, body) {
   const options = {headers:{'X-Llavon-Token':token}};
   if (body !== undefined) {options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
@@ -365,7 +415,7 @@ function renderProtection(info){
     const unlock=document.createElement('button');unlock.className='primary tiny';unlock.textContent='解鎖檢視';
     unlock.onclick=async()=>{
       try{await api('unlock',{password:password.value});password.value='';await refresh();}
-      catch(error){message.hidden=false;message.className='notice error';message.textContent=error.message;}
+      catch(error){showNotice(error.message,true);}
     };
     password.onkeydown=event=>{if(event.key==='Enter')unlock.click();};
     bar.append(note,password,unlock);
@@ -474,13 +524,37 @@ function recordCard(item, viewState){
   card.append(head,composed(item),foot);
   return card;
 }
+// The training base mirrors the Windows manager's history choice: the newest
+// run continues by default, an explicit run branches from that adapter, and
+// "Base model" starts a fresh adapter.
+function refreshBaseRuns(runs){
+  const select=document.getElementById('base-run');
+  const previous=select.value;
+  select.replaceChildren();
+  const automatic=document.createElement('option');automatic.value='';
+  automatic.textContent=runs.length?('自動（最新訓練 #'+runs[0].id+'）'):'自動（Base model）';
+  select.append(automatic);
+  const base=document.createElement('option');base.value='0';base.textContent='Base model（從頭訓練）';select.append(base);
+  for(const run of runs){
+    const item=document.createElement('option');item.value=String(run.id);
+    item.textContent='#'+run.id+' '+run.completed_at+(run.parent_id?'（基底 #'+run.parent_id+'）':'');
+    select.append(item);
+  }
+  if([...select.options].some(option=>option.value===previous))select.value=previous;
+}
+const strengthLabelsForHistory={'ultra-low':'極低','low':'低','medium':'中','high':'高','advanced':'進階'};
 function runCard(item){
   const card=document.createElement('article');card.className='run';
   const top=document.createElement('div');top.className='run-top';
   const time=document.createElement('strong');time.textContent=item.completed_at;
   const tags=document.createElement('div');tags.className='tagrow';
-  for(const text of ['rank '+item.rank,'alpha '+item.alpha,'dropout '+item.dropout,item.target_modules,
-      '本次 '+item.record_count+' 筆','累計 '+item.cumulative_count+' 筆','步數 '+item.optimizer_steps]){
+  const labels=['rank '+item.rank,'alpha '+item.alpha,'dropout '+item.dropout,item.target_modules,
+      '本次 '+item.record_count+' 筆','累計 '+item.cumulative_count+' 筆','步數 '+item.optimizer_steps];
+  if(item.strength)labels.push('強度 '+(strengthLabelsForHistory[item.strength]||item.strength));
+  if(item.only_manually_selected!==undefined)
+    labels.push(item.only_manually_selected?'資料範圍：手動選字':'資料範圍：所有句子');
+  if(item.parent_id)labels.push('基底 #'+item.parent_id);
+  for(const text of labels){
     const tag=document.createElement('span');tag.className='tag';tag.textContent=text;tags.append(tag);
   }
   if(item.model_path===activeModelPath){
@@ -493,7 +567,7 @@ function runCard(item){
     button.textContent='立即套用';
     button.onclick=async()=>{
       try{await api('use-model',{id:item.id});await refresh();
-        message.hidden=false;message.className='notice';message.textContent='新模型已套用。';}
+        showNotice('新模型已套用。');}
       catch(error){
         let status=top.querySelector('.run-error');
         if(!status){status=document.createElement('span');status.className='tag error run-error';top.insertBefore(status,button);}
@@ -506,6 +580,7 @@ function runCard(item){
   const path=document.createElement('div');path.className='path';path.textContent=item.model_path;card.append(path);
   return card;
 }
+const jobLabels={fetch:'下載模型',check:'檢查模型更新',install:'安裝 Trainer','trainer-check':'檢查 Trainer 版本',train:'訓練及匯出模型'};
 async function refresh() {
   try {
     const state=await api('state');
@@ -513,16 +588,32 @@ async function refresh() {
     protectionInfo=await api('protection');
     renderProtection(protectionInfo);
     const job=state.job;
-    message.hidden=job.state==='idle';
-    message.className='notice'+(job.state==='failed'?' error':'');
-    message.textContent=job.state==='running' ? ({fetch:'正在下載模型',check:'正在檢查模型更新',install:'正在安裝 Trainer',train:'正在訓練及匯出模型'}[job.kind])+(job.progress?'・'+job.progress:'')
-      : job.state==='idle'?'目前沒有工作':job.kind==='train'&&job.state==='completed'?'訓練完成，請套用新模型。':job.kind+'：'+({completed:'完成',failed:'失敗',cancelled:'已取消'}[job.state]||job.state);
+    // Like the Windows dialog, the page checks the pinned trainer release once
+    // when it opens; the check only compares versions and never downloads.
+    if(!trainerCheckRequested){
+      trainerCheckRequested=true;
+      if(job.state==='idle')api('check-trainer',{}).then(()=>refresh()).catch(()=>{});
+    }
+    // A user-visible notice survives the poll until the job state changes or
+    // its timeout elapses, so an error cannot flash for a moment and vanish.
+    const jobSignature=job.kind+'/'+job.state;
+    if(jobSignature!==lastJobSignature){lastJobSignature=jobSignature;noticeUntil=0;}
+    // A failed background trainer check only updates the trainer line; it must
+    // not pop an error notice every time the page is opened offline.
+    const quietCheck=job.kind==='trainer-check'&&job.state==='failed';
+    if(Date.now()>=noticeUntil && !quietCheck){
+      message.hidden=job.state==='idle';
+      message.className='notice'+(job.state==='failed'?' error':'');
+      message.textContent=job.state==='running' ? jobLabels[job.kind]+(job.progress?'・'+job.progress:'')
+        : job.state==='idle'?'目前沒有工作':job.kind==='train'&&job.state==='completed'?'訓練完成，請套用新模型。':(jobLabels[job.kind]||job.kind)+'：'+({completed:'完成',failed:'失敗',cancelled:'已取消'}[job.state]||job.state);
+    }
     document.getElementById('log').textContent=job.log || '';
     document.getElementById('log').style.display=job.log?'block':'none';
     const progress=document.getElementById('progress');progress.style.display=job.state==='running'?'block':'none';
     if(job.percent!==null){progress.value=job.percent;}else{progress.removeAttribute('value');}
     document.getElementById('check').disabled=job.state==='running';
     document.getElementById('fetch').disabled=job.state==='running';
+    document.getElementById('check-trainer').disabled=job.state==='running';
     document.getElementById('install-trainer').disabled=job.state==='running';
     document.getElementById('train').disabled=job.state==='running' || !state.model_ready || !state.trainer_ready;
     document.getElementById('cancel').disabled=job.state!=='running';
@@ -532,16 +623,31 @@ async function refresh() {
     if(state.model_ready){const revision=document.createElement('span');revision.className='revision';revision.textContent=state.revision;modelStatus.append(revision);}
     if(state.model_update_available===true){const update=document.createElement('span');update.className='tag';update.textContent='有新版本可用';modelStatus.append(update);}
     else if(state.model_update_available===false){const current=document.createElement('span');current.className='tag';current.textContent='已是最新版本';modelStatus.append(current);}
-    document.getElementById('trainer-status').textContent=state.trainer_ready ? 'LoRA Trainer 已安裝' :
-      '找不到 llavon-lora，請安裝選配的 LoRA Trainer 元件。';
+    // The trainer line mirrors the Windows manager: installed version, the
+    // release of the pinned submodule commit, and an update hint.
+    let trainerText=state.trainer_ready?'LoRA Trainer 已安裝':'找不到 llavon-lora，請安裝選配的 LoRA Trainer 元件。';
+    if(state.trainer_ready&&state.trainer_version)trainerText+='（'+state.trainer_version+'）';
+    if(state.trainer_update_available===true)trainerText+='・有新版本可安裝';
+    else if(state.trainer_update_available===false)trainerText+='・已是最新版本';
+    else if(state.trainer_release_version)trainerText+='・目前發行版 '+state.trainer_release_version;
+    document.getElementById('trainer-status').textContent=trainerText;
+    const gpu=state.gpu||'none';
+    document.getElementById('gpu-status').textContent=
+      gpu==='amd' ? '偵測到 AMD GPU：安裝／更新或開始訓練時會下載 ROCm libtorch（約 9.4 GB，只下載一次）' :
+      gpu==='nvidia' ? '偵測到 NVIDIA GPU：安裝／更新或開始訓練時會下載 CUDA libtorch（約 3.9 GB，只下載一次）' :
+      gpu==='apple' ? 'Apple GPU：macOS 產物已內建 Metal（MPS），不需額外下載' :
+      '未偵測到可用的 GPU：使用 CPU 訓練';
+
     // An open page always mirrors the database: records typed while it is open
     // appear on the next poll and take part in the next training run.
-    pendingIds=await api('pending-ids');
+    const counts=await api('pending-count');
+    pendingCount=counts.count;pendingManual=counts.manual;
     updateEstimate();
-    let listing=await api('records?state=pending&offset='+recordOffset);
+    const manualFilter=document.getElementById('only-manual-records').checked?'&manual=1':'';
+    let listing=await api('records?state=pending'+manualFilter+'&offset='+recordOffset);
     if(recordOffset && recordOffset>=listing.total){
       recordOffset=Math.max(0,Math.ceil(listing.total/PAGE_SIZE)-1)*PAGE_SIZE;
-      listing=await api('records?state=pending&offset='+recordOffset);
+      listing=await api('records?state=pending'+manualFilter+'&offset='+recordOffset);
     }
     const page=Math.floor(recordOffset/PAGE_SIZE)+1;
     const pages=Math.max(1,Math.ceil((listing.total||0)/PAGE_SIZE));
@@ -556,16 +662,22 @@ async function refresh() {
     const runs=await api('runs'), view=document.getElementById('runs');view.replaceChildren();
     if (!runs.length) view.innerHTML='<p class="empty">尚無已完成模型。</p>';
     else for(const item of runs) view.append(runCard(item));
-  } catch(error){message.hidden=false;message.className='notice error';message.textContent=error.message;}
+    refreshBaseRuns(runs);
+  } catch(error){showNotice(error.message,true);}
 }
-async function act(path, body){try{await api(path,body);await refresh();}catch(error){message.hidden=false;message.className='notice error';message.textContent=error.message;}}
+async function act(path, body){try{await api(path,body);await refresh();}catch(error){showNotice(error.message,true);}}
 document.getElementById('fetch').onclick=()=>act('fetch',{});
 document.getElementById('install-trainer').onclick=()=>act('install-trainer',{});
+document.getElementById('check-trainer').onclick=()=>act('check-trainer',{});
 document.getElementById('check').onclick=()=>act('check',{});
+document.getElementById('only-manual-records').onchange=()=>{recordOffset=0;refresh();};
 document.getElementById('train').onclick=async()=>{
   try{
-    const ids=await api('pending-ids');
-    if(!ids.length)throw Error('目前沒有尚未訓練的資料');
+    const counts=await api('pending-count');
+    pendingCount=counts.count;pendingManual=counts.manual;
+    const manualOnly=manualOnlyTraining();
+    const count=effectivePendingCount();
+    if(!count)throw Error(manualOnly?'目前沒有曾手動選字的資料':'目前沒有尚未訓練的資料');
     let password='';
     if(protectionInfo.configured){
       // Training asks for its own password; it never reuses the review unlock.
@@ -576,10 +688,11 @@ document.getElementById('train').onclick=async()=>{
     options.device=document.getElementById('device').value;
     options.dtype=document.getElementById('dtype').value;
     options.shuffle=document.getElementById('shuffle').checked?'1':'0';
-    if(!confirm(`以 ${ids.length} 筆資料開始訓練？`))return;
-    await act('train',{ids,reviewed:ids,options,password});
+    if(!confirm(`以 ${count} 筆資料開始訓練？`))return;
+    await act('train',{strength:strengthSelect.value,only_manually_selected:manualOnly,
+      base_run_id:document.getElementById('base-run').value,options,password});
     document.getElementById('train-password').value='';
-  }catch(error){message.hidden=false;message.className='notice error';message.textContent=error.message;}
+  }catch(error){showNotice(error.message,true);}
 };
 document.getElementById('setup-cancel').onclick=()=>{document.getElementById('password-setup').hidden=true;};
 document.getElementById('setup-confirm').onclick=async()=>{
@@ -590,13 +703,13 @@ document.getElementById('setup-confirm').onclick=async()=>{
     document.getElementById('setup-password').value='';document.getElementById('setup-confirmation').value='';
     document.getElementById('password-setup').hidden=true;
     await refresh();
-  }catch(error){message.hidden=false;message.className='notice error';message.textContent=error.message;}
+  }catch(error){showNotice(error.message,true);}
 };
 document.getElementById('cancel').onclick=()=>act('cancel',{});
 document.getElementById('reload-records').onclick=()=>{recordOffset=0;refresh();};
 document.getElementById('previous').onclick=()=>{recordOffset=Math.max(0,recordOffset-PAGE_SIZE);refresh();};
 document.getElementById('next').onclick=()=>{recordOffset+=PAGE_SIZE;refresh();};
-if (!token) {message.textContent='請從輸入法選單重新開啟管理頁面。';}
+if (!token) {showNotice('請從輸入法選單重新開啟管理頁面。',true);}
 else {
   // The character table decides the readings shown for each character.
   api('readings').then(table=>{readingsTable=table||{};}).catch(()=>{}).then(()=>{refresh();setInterval(refresh,3000);});
@@ -1376,10 +1489,12 @@ private:
         const auto params = question == std::string::npos ? "" : requested.substr(question + 1);
         std::string state = "pending";
         int offset = 0;
+        bool manual_only = false;
         for (std::size_t start = 0; start < params.size();) {
             const auto end = params.find('&', start);
             const auto part = params.substr(start, end == std::string::npos ? end : end - start);
             if (part.starts_with("state=")) state = part.substr(6);
+            else if (part == "manual=1") manual_only = true;
             else if (part.starts_with("offset=")) {
                 const auto digits = part.substr(7);
                 const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), offset);
@@ -1391,8 +1506,11 @@ private:
         }
         if (state != "pending" && state != "excluded" && state != "trained")
             throw std::runtime_error("invalid record state");
+        const std::string manual_filter = manual_only
+            ? " AND EXISTS(SELECT 1 FROM readings r WHERE r.commit_id=commits.id AND r.manually_selected=1)"
+            : "";
         const auto counted = query_database(db_,
-            ("SELECT COUNT(*) FROM commits WHERE state='" + state + "'").c_str(), 1);
+            ("SELECT COUNT(*) FROM commits WHERE state='" + state + "'" + manual_filter).c_str(), 1);
         const int total = counted.empty() ? 0 : std::stoi(counted[0][0].get<std::string>());
         if (!fs::is_regular_file(db_)) return {{"rows",json::array()}, {"has_more",false}, {"total",total}};
         const bool unlocked = cipher_.has_value() && cipher_->unlocked();
@@ -1402,7 +1520,7 @@ private:
             // Sealed records: the page learns that they exist, never what they
             // say. Selection only needs the IDs, so reviewing stays possible.
             const auto rows = query_database(db_,
-                ("SELECT id,committed_at FROM commits WHERE state='" + state + "' "
+                ("SELECT id,committed_at FROM commits WHERE state='" + state + "'" + manual_filter + " "
                  "ORDER BY committed_at DESC,id DESC LIMIT " + std::to_string(kRecordsPerPage + 1) + " OFFSET " +
                  std::to_string(offset)).c_str(), 2);
             json locked_rows = json::array();
@@ -1416,7 +1534,8 @@ private:
         ime::unix_service::CommitCipher locked;
         const auto& cipher = unlocked ? *cipher_ : locked;
         json entries = json::array();
-        for (const auto& item : ime::unix_service::read_commits(handle.get(), state, cipher, offset, kRecordsPerPage + 1)) {
+        for (const auto& item : ime::unix_service::read_commits(handle.get(), state, cipher, offset, kRecordsPerPage + 1,
+                                                               manual_only)) {
             json readings = json::array(), manual = json::array();
             for (const auto& reading : item.readings) readings.push_back(reading);
             for (const bool value : item.manual) manual.push_back(value);
@@ -1431,29 +1550,47 @@ private:
     json runs() const {
         const auto columns = query_database(db_, "PRAGMA table_info(lora_runs)", 3);
         const bool extended = std::any_of(columns.begin(), columns.end(), [](const json& col){return col[1] == "rank";});
-        const auto rows = query_database(db_, extended ?
+        const bool requested = std::any_of(columns.begin(), columns.end(),
+                                           [](const json& col){return col[1] == "training_request_json";});
+        const auto rows = query_database(db_, requested ?
             "SELECT completed_at,record_count,model_path,optimizer_steps,rank,alpha,dropout,target_modules,id,"
-            "SUM(record_count) OVER (ORDER BY id) FROM lora_runs ORDER BY id DESC LIMIT 20" :
+            "cumulative_record_count,COALESCE(parent_id,0),training_request_json FROM lora_runs ORDER BY id DESC LIMIT 20" :
+            extended ?
+            "SELECT completed_at,record_count,model_path,optimizer_steps,rank,alpha,dropout,target_modules,id,"
+            "cumulative_record_count,COALESCE(parent_id,0) FROM lora_runs ORDER BY id DESC LIMIT 20" :
             "SELECT completed_at,record_count,model_path,id,SUM(record_count) OVER (ORDER BY id) "
-            "FROM lora_runs ORDER BY id DESC LIMIT 20", extended ? 10 : 5);
+            "FROM lora_runs ORDER BY id DESC LIMIT 20", requested ? 12 : (extended ? 11 : 5));
         json entries = json::array();
         for (const auto& row : rows) {
-            entries.push_back({{"completed_at",row[0]}, {"record_count",std::stoi(row[1].get<std::string>())},
-                               {"model_path",row[2]}, {"cumulative_count",std::stoi(row[extended ? 9 : 4].get<std::string>())},
-                               {"optimizer_steps",extended ? row[3] : json("0")},
-                               {"rank",extended ? row[4] : json("8")}, {"alpha",extended ? row[5] : json("16")},
-                               {"dropout",extended ? row[6] : json("0")},
-                               {"target_modules",extended ? row[7] : json("q_proj,v_proj")},
-                               {"id",extended ? row[8] : row[3]}});
+            json entry{{"completed_at",row[0]}, {"record_count",std::stoi(row[1].get<std::string>())},
+                       {"model_path",row[2]}, {"cumulative_count",std::stoi(row[extended ? 9 : 4].get<std::string>())},
+                       {"optimizer_steps",extended ? row[3] : json("0")},
+                       {"rank",extended ? row[4] : json("8")}, {"alpha",extended ? row[5] : json("16")},
+                       {"dropout",extended ? row[6] : json("0")},
+                       {"target_modules",extended ? row[7] : json("q_proj,v_proj")},
+                       {"id",extended ? row[8] : row[3]},
+                       {"parent_id",extended ? std::stoll(row[10].get<std::string>()) : 0LL}};
+            // The full request of a run decides the labels the history shows
+            // (strength and data scope); older runs simply carry none.
+            if (requested && row[11].is_string()) {
+                try {
+                    const auto request = json::parse(row[11].get<std::string>());
+                    entry["strength"] = request.value("strength", "");
+                    entry["only_manually_selected"] = request.value("only_manually_selected", false);
+                } catch (...) {}
+            }
+            entries.push_back(std::move(entry));
         }
         return entries;
     }
 
-    json pending_ids() const {
-        const auto rows = query_database(db_, "SELECT id FROM commits WHERE state='pending' ORDER BY id", 1);
-        json ids = json::array();
-        for (const auto& row : rows) ids.push_back(row[0]);
-        return ids;
+    json pending_count() const {
+        const auto rows = query_database(db_,
+            "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM readings r WHERE r.commit_id=commits.id "
+            "AND r.manually_selected=1)),0) FROM commits WHERE state='pending'", 2);
+        if (rows.empty()) return {{"count", 0LL}, {"manual", 0LL}};
+        return {{"count", std::stoll(rows[0][0].get<std::string>())},
+                {"manual", std::stoll(rows[0][1].get<std::string>())}};
     }
 
     // The IME candidate table is reading -> characters; invert it once so the
@@ -1516,10 +1653,34 @@ private:
             if (data.find("update-available=true") != std::string::npos) update = true;
             else if (data.find("update-available=false") != std::string::npos) update = false;
         }
+        // The trainer check reports the release of the pinned submodule commit
+        // without installing anything, matching the Windows version display.
+        json trainer_update = nullptr;
+        std::string trainer_release;
+        if (job_.kind == "trainer-check" && job_.state == "completed") {
+            if (data.find("update-available=true") != std::string::npos) trainer_update = true;
+            else if (data.find("update-available=false") != std::string::npos) trainer_update = false;
+            const auto marker = data.find("release=");
+            if (marker != std::string::npos) {
+                const auto begin = marker + std::string("release=").size();
+                const auto end = data.find_first_of(" \n", begin);
+                trainer_release = data.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+                if (trainer_release == "unknown") trainer_release.clear();
+            }
+        }
+        std::string trainer_version;
+        try {
+            const auto stamp = json::parse(std::ifstream(options_.state / "tools" / "lora" / "trainer-release.json"));
+            trainer_version = stamp.value("version", "");
+        } catch (...) {}
         return {{"job", {{"kind",job_.kind}, {"state",job_.state}, {"progress",progress}, {"percent",percent}, {"log",data}}},
                 {"model_ready", ready}, {"revision", ready ? revision : ""},
                 {"model_update_available", update},
                 {"active_model_path", configured_model_path()},
+                {"gpu", ime::unix_service::gpu_vendor()},
+                {"trainer_version", trainer_version},
+                {"trainer_release_version", trainer_release},
+                {"trainer_update_available", trainer_update},
                 {"trainer_ready", trainer_ready(options_.trainer, options_.state)}};
     }
 
@@ -1554,12 +1715,12 @@ private:
         if (request.method == "GET") {
             const json result = request.path == "/api/state" ? state() :
                                 request.path == "/api/protection" ? protection() :
-                                request.path == "/api/pending-ids" ? pending_ids() :
+                                request.path == "/api/pending-count" ? pending_count() :
                                 request.path == "/api/readings" ? readings_table() :
                                 request.path.starts_with("/api/records?") || request.path == "/api/records" ? records(request.path) :
                                 request.path == "/api/runs" ? runs() : json{{"error","not found"}};
             respond(fd, request.path.starts_with("/api/") && request.path != "/api/state" &&
-                        request.path != "/api/protection" && request.path != "/api/pending-ids" &&
+                        request.path != "/api/protection" && request.path != "/api/pending-count" &&
                         request.path != "/api/readings" &&
                         request.path != "/api/records" && !request.path.starts_with("/api/records?") &&
                         request.path != "/api/runs" ? 404 : 200,
@@ -1575,6 +1736,8 @@ private:
             start_job("check", {"check-model", "--output-dir", assets_root(options_).string()}, {});
         } else if (request.path == "/api/install-trainer") {
             start_job("install", {"install-trainer", "--output-dir", (options_.state / "tools" / "lora").string()}, {});
+        } else if (request.path == "/api/check-trainer") {
+            start_job("trainer-check", {"check-trainer", "--output-dir", (options_.state / "tools" / "lora").string()}, {});
         } else if (request.path == "/api/unlock") {
             const auto text = [&](const char* key) {
                 return body.contains(key) && body[key].is_string() ? body[key].get<std::string>() : std::string{};
@@ -1595,17 +1758,18 @@ private:
         } else if (request.path == "/api/train") {
             if (!trainer_ready(options_.trainer, options_.state))
                 throw std::runtime_error("LoRA Trainer 尚未安裝或版本不符，請安裝／更新 LoRA Trainer");
-            const auto ids = body.at("ids");
-            const auto reviewed = body.at("reviewed");
-            if (!ids.is_array() || ids.empty() || ids.size() > 100000) throw std::runtime_error("請至少選取一筆訓練紀錄");
-            if (!reviewed.is_array() || reviewed.size() > 100000) throw std::runtime_error("紀錄清單過大");
-            for (const auto& group : {ids, reviewed}) {
-                for (const auto& value : group) {
-                    if (!value.is_string() || value.get<std::string>().size() != 32 ||
-                        value.get<std::string>().find_first_not_of("0123456789abcdef") != std::string::npos)
-                        throw std::runtime_error("無效的紀錄 ID");
-                }
-            }
+            const bool manual_only = body.value("only_manually_selected", false);
+            if (pending_count().at(manual_only ? "manual" : "count").get<std::int64_t>() == 0)
+                throw std::runtime_error(manual_only ? "目前沒有曾手動選字的資料" : "目前沒有尚未訓練的資料");
+            const auto strength = body.value("strength", std::string("advanced"));
+            if (!ime::unix_service::lora_strength_from_name(strength))
+                throw std::runtime_error("無效的訓練強度");
+            std::string base_run_id;
+            if (body.contains("base_run_id") && body["base_run_id"].is_string())
+                base_run_id = body["base_run_id"].get<std::string>();
+            if (!base_run_id.empty() &&
+                (base_run_id.size() > 18 || base_run_id.find_first_not_of("0123456789") != std::string::npos))
+                throw std::runtime_error("無效的訓練基底");
             const auto params = body.at("options");
             if (!params.is_object()) throw std::runtime_error("無效的訓練參數");
             const auto assets = assets_root(options_);
@@ -1619,10 +1783,6 @@ private:
             const auto output = runs_root(options_) /
                 (std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            const auto selected_file = options_.state / "gui-selected-ids.json";
-            { std::ofstream selected(selected_file, std::ios::trunc);
-              selected << json{{"selected", ids}, {"reviewed", reviewed}}.dump();
-              if (!selected) throw std::runtime_error("無法儲存選取的紀錄"); }
             // Training asks for its own password; it is never shared with the
             // review unlock. The CLI decrypts the records on its own.
             std::string password;
@@ -1638,7 +1798,7 @@ private:
             }
             std::vector<std::string> args{"train", "--db", db_.string(), "--model-dir", (assets / revision).string(),
                 "--tables-dir", options_.tables.string(), "--output-dir", output.string(),
-                "--revision", revision, "--selected-ids", selected_file.string()};
+                "--revision", revision};
             for (const auto key : {"rank", "alpha", "dropout", "batch-size", "gradient-accumulation", "epochs",
                                    "max-steps", "learning-rate", "weight-decay", "warmup-steps", "max-grad-norm",
                                    "save-every", "seed", "max-seq-length", "target-modules", "device", "dtype", "shuffle"}) {
@@ -1647,6 +1807,11 @@ private:
                 if (value.size() > 100) throw std::runtime_error("訓練參數過長");
                 args.push_back(value);
             }
+            // The strength and the data scope decide the effective parameters;
+            // non-advanced strengths ignore the individual fields above, like
+            // the Windows manager resets them.
+            args.insert(args.end(), {"--strength", strength, "--only-manually-selected", manual_only ? "1" : "0"});
+            if (!base_run_id.empty()) args.insert(args.end(), {"--base-run-id", base_run_id});
             if (!password.empty()) args.insert(args.end(), {"--password-fd", "3"});
             start_job("train", std::move(args), output, password);
         } else if (request.path == "/api/cancel") {

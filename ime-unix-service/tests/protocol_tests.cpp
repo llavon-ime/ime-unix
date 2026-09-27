@@ -327,6 +327,11 @@ bool commit_test() {
                 mixed_record->readings.size() != 3 || mixed_record->readings.front() != "ㄋㄧˇ" ||
                 !mixed_record->readings[1].empty() || !mixed_record->readings[2].empty())
                 throw std::runtime_error("mixed commit did not survive the round trip");
+            const auto manually_selected = read_commits(db, "pending", cipher, 0, 10, true);
+            if (manually_selected.size() != 2 || find(manually_selected, recorded_id) == nullptr ||
+                find(manually_selected, std::string("48") + std::string(30, '0')) == nullptr ||
+                find(manually_selected, std::string("49") + std::string(30, '0')) != nullptr)
+                throw std::runtime_error("manual-only listing included an automatic commit");
             try { migrated = read_commits(db, "trained", cipher, 0, 10); }
             catch (const std::exception& error) {
                 throw std::runtime_error(std::string("migrated read failed: ") + error.what());
@@ -386,6 +391,20 @@ bool commit_test() {
             if (weight == 1 && !mixed_masks[i].is_null()) saw_trained_position = true;
         }
         if (!saw_trained_position) good = false;
+        // Manual-only training excludes entire automatic commits, including a
+        // mixed literal/composed sentence, while retaining all positions of
+        // the selected commit and its three training copies.
+        const auto manual_dataset = write_numeric_dataset(db, IME_UNIX_SERVICE_TEST_TABLE_DIR,
+            config, output, 384, nullptr, &decryption, true);
+        if (manual_dataset.included_ids.size() != 1 || manual_dataset.included_ids.front() !=
+                std::string("45") + std::string(30, '0')) good = false;
+        {
+            std::ifstream manual_rows(output);
+            std::string line;
+            int copies = 0;
+            while (std::getline(manual_rows, line)) ++copies;
+            if (copies != 3) good = false;
+        }
         vocab[1427] = "wrong token";  // "你" is token 1427 in this checkpoint.
         std::ofstream(directory / "ime_vocab.json") << nlohmann::json{{"tokens", vocab}}.dump();
         bool mismatched = false;
