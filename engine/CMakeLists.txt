@@ -92,6 +92,7 @@ target_sources(llavon_ime_engine PRIVATE
     src/symbol/symbol_menu.cpp
     src/phrase_override/phrase_override_store.cpp
     src/context/accessibility_context.cpp
+    src/context/marker_transaction.cpp
 )
 if(NOT WIN32)
     target_sources(llavon_ime_engine PRIVATE
@@ -100,6 +101,9 @@ if(NOT WIN32)
     )
 endif()
 target_link_libraries(llavon_ime_engine PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(llavon_ime_engine PRIVATE src/memory/memory_scan.cpp src/memory/process_memory.cpp src/memory/focus_probe.cpp)
+endif()
 if(ATSPI_FOUND AND ATSPI_GLIB_FOUND AND NOT WIN32 AND NOT APPLE)
     target_sources(llavon_ime_engine PRIVATE src/atspi/atspi_context_provider.cpp)
     target_compile_definitions(llavon_ime_engine PRIVATE LLAVON_IME_HAVE_ATSPI=1)

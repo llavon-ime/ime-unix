@@ -19,6 +19,13 @@ namespace llavon::ime::test {
 // owns the engine (mirroring a real host's main loop).
 class FakeHost final : public Host {
 public:
+    std::function<void(ContextId)> on_memory_request;
+    std::function<void(ContextId)> on_memory_invalidate;
+    std::function<HostContext(ContextId)> on_memory_sample;
+    void request_memory_context(ContextId id) override { if (on_memory_request) on_memory_request(id); }
+    void invalidate_memory_context(ContextId id) override { if (on_memory_invalidate) on_memory_invalidate(id); }
+    HostContext memory_context(ContextId id) override { return on_memory_sample ? on_memory_sample(id) : HostContext{}; }
+
     void post(std::function<void()> body) override {
         std::lock_guard lock(mutex_);
         queue_.push(std::move(body));

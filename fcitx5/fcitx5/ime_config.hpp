@@ -104,6 +104,13 @@ public:
     // Extra, addon-only entries that are not part of the shared engine config.
     fcitx::Option<DisplayVersion> version{this, "Version", "版本", DisplayVersion::Current};
     SchemaOptions fields{this};
+#ifdef __linux__
+    fcitx::Option<bool> memoryContextEnabled{this, "MemoryContextEnabled",
+        "實驗：聚焦時插入／刪除標記並掃描（會影響 Undo）", false};
+    fcitx::Option<std::vector<std::string>> memoryContextPrograms{this, "MemoryContextPrograms",
+        "已測試會回報插入與刪除的程式名稱（與執行檔名稱相同）", {}};
+    fcitx::Option<std::string> memoryContextStatus{this, "MemoryContextStatus", "記憶體上下文狀態", "disabled"};
+#endif
     fcitx::SubConfigOption phraseOverrides{this, "PhraseOverrides", "管理強制替代詞彙",
                                             "fcitx://config/addon/llavon-ime/phraseoverrides"};
     // Fcitx5 config tools render ExternalOption as a button and launch the

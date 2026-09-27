@@ -42,6 +42,13 @@ public:
     // Main thread only.
     virtual HostContext surrounding_text(ContextId context) = 0;
 
+    // Optional experimental Linux source. Implementations must bind results
+    // to a focus generation and publish only after insertion AND removal have
+    // been acknowledged. Existing/native hosts retain their default behavior.
+    virtual void request_memory_context(ContextId) {}
+    virtual void invalidate_memory_context(ContextId) {}
+    virtual HostContext memory_context(ContextId) { return {}; }
+
     // Whether the context is a password or otherwise sensitive field where the
     // prediction context must not be read or sent. Main thread only.
     virtual bool is_sensitive(ContextId context) = 0;

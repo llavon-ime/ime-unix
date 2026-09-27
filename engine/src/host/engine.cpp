@@ -55,6 +55,7 @@ void Engine::attach(ContextId context) {
 }
 
 void Engine::detach(ContextId context) {
+    host_.invalidate_memory_context(context);
     const auto it = sessions_.find(context);
     if (it == sessions_.end()) return;
     close_prediction_session(*it->second);
@@ -76,6 +77,7 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
     else recent_commit_.reset();
     auto& session = find_or_create(context);
     const auto effect = processor_.process(key, session, config_);
+    if (!effect.handled) host_.invalidate_memory_context(context);
     apply_effect(context, session, effect);
     return effect.handled;
 }
@@ -93,6 +95,8 @@ void Engine::select_symbol(ContextId context, int index, std::uint64_t epoch) {
 }
 
 void Engine::activate(ContextId context) {
+    host_.invalidate_memory_context(context);
+    if (!host_.is_sensitive(context)) host_.request_memory_context(context);
     if (accessibility_context_) {
         accessibility_context_->set_active(true);
         accessibility_base_sequence_ = accessibility_context_->sequence();
@@ -102,6 +106,7 @@ void Engine::activate(ContextId context) {
 }
 
 void Engine::deactivate(ContextId context) {
+    host_.invalidate_memory_context(context);
     if (accessibility_context_) {
         accessibility_context_->set_active(false);
         accessibility_base_sequence_ = accessibility_context_->sequence();
@@ -110,6 +115,7 @@ void Engine::deactivate(ContextId context) {
 }
 
 void Engine::reset(ContextId context, InputResetReason reason, bool clear_context) {
+    host_.invalidate_memory_context(context);
     auto* session = find(context);
     if (session == nullptr) return;
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
@@ -156,6 +162,7 @@ void Engine::reload_phrase_overrides() {
 }
 
 void Engine::clear_context_text(ContextId context) {
+    host_.invalidate_memory_context(context);
     auto* session = find(context);
     if (session != nullptr) session->context_text.clear();
 }
@@ -188,6 +195,7 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         const auto accessibility_sequence = accessibility_context_ ? accessibility_context_->sequence() : 0;
         const bool allow_training = effect.training_sample && config_.collect_training_data &&
                                     !host_.is_sensitive(context);
+        host_.invalidate_memory_context(context);
         host_.commit(context, effect.commit);
         if (allow_training) {
             try {
@@ -372,6 +380,15 @@ void Engine::resync_context(ContextId context, InputSession& session) {
     if (host_.is_sensitive(context)) return;
 
     const std::size_t limit = config_.context_length > 0 ? static_cast<std::size_t>(config_.context_length) : 0;
+
+    // A frontend returns this only while its verified focus snapshot is still
+    // current. It is separate from native surrounding text and training edits.
+    const auto memory = host_.memory_context(context);
+    if (memory.valid && memory.cursor == memory.anchor && memory.cursor <= memory.text.size()) {
+        session.context_text = utf16_tail(std::u16string_view(memory.text).substr(0, memory.cursor), limit);
+        log_context("memory-context", session.context_text);
+        return;
+    }
 
     // Some clients report an empty (but valid) document, notably Electron,
     // Chromium and terminals. An empty client prefix must not shadow the

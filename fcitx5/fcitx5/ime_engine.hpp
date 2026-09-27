@@ -6,6 +6,10 @@
 #include <fcitx/inputcontextproperty.h>
 #include <fcitx/inputmethodengine.h>
 #include <fcitx/instance.h>
+#ifdef __linux__
+#include <fcitx-utils/event.h>
+#include "memory/focus_probe.hpp"
+#endif
 
 #include <atomic>
 #include <cstdint>
@@ -53,6 +57,9 @@ public:
     void update_ui(ContextId context) override;
     HostContext surrounding_text(ContextId context) override;
     bool is_sensitive(ContextId context) override;
+    void request_memory_context(ContextId context) override;
+    void invalidate_memory_context(ContextId context) override;
+    HostContext memory_context(ContextId context) override;
 
 private:
     ImeInputContextProperty* property(fcitx::InputContext* input_context) const;
@@ -61,6 +68,7 @@ private:
     void reload_config();
     void update_accessibility_status();
     void refresh_phrase_override_editor() const;
+    bool memory_client_eligible(ContextId context) const;
 
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     std::unique_ptr<Engine> engine_;
@@ -69,11 +77,16 @@ private:
     // Refreshed in place so a pointer handed to a config frontend stays valid.
     mutable PhraseOverrideEditorConfig phrase_override_editor_;
     fcitx::Instance* instance_ = nullptr;
-    fcitx::EventDispatcher* event_dispatcher_ = nullptr;
+    std::unique_ptr<fcitx::EventDispatcher> event_dispatcher_;
     std::atomic<std::uint64_t> next_context_id_{1};
     std::unordered_map<ContextId, fcitx::TrackableObjectReference<fcitx::InputContext>> contexts_;
     ImeInputContextPropertyFactory property_factory_;
     std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> capability_changed_handler_;
+#ifdef __linux__
+    std::unique_ptr<memory::FocusProbe> memory_probe_;
+    std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> surrounding_changed_handler_;
+    std::unique_ptr<fcitx::EventSourceTime> memory_timer_;
+#endif
     fcitx::SimpleAction lora_manager_action_;
     fcitx::ScopedConnection lora_manager_connection_;
 };

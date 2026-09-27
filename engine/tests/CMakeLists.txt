@@ -52,6 +52,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/basic_input_tests.cpp
     rawkey/candidate_navigation_tests.cpp
     rawkey/context_source_tests.cpp
+    rawkey/memory_context_tests.cpp
     rawkey/hsu_layout_tests.cpp
     rawkey/lifecycle_tests.cpp
     rawkey/phrase_override_tests.cpp
@@ -83,3 +84,10 @@ target_compile_definitions(llavon_ime_rawkey_tests PRIVATE
 add_test(NAME llavon_ime_rawkey_tests COMMAND llavon_ime_rawkey_tests)
 set_tests_properties(llavon_ime_rawkey_tests PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(llavon_ime_memory_tests memory_process_tests.cpp)
+    target_link_libraries(llavon_ime_memory_tests PRIVATE llavon_ime_engine)
+    add_test(NAME llavon_ime_memory_tests COMMAND llavon_ime_memory_tests)
+    set_tests_properties(llavon_ime_memory_tests PROPERTIES TIMEOUT 20)
+endif()

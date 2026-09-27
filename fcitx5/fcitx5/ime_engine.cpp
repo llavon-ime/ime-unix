@@ -133,7 +133,12 @@ private:
 }  // namespace
 
 ImeEngine::ImeEngine(fcitx::Instance* instance)
-    : instance_(instance), event_dispatcher_(instance ? &instance->eventDispatcher() : nullptr) {
+    : instance_(instance) {
+    // Own the dispatcher to also support distributions shipping Fcitx 5.1.7.
+    if (instance_) {
+        event_dispatcher_ = std::make_unique<fcitx::EventDispatcher>();
+        event_dispatcher_->attach(&instance_->eventLoop());
+    }
     EngineOptions options;
     options.table_path = default_table_path();
     options.phrase_overrides_path = phrase_overrides_path();
@@ -146,6 +151,37 @@ ImeEngine::ImeEngine(fcitx::Instance* instance)
     options.enable_accessibility = false;
 #endif
     engine_ = std::make_unique<Engine>(std::move(options), *this);
+#ifdef __linux__
+    if (instance_) {
+        memory::FocusProbe::Hooks hooks;
+        hooks.snapshot = [this](ContextId id) { return surrounding_text(id); };
+        hooks.eligible = [this](ContextId id) { return memory_client_eligible(id); };
+        hooks.insert = [this](ContextId id, std::u16string_view text) { commit(id, text); };
+        hooks.remove = [this](ContextId id, unsigned count) {
+            if (auto* ic = input_context(id)) ic->deleteSurroundingText(-static_cast<int>(count), count);
+        };
+        hooks.post = [this](std::function<void()> body) { post(std::move(body)); };
+        hooks.status = [this](std::string status) { (void)fcitx_config_.memoryContextStatus.setValue(status); };
+        memory_probe_ = std::make_unique<memory::FocusProbe>(std::move(hooks));
+        surrounding_changed_handler_ = instance_->watchEvent(
+            fcitx::EventType::InputContextSurroundingTextUpdated, fcitx::EventWatcherPhase::PostInputMethod,
+            [this](fcitx::Event& event) {
+                auto* ic = static_cast<fcitx::InputContextEvent&>(event).inputContext();
+                const auto* state = property(ic);
+                if (state && state->id) memory_probe_->observe(state->id, surrounding_text(state->id));
+            });
+        memory_timer_ = instance_->eventLoop().addTimeEvent(CLOCK_MONOTONIC, fcitx::now(CLOCK_MONOTONIC), 0,
+            [this](fcitx::EventSourceTime* source, std::uint64_t) {
+                memory_probe_->tick();
+                if (memory_probe_->active()) {
+                    source->setNextInterval(10000);
+                    source->setOneShot();
+                }
+                return true;
+            });
+        memory_timer_->setEnabled(false);
+    }
+#endif
 
     if (instance_ != nullptr) {
         lora_manager_action_.setShortText("管理個人化訓練…");
@@ -182,6 +218,11 @@ ImeEngine::~ImeEngine() {
     // Property destructors may still run after this point during fcitx
     // teardown; the lifetime token makes their detach hooks no-ops.
     alive_.reset();
+#ifdef __linux__
+    memory_timer_.reset();
+    surrounding_changed_handler_.reset();
+    memory_probe_.reset();
+#endif
     engine_.reset();
 }
 
@@ -232,6 +273,18 @@ void ImeEngine::keyEvent(const fcitx::InputMethodEntry&, fcitx::KeyEvent& event)
     input_key.caps_lock = static_cast<bool>(raw_key.states() & fcitx::KeyState::CapsLock);
     input_key.release = event.isRelease();
 
+#ifdef __linux__
+    if (memory_probe_ && memory_probe_->defer_key(id,
+        [this, id, input_key, raw_key, time = event.time()](bool restored) {
+            auto* ic = input_context(id);
+            if (!ic) return;
+            if (restored && ic->hasFocus() && engine_->key_event(id, input_key)) return;
+            ic->forwardKey(raw_key, input_key.release, time);
+        })) {
+        event.filterAndAccept();
+        return;
+    }
+#endif
     if (engine_->key_event(id, input_key)) event.filterAndAccept();
 }
 
@@ -295,8 +348,15 @@ void ImeEngine::save() {
     // The accessibility status is informational and must not be persisted.
     const std::string status = *fcitx_config_.accessibilityStatus;
     (void)fcitx_config_.accessibilityStatus.setValue(std::string());
+#ifdef __linux__
+    const auto memory_status = *fcitx_config_.memoryContextStatus;
+    (void)fcitx_config_.memoryContextStatus.setValue(std::string());
+#endif
     fcitx::safeSaveAsIni(fcitx_config_, kFcitxConfigFile);
     (void)fcitx_config_.accessibilityStatus.setValue(status);
+#ifdef __linux__
+    (void)fcitx_config_.memoryContextStatus.setValue(memory_status);
+#endif
 }
 
 const fcitx::Configuration* ImeEngine::getConfig() const {
@@ -434,7 +494,7 @@ void ImeEngine::update_ui(ContextId context) {
         ++index;
     }
     candidates->setPage(state.page);
-    if (state.cursor_visible) candidates->setCursorIndex(state.cursor);
+    if (state.cursor_visible) candidates->setGlobalCursorIndex(state.page * state.page_size + state.cursor);
     panel.setCandidateList(std::move(candidates));
     input_context_ptr->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
 }
@@ -452,6 +512,7 @@ HostContext ImeEngine::surrounding_text(ContextId context) {
         // engine expects UTF-16 units.
         const std::string raw = surrounding.text();
         const auto scalars = utf8_to_u32(raw);
+        if (surrounding.cursor() > scalars.size() || surrounding.anchor() > scalars.size()) return {};
         const auto scalar_to_units = [&scalars](unsigned int offset) {
             const std::size_t bounded = std::min(static_cast<std::size_t>(offset), scalars.size());
             std::size_t units = 0;
@@ -475,6 +536,50 @@ bool ImeEngine::is_sensitive(ContextId context) {
     auto* input_context_ptr = input_context(context);
     if (input_context_ptr == nullptr) return true;
     return input_context_ptr->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive);
+}
+
+bool ImeEngine::memory_client_eligible(ContextId context) const {
+#ifdef __linux__
+    auto* ic = input_context(context);
+    if (!*fcitx_config_.memoryContextEnabled || !ic || !ic->hasFocus() ||
+        !ic->capabilityFlags().test(fcitx::CapabilityFlag::SurroundingText) ||
+        ic->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive)) return false;
+    const auto& programs = *fcitx_config_.memoryContextPrograms;
+    return !ic->program().empty() && std::ranges::find(programs, ic->program()) != programs.end();
+#else
+    (void)context;
+    return false;
+#endif
+}
+
+void ImeEngine::request_memory_context(ContextId context) {
+#ifdef __linux__
+    if (!memory_probe_ || !memory_client_eligible(context) || !engine_->render_state(context).composition_empty) return;
+    memory_probe_->focus(context, input_context(context)->program());
+    if (memory_probe_->active()) {
+        memory_timer_->setNextInterval(10000);
+        memory_timer_->setOneShot();
+    }
+#else
+    (void)context;
+#endif
+}
+
+void ImeEngine::invalidate_memory_context(ContextId context) {
+#ifdef __linux__
+    if (memory_probe_) memory_probe_->invalidate(context);
+#else
+    (void)context;
+#endif
+}
+
+HostContext ImeEngine::memory_context(ContextId context) {
+#ifdef __linux__
+    return memory_probe_ ? memory_probe_->sample(context) : HostContext{};
+#else
+    (void)context;
+    return {};
+#endif
 }
 
 fcitx::AddonInstance* ImeEngineFactory::create(fcitx::AddonManager* manager) {
