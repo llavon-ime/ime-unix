@@ -62,6 +62,7 @@ final class SettingsWindowController: NSWindowController {
 
     private let formStack = NSStackView()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let versionLabel = NSTextField(labelWithString: "")
     private var rows: [FieldRow] = []
     private var didBuildForm = false
     private var config: EngineConfig?
@@ -142,6 +143,17 @@ final class SettingsWindowController: NSWindowController {
         footer.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(footer)
 
+        // The bundle version sits in the bottom-left corner. The fcitx5 addon
+        // has to expose the version as a configuration row; this window can
+        // put it where it belongs.
+        versionLabel.font = NSFont.systemFont(ofSize: 11)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.lineBreakMode = .byTruncatingTail
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        versionLabel.stringValue = "版本 \(version ?? "未知")"
+        contentView.addSubview(versionLabel)
+
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
@@ -159,7 +171,11 @@ final class SettingsWindowController: NSWindowController {
 
             footer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 18),
             footer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -18),
-            footer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
+            footer.bottomAnchor.constraint(equalTo: versionLabel.topAnchor, constant: -6),
+
+            versionLabel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 18),
+            versionLabel.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -18),
+            versionLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
         ])
     }
 
