@@ -114,8 +114,12 @@ const std::vector<ConfigField>& config_fields() {
         boolean_field("esc_clears_entire_buffer", "EscKeyClearsEntireComposingBuffer", "Esc 鍵清除整個組字區",
                       "輸入行為", &Config::esc_clears_entire_buffer),
         boolean_field("smart_english", "SmartEnglish", "智慧型中英文", "輸入行為", &Config::smart_english),
+        // The memory probe helper is Linux-only (process_vm_readv), so the
+        // option is only offered where it can actually work.
+#if defined(__linux__)
         boolean_field("memory_context", "MemoryContext", "記憶體上下文取樣", "模型與執行",
                       &Config::memory_context),
+#endif
     };
     return fields;
 }
