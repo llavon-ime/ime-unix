@@ -150,7 +150,8 @@ final class SettingsWindowController: NSWindowController {
         versionLabel.textColor = .secondaryLabelColor
         versionLabel.lineBreakMode = .byTruncatingTail
         versionLabel.translatesAutoresizingMaskIntoConstraints = false
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let version = Bundle.main.object(forInfoDictionaryKey: "LlavonIMEDisplayVersion") as? String
+            ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         versionLabel.stringValue = "版本 \(version ?? "未知")"
         contentView.addSubview(versionLabel)
 

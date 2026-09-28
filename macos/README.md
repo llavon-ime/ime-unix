@@ -81,6 +81,8 @@ postinstall 也做一樣的事，並在 payload 安裝後啟動 app 一次，因
 `~/.config/llavon-ime/phrase_overrides.txt`，與 fcitx5 附加元件共用；設定視窗中的
 「編輯替代詞彙…」會用預設編輯器開啟該檔案。在第一次儲存設定之前，fcitx5 前端
 留下的 `~/Library/Application Support/fcitx5/conf/llavon-ime.conf` 仍會繼續生效。
+設定視窗左下角會顯示版本：開發建置帶有 `r<commit 數>.g<hash>` 後綴（與
+`scripts/build-linux.sh` 提供給 fcitx5 的資訊一致），發行套件只有版本號。
 
 設定視窗是從引擎的設定 schema（`engine/src/config/config_schema.cpp`）產生的，
 該 schema 同時驅動 fcitx5 附加元件的設定：只要在 schema 新增選項就夠了，因為

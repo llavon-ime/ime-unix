@@ -67,6 +67,18 @@ if [[ -z "${VERSION}" ]]; then
 fi
 VERSION="${VERSION:-0.1.0}"
 
+# The display version keeps a dev build traceable to its checkout, the way
+# scripts/build-linux.sh does for the fcitx5 addon; release builds that pass
+# LLAVON_IME_VERSION keep the clean version.
+DISPLAY_VERSION="${VERSION}"
+if [[ -z "${LLAVON_IME_VERSION:-}" ]]; then
+    revision="$(git -C "${ROOT_DIR}" rev-list --count HEAD 2>/dev/null || true)"
+    commit="$(git -C "${ROOT_DIR}" rev-parse --short=7 HEAD 2>/dev/null || true)"
+    if [[ -n "${revision}" && -n "${commit}" ]]; then
+        DISPLAY_VERSION="${VERSION}.r${revision}.g${commit}"
+    fi
+fi
+
 if [[ ! -f "${ROOT_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake" ]]; then
     echo "Initializing the vcpkg submodule..."
     git -C "${ROOT_DIR}" submodule update --init vcpkg
@@ -116,6 +128,7 @@ swiftc -O -parse-as-library \
 sed -e "s/@APP_NAME@/${APP_NAME}/g" \
     -e "s/@BUNDLE_ID@/${BUNDLE_ID}/g" \
     -e "s/@VERSION@/${VERSION}/g" \
+    -e "s/@DISPLAY_VERSION@/${DISPLAY_VERSION}/g" \
     "${ROOT_DIR}/macos/App/Info.plist.in" > "${APP_DIR}/Contents/Info.plist"
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 for icon in "${ROOT_DIR}"/macos/App/MenuIcon*.png; do

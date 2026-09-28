@@ -22,6 +22,8 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
+	<key>LlavonIMEDisplayVersion</key>
+	<string>@DISPLAY_VERSION@</string>
 	<key>CFBundleSignature</key>
 	<string>MACV</string>
 	<key>CFBundleSupportedPlatforms</key>
