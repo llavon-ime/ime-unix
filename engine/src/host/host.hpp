@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace llavon::ime {
 
@@ -45,6 +46,20 @@ public:
     // Whether the context is a password or otherwise sensitive field where the
     // prediction context must not be read or sent. Main thread only.
     virtual bool is_sensitive(ContextId context) = 0;
+
+    // Memory probe support (the last-resort context source): the host names
+    // the processes of the focused client, the probe only reads them. Hosts
+    // that cannot do this (macOS, headless tests) keep the default, which
+    // disables the source. Main thread only.
+    virtual std::vector<int> probe_processes(ContextId) { return {}; }
+    // Optional focused client PID. Zero means no reliable focus association;
+    // the memory probe still searches the program's other processes.
+    virtual int focused_probe_process(ContextId) { return 0; }
+
+    // Name of the focused client (e.g. "kitty", "konsole"). The memory probe
+    // uses it to try the client's own screen layout first instead of guessing
+    // every cell width. Empty when the host cannot name the client.
+    virtual std::string program(ContextId) { return {}; }
 };
 
 }  // namespace llavon::ime

@@ -115,10 +115,9 @@ Linux 也可從 Fcitx5 的 Llavon IME 設定中選擇「管理強制替代詞彙
 
 ## 本機個人化
 
-拉風輸入法可以使用自己的輸入紀錄訓練 LoRA 個人化模型。**資料收集預設關閉**，只有在設定中主動開啟「收集個人化訓練資料」後，完成的注音輸入才會寫入目前使用者的本機資料庫。
+拉風輸入法可以使用自己的輸入紀錄訓練 LoRA 個人化模型。**資料收集預設關閉**：從輸入法選單選擇「管理個人化訓練…」（或在設定頁面按「使用我的輸入改進模型」）開啟管理介面，設定密碼並啟用收集後，完成且非敏感的注音輸入才會加密寫入目前使用者的本機資料庫。介面可用來：
 
-可從輸入法選單選擇「管理個人化訓練…」，或在設定頁面按「使用我的輸入改進模型」，開啟本機管理介面。介面可用來：
-
+- 設定收集密碼，並啟用或停用加密收集。
 - 檢視、排除或刪除待訓練紀錄。
 - 下載訓練需要的基礎 checkpoint。
 - 安裝或更新本機 `lora-trainer`。
@@ -207,7 +206,17 @@ Linux preset 使用本儲存庫的 vcpkg 工具鏈，並啟用 Vulkan backend（
 
 ### macOS
 
-開發者可直接建置原生 InputMethodKit app，不需要 fcitx5-macos：
+最簡單的方式與 Linux 相同：
+
+```bash
+git clone --recurse-submodules https://github.com/llavon-ime/ime-unix.git
+cd ime-unix
+./scripts/build-macos.sh
+```
+
+腳本會初始化子模組與 vcpkg、建置並測試服務與原生 app、下載固定版本的
+LoRA Trainer，最後進行安裝；需要系統權限時會使用 `sudo`。
+開發者也可直接用底層的 app 建置腳本，不需要 fcitx5-macos：
 
 ```bash
 macos/scripts/build-native-app.sh --install
@@ -225,6 +234,13 @@ macos/scripts/build-native-app.sh --install
 brew install cmake pkg-config
 ```
 
+第一次建置時 vcpkg 會從原始碼編譯 libsodium，需要 autotools；缺少時 vcpkg 會
+提示 `BUILD_FAILED`，可用 Homebrew 補上：
+
+```bash
+brew install autoconf autoconf-archive automake libtool
+```
+
 腳本會使用 vcpkg 編譯推論引擎、以 `swiftc` 編譯前端、進行 ad-hoc 簽章，並安裝到：
 
 ```text
@@ -237,19 +253,17 @@ brew install cmake pkg-config
 /Library/Application Support/llavon-ime/payload
 ```
 
-模型預設位於：
-
-```text
-/Library/Application Support/llavon-ime/models
-```
+模型預設位於 `/Library/Application Support/llavon-ime/models`，固定版本的 LoRA
+Trainer 位於 `/Library/Application Support/llavon-ime/tools/lora`。
 
 沒有 `sudo` 權限時，可改用：
 
 ```bash
-macos/scripts/build-native-app.sh --install --user
+./scripts/build-macos.sh --user
 ```
 
-只想更新輸入法 app、不重新建置 service 時，可加上 `--no-service`。
+只想更新輸入法 app、不重新建置 service 與 LoRA Trainer 時，可加上
+`--no-service`（兩個建置腳本都支援這些選項）。
 
 開發版第一次安裝後，可能需要登出再登入，讓 macOS 重新掃描輸入來源。修改程式後可重新執行相同建置指令；需要時可先執行：
 
@@ -286,3 +300,27 @@ macOS preset 使用本儲存庫的 vcpkg 工具鏈並啟用 Metal backend（`lla
 ## 授權
 
 本專案程式碼依 [BSD 2-Clause License](LICENSE) 授權。模型權重另依 CC BY-NC 4.0 授權；發行套件會一併收錄相關模型與第三方相依套件的授權資訊。
+
+發行套件內含 Q4 GGUF 模型（CC BY-NC 4.0，僅限非商業用途；署名與相依套件授權
+隨套件附上）。開發版本需自備模型，透過 fcitx5 設定頁面或
+`LLAVON_IME_MODEL_PATH` 指定：
+
+https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF
+
+舊版 `IME_FCITX5_*` 環境變數名稱仍相容（例如 `IME_FCITX5_MODEL_PATH`）。
+
+### 本機 LoRA 個人化（命令列）
+
+注音提交資料的收集預設關閉；在個人化訓練管理介面設定密碼並啟用收集後，
+可用服務安裝的 `llavon-ime-lora` 列出、排除或刪除待訓練紀錄，並以選配的
+[`lora-trainer`](https://github.com/llavon-ime/lora-trainer) 訓練個人化模型。
+也可從輸入法選單的「管理個人化訓練…」或設定頁面的「使用我的輸入改進模型」按鈕開啟共用的本機網頁介面，
+在瀏覽器檢視紀錄、下載基礎模型與管理訓練工作。
+訓練需要另外下載未量化的基礎 checkpoint；套件內的 Q4 GGUF 只供推論使用。
+完整指令及模型相容性說明見 [Unix 服務文件](ime-unix-service/README.md#選用的本機-lora-訓練)。
+
+## 預測上下文
+
+- Linux：透過 AT-SPI 取得游標前文字。
+- macOS：透過 Fcitx5.app 的 InputMethodKit client 取得游標附近文字，不使用
+  Accessibility API，也不需要「輔助使用」權限（需 Fcitx5.app 0.3.4 以上）。

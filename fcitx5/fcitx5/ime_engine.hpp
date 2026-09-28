@@ -53,6 +53,9 @@ public:
     void update_ui(ContextId context) override;
     HostContext surrounding_text(ContextId context) override;
     bool is_sensitive(ContextId context) override;
+    std::vector<int> probe_processes(ContextId context) override;
+    int focused_probe_process(ContextId context) override;
+    std::string program(ContextId context) override;
 
 private:
     ImeInputContextProperty* property(fcitx::InputContext* input_context) const;

@@ -4,6 +4,9 @@
 #include <unistd.h>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <chrono>
+#include <thread>
 
 using namespace llavon::ime::rawkey;
 
@@ -97,3 +100,68 @@ RAWKEY_SUITE("context source", context_source) {
     }
 #endif
 }
+
+#ifndef __APPLE__
+RAWKEY_SUITE("memory probe leaves preedit and commit untouched", natural_memory_probe) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("llavon-rawkey-memory-" + std::to_string(::getpid()) + ".sh");
+    const auto log_path = path.string() + ".log";
+    {
+        std::ofstream file(path);
+        file << "#!/bin/sh\nwhile IFS= read -r line; do\n"
+             << "printf '%s\\n' \"$line\" >> '" << log_path << "'\n"
+             << "printf '%s\\n' '{\"matches\":[{\"pid\":4242,\"encoding\":\"utf8\","
+                "\"address\":4096,\"before\":\"document prefix \"}]}'\n"
+             << "done\n";
+    }
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace);
+    {
+        HarnessOptions options;
+        options.memory_helper_path = path.string();
+        Harness harness(options);
+        harness.host().set_probe_pids({4242});
+        harness.activate();
+        const auto scanned = [&](std::string_view reading) {
+            const std::string expected = "\"anchor\":\"" + std::string(reading) + "\"";
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (std::chrono::steady_clock::now() < deadline) {
+                std::ifstream log(log_path);
+                const std::string body{std::istreambuf_iterator<char>(log),
+                                       std::istreambuf_iterator<char>()};
+                if (body.find(expected) != std::string::npos) return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return false;
+        };
+        harness.key("s");
+        RAWKEY_ASSERT(harness.preedit() == "ㄋ");
+        RAWKEY_ASSERT(scanned("ㄋ"));
+        harness.key("u");
+        RAWKEY_ASSERT(harness.preedit() == "ㄋㄧ");
+        RAWKEY_ASSERT(scanned("ㄋㄧ"));
+        harness.key("3");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        RAWKEY_ASSERT(scanned("你"));
+        // The confirmation arrives after this state's prediction was already
+        // requested; the engine re-requests it so the context is used.
+        RAWKEY_ASSERT(harness.pump_until(
+            [&] { return harness.context_text() == "document prefix "; }));
+        harness.expect_commit("你");
+        RAWKEY_ASSERT(harness.commits().back() == "你");
+    }
+    std::filesystem::remove(log_path);
+    {
+        HarnessOptions options;
+        options.memory_helper_path = path.string();
+        Harness harness(options);
+        harness.host().set_probe_pids({4242});
+        harness.activate();
+        harness.set_surrounding("client text", 11, 11);
+        harness.key("s");
+        RAWKEY_ASSERT(harness.preedit() == "ㄋ");
+        RAWKEY_ASSERT(!std::filesystem::exists(log_path));
+    }
+    std::filesystem::remove(path);
+}
+#endif

@@ -39,6 +39,11 @@ set(LLAVON_IME_UNIX_SERVICE_NAME "llavon-ime-unix-service" CACHE STRING "Install
 if(NOT DEFINED LLAVON_IME_INSTALLED_UNIX_SERVICE_PATH)
     set(LLAVON_IME_INSTALLED_UNIX_SERVICE_PATH "${CMAKE_INSTALL_FULL_BINDIR}/${LLAVON_IME_UNIX_SERVICE_NAME}")
 endif()
+if(NOT DEFINED LLAVON_IME_INSTALLED_MEMSCAN_PATH)
+    set(LLAVON_IME_INSTALLED_MEMSCAN_PATH
+        "${CMAKE_INSTALL_FULL_LIBEXECDIR}/llavon-ime/llavon-ime-memscan"
+        CACHE FILEPATH "Installed memory probe helper used by the context fallback")
+endif()
 
 add_library(llavon_ime_engine STATIC src/llavon_ime_engine.cpp)
 set_target_properties(llavon_ime_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -50,6 +55,7 @@ target_compile_definitions(llavon_ime_engine PRIVATE
     LLAVON_IME_UNIX_SERVICE_NAME="${LLAVON_IME_UNIX_SERVICE_NAME}"
     LLAVON_IME_INSTALLED_UNIX_SERVICE_PATH="${LLAVON_IME_INSTALLED_UNIX_SERVICE_PATH}"
     LLAVON_IME_INSTALLED_MODEL_PATH="${LLAVON_IME_INSTALLED_MODEL_PATH}"
+    LLAVON_IME_INSTALLED_MEMSCAN_PATH="${LLAVON_IME_INSTALLED_MEMSCAN_PATH}"
 )
 target_compile_options(llavon_ime_engine PRIVATE -Wall -Wextra -Wpedantic)
 if(LLAVON_IME_DEBUG)
@@ -92,6 +98,7 @@ target_sources(llavon_ime_engine PRIVATE
     src/symbol/symbol_menu.cpp
     src/phrase_override/phrase_override_store.cpp
     src/context/accessibility_context.cpp
+    src/context/memory_context.cpp
 )
 if(NOT WIN32)
     target_sources(llavon_ime_engine PRIVATE

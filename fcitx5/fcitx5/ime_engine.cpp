@@ -14,18 +14,28 @@
 #include <fcitx/userinterfacemanager.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
+#include <climits>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <spawn.h>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
+#if defined(__linux__)
+#include <xcb/xcb.h>
+#endif
 
 #include "config/config.hpp"
+#include "debug/debug_log.hpp"
 #include "host/render_state.hpp"
 #include "text/utf.hpp"
 #include "util/env.hpp"
@@ -35,6 +45,59 @@ extern char** environ;
 namespace llavon::ime {
 
 namespace {
+
+#if defined(__linux__)
+// A program name does not identify the focused window: several instances of
+// kitty can each contain stable copies of the same natural composition.
+// Resolve the X11 input focus to its owning client window as additional
+// evidence; the scanner still considers other same-program processes.
+int focused_x11_pid() {
+    int screen = 0;
+    xcb_connection_t* connection = xcb_connect(nullptr, &screen);
+    if (!connection || xcb_connection_has_error(connection)) {
+        if (connection) xcb_disconnect(connection);
+        return 0;
+    }
+    const auto disconnect = [&] { xcb_disconnect(connection); };
+    auto* focus_reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr);
+    if (!focus_reply) {
+        disconnect();
+        return 0;
+    }
+    xcb_window_t window = focus_reply->focus;
+    free(focus_reply);
+    const char property_name[] = "_NET_WM_PID";
+    auto* atom_reply = xcb_intern_atom_reply(
+        connection, xcb_intern_atom(connection, 0, sizeof(property_name) - 1, property_name), nullptr);
+    if (!atom_reply) {
+        disconnect();
+        return 0;
+    }
+    const xcb_atom_t atom = atom_reply->atom;
+    free(atom_reply);
+    int pid = 0;
+    for (int depth = 0; depth < 32 && window != XCB_WINDOW_NONE &&
+                        window != XCB_INPUT_FOCUS_POINTER_ROOT; ++depth) {
+        auto* property = xcb_get_property_reply(
+            connection, xcb_get_property(connection, 0, window, atom, XCB_ATOM_CARDINAL, 0, 1), nullptr);
+        if (property && property->type == XCB_ATOM_CARDINAL && property->format == 32 &&
+            xcb_get_property_value_length(property) == sizeof(std::uint32_t)) {
+            const auto value = *static_cast<const std::uint32_t*>(xcb_get_property_value(property));
+            if (value > 1 && value <= static_cast<std::uint32_t>(INT_MAX)) pid = static_cast<int>(value);
+        }
+        free(property);
+        if (pid) break;
+        auto* parent = xcb_query_tree_reply(connection, xcb_query_tree(connection, window), nullptr);
+        if (!parent) break;
+        const xcb_window_t next = parent->parent;
+        free(parent);
+        if (next == window) break;
+        window = next;
+    }
+    disconnect();
+    return pid;
+}
+#endif
 
 std::string accessibility_status_text(const AccessibilityContextState& state) {
     switch (state.availability) {
@@ -59,8 +122,26 @@ std::string accessibility_status_text(const AccessibilityContextState& state) {
     return "無障礙: 未知";
 }
 
-std::filesystem::path default_table_path() {
-    if (const char* override = env_with_legacy("LLAVON_IME_TABLE_PATH", "IME_FCITX5_TABLE_PATH")) {
+std::string memory_status_text(const AccessibilityContextState& state) {
+    switch (state.availability) {
+        case AccessibilityAvailability::Available:
+            return "可取得";
+        case AccessibilityAvailability::Disabled:
+            return "已停用";
+        case AccessibilityAvailability::Unsupported:
+            return "此平台不支援";
+        case AccessibilityAvailability::Unavailable:
+            if (state.detail == "helper-missing") return "不可用(未安裝 llavon-ime-memscan)";
+            if (state.detail == "helper-not-executable") return "不可用(helper 無法執行)";
+            if (state.detail == "permission-denied") {
+                return "不可用(需要 CAP_SYS_PTRACE 或 ptrace_scope=0)";
+            }
+            return state.detail.empty() ? "不可用" : "不可用(" + state.detail + ")";
+    }
+    return "未知";
+}
+
+std::filesystem::path default_table_path() {    if (const char* override = env_with_legacy("LLAVON_IME_TABLE_PATH", "IME_FCITX5_TABLE_PATH")) {
         return override;
     }
 #ifdef __APPLE__
@@ -144,6 +225,10 @@ ImeEngine::ImeEngine(fcitx::Instance* instance)
     // The InputMethodKit client supplies surrounding text directly; there is
     // no accessibility provider to run.
     options.enable_accessibility = false;
+#else
+    // Linux hosts may use the memory probe as the last context source; the
+    // `memory_context` setting still gates whether it probes.
+    options.enable_memory_context = true;
 #endif
     engine_ = std::make_unique<Engine>(std::move(options), *this);
 
@@ -355,7 +440,11 @@ void ImeEngine::update_accessibility_status() {
 #ifdef LLAVON_IME_NATIVE_SURROUNDING
     const std::string status = "InputMethodKit: 可取得（不需輔助使用權限）";
 #else
-    const std::string status = accessibility_status_text(engine_->accessibility_state());
+    std::string status = accessibility_status_text(engine_->accessibility_state());
+    const auto memory = engine_->memory_context_state();
+    if (memory.availability != AccessibilityAvailability::Unsupported) {
+        status += "；記憶體取樣: " + memory_status_text(memory);
+    }
 #endif
     if (*fcitx_config_.accessibilityStatus == status) return;
     (void)fcitx_config_.accessibilityStatus.setValue(status);
@@ -475,6 +564,107 @@ bool ImeEngine::is_sensitive(ContextId context) {
     auto* input_context_ptr = input_context(context);
     if (input_context_ptr == nullptr) return true;
     return input_context_ptr->capabilityFlags().testAny(fcitx::CapabilityFlag::PasswordOrSensitive);
+}
+
+std::string ImeEngine::program(ContextId context) {
+    auto* input_context_ptr = input_context(context);
+    if (input_context_ptr == nullptr) return {};
+    return input_context_ptr->program();
+}
+
+int ImeEngine::focused_probe_process(ContextId context) {
+#if defined(__linux__)
+    auto* input_context_ptr = input_context(context);
+    if (input_context_ptr && input_context_ptr->display().starts_with("x11:"))
+        return focused_x11_pid();
+#else
+    (void)context;
+#endif
+    return 0;
+}
+
+std::vector<int> ImeEngine::probe_processes(ContextId context) {
+    auto* input_context_ptr = input_context(context);
+    if (input_context_ptr == nullptr) return {};
+    const std::string program = input_context_ptr->program();
+    if (program.empty()) return {};
+#if defined(__linux__)
+    // Focus is additional evidence, not a prerequisite. Wayland and some
+    // clients do not expose a reliable window PID; keep scanning their
+    // same-program processes and let the evidence for each address decay.
+    const int focused_pid = input_context_ptr->display().starts_with("x11:")
+                                ? focused_x11_pid() : 0;
+#else
+    return {};
+#endif
+#if defined(__linux__)
+
+    const auto matches = [](std::string_view candidate, std::string_view needle) {
+        if (candidate.empty() || needle.empty()) return false;
+        std::string lowered;
+        lowered.reserve(candidate.size());
+        for (const char value : candidate) {
+            lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(value))));
+        }
+        // Linux truncates comm to 15 characters. A short or unreadable comm
+        // must never match an unrelated application by a loose prefix.
+        if (lowered == needle) return true;
+        if (lowered.size() == 15 && needle.starts_with(lowered)) return true;
+        // Desktop entries often prefix the binary name: "google-chrome-stable"
+        // runs as "chrome", "onlyoffice-desktopeditors" as "desktopeditors".
+        // Compare whole dash-separated components, never loose substrings.
+        std::size_t start = 0;
+        while (start <= needle.size()) {
+            const auto dash = needle.find('-', start);
+            const auto piece = needle.substr(
+                start, dash == std::string_view::npos ? std::string_view::npos : dash - start);
+            if (piece == lowered) return true;
+            if (dash == std::string_view::npos) break;
+            start = dash + 1;
+        }
+        return false;
+    };
+
+    std::string needle;
+    needle.reserve(program.size());
+    for (const char value : program) {
+        needle.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(value))));
+    }
+
+    std::vector<int> processes;
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc", error)) {
+        if (error) break;
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])) == 0) continue;
+        const int pid = std::atoi(name.c_str());
+        if (pid <= 1 || pid == static_cast<int>(::getpid())) continue;
+        struct stat info {};
+        if (::stat(entry.path().c_str(), &info) != 0 || info.st_uid != ::getuid()) continue;
+        bool matched = false;
+        {
+            std::ifstream comm(entry.path() / "comm");
+            std::string line;
+            std::getline(comm, line);
+            matched = matches(line, needle);
+        }
+        if (!matched) {
+            std::error_code link_error;
+            const auto executable = std::filesystem::read_symlink(entry.path() / "exe", link_error);
+            if (!link_error) matched = matches(executable.filename().string(), needle);
+        }
+        if (!matched) continue;
+        if (pid == focused_pid)
+            processes.insert(processes.begin(), pid);
+        else
+            processes.push_back(pid);
+        if (processes.size() >= 32 && focused_pid == 0) break;
+    }
+    if (focused_pid && !processes.empty() && processes.front() == focused_pid)
+        LLAVON_DEBUG_LOG("MEMCTX-PID", "focused program=%s pid=%d", program.c_str(), focused_pid);
+    if (processes.size() > 16) processes.resize(16);
+    return processes;
+#endif
 }
 
 fcitx::AddonInstance* ImeEngineFactory::create(fcitx::AddonManager* manager) {

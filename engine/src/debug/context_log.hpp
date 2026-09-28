@@ -24,8 +24,9 @@ inline std::string context_preview(std::u16string_view text, std::size_t max_uni
 }
 
 inline void log_context(const char* source, std::u16string_view text) {
+    const std::string preview = context_preview(text);
     LLAVON_DEBUG_LOG("CTX", "source=%s units=%zu text=\"%s\"", source, text.size(),
-                     context_preview(text).c_str());
+                     preview.c_str());
 }
 #else
 inline void log_context(const char*, std::u16string_view) {}

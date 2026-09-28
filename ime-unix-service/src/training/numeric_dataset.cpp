@@ -207,7 +207,8 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
                                       const std::filesystem::path& model_config,
                                       const std::filesystem::path& output, int max_sequence_length,
                                       const std::unordered_set<std::string>* selected_ids,
-                                      const commit_crypto::Decryption* decryption) {
+                                      const commit_crypto::Decryption* decryption,
+                                      bool manual_only) {
     const auto config = load(model_config);
     NumericDataset result;
     result.vocab_size = config.at("vocab_size").get<int>();
@@ -239,12 +240,21 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         Row row;
         auto flush = [&]() {
             if (row.id.empty()) return;
+            // The manual filter mirrors the Windows manager: a record takes
+            // part only when a candidate was explicitly selected somewhere in
+            // it. Records that only typed literal positions are skipped whole.
+            if (manual_only && !row.manually_selected) return;
             if (selected_ids && !selected_ids->contains(row.id)) return;
             if (auto numeric = build_row(row, tables, max_sequence_length)) {
-                for (int copy = 0; copy < (row.manually_selected ? 3 : 1); ++copy)
+                const int copies = row.manually_selected ? 3 : 1;
+                for (int copy = 0; copy < copies; ++copy)
                     file << numeric->dump() << '\n';
+                result.samples += static_cast<std::size_t>(copies);
                 result.included_ids.push_back(row.id);
-            } else ++result.skipped;
+            } else {
+                ++result.skipped;
+                result.skipped_ids.push_back(row.id);
+            }
         };
         int status;
         while ((status = sqlite3_step(query)) == SQLITE_ROW) {
@@ -272,7 +282,9 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         if (status != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
         flush();
         file.flush();
-        if (!file || result.included_ids.empty()) throw std::runtime_error("no trainable pending Bopomofo records");
+        // An empty dataset is not an error here: the caller decides whether it
+        // wants to report the skipped records or refuse the run.
+        if (!file) throw std::runtime_error("cannot write numeric dataset");
         file.close();
         sqlite3_finalize(query); query = nullptr;
         std::filesystem::rename(partial, output);

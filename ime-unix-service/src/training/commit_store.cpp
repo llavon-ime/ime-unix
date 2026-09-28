@@ -432,9 +432,16 @@ CommitRecord load_record(sqlite3* db, sqlite3_stmt* query, const CommitCipher& c
 }  // namespace
 
 std::vector<CommitRecord> read_commits(sqlite3* db, const std::string& state,
-                                       const CommitCipher& cipher, int offset, int limit) {
-    Statement query(db, "SELECT id,committed_at,state,context,answer,schema_version FROM commits WHERE state=? "
-                        "ORDER BY committed_at DESC,id DESC LIMIT ? OFFSET ?");
+                                       const CommitCipher& cipher, int offset, int limit, bool manual_only) {
+    // Records that never explicitly selected a candidate take no part when the
+    // view or the training run asks for manually selected data only.
+    const std::string manual_filter = manual_only
+        ? " AND EXISTS(SELECT 1 FROM readings r WHERE r.commit_id=commits.id AND r.manually_selected=1)"
+        : "";
+    const std::string sql =
+        "SELECT id,committed_at,state,context,answer,schema_version FROM commits WHERE state=?" +
+        manual_filter + " ORDER BY committed_at DESC,id DESC LIMIT ? OFFSET ?";
+    Statement query(db, sql.c_str());
     query.text(1, state); query.integer(2, std::max(1, limit)); query.integer(3, std::max(0, offset));
     std::vector<CommitRecord> result;
     while (sqlite3_step(query.get()) == SQLITE_ROW) result.push_back(load_record(db, query.get(), cipher));

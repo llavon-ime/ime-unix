@@ -90,6 +90,8 @@ struct HarnessOptions {
     // File backing the accessibility context source; empty keeps it off.
     std::string context_sample_path;
     bool enable_accessibility = false;
+    // Optional last-resort memory source used by raw-key integration tests.
+    std::string memory_helper_path;
 };
 
 class Harness {
@@ -150,6 +152,9 @@ public:
     const std::string& phrase_overrides_path() const { return options_.phrase_overrides_path; }
     void reload_phrase_overrides();
     void clear_context_text();
+    // Context adopted for the current input context, as UTF-8.
+    std::string context_text() const;
+    std::size_t memory_probe_count() const;
     // Detaches the context, which closes the prediction service session.
     void detach();
     void activate();

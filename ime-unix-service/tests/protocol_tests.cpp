@@ -1,6 +1,7 @@
 #include "pipe/protocol.hpp"
 #include "session/session_manager.hpp"
 #include "training/commit_store.hpp"
+#include "training/lora_history_lca.hpp"
 #include "training/numeric_dataset.hpp"
 
 #include <sqlite3.h>
@@ -327,6 +328,11 @@ bool commit_test() {
                 mixed_record->readings.size() != 3 || mixed_record->readings.front() != "ㄋㄧˇ" ||
                 !mixed_record->readings[1].empty() || !mixed_record->readings[2].empty())
                 throw std::runtime_error("mixed commit did not survive the round trip");
+            const auto manually_selected = read_commits(db, "pending", cipher, 0, 10, true);
+            if (manually_selected.size() != 2 || find(manually_selected, recorded_id) == nullptr ||
+                find(manually_selected, std::string("48") + std::string(30, '0')) == nullptr ||
+                find(manually_selected, std::string("49") + std::string(30, '0')) != nullptr)
+                throw std::runtime_error("manual-only listing included an automatic commit");
             try { migrated = read_commits(db, "trained", cipher, 0, 10); }
             catch (const std::exception& error) {
                 throw std::runtime_error(std::string("migrated read failed: ") + error.what());
@@ -386,6 +392,20 @@ bool commit_test() {
             if (weight == 1 && !mixed_masks[i].is_null()) saw_trained_position = true;
         }
         if (!saw_trained_position) good = false;
+        // Manual-only training excludes entire automatic commits, including a
+        // mixed literal/composed sentence, while retaining all positions of
+        // the selected commit and its three training copies.
+        const auto manual_dataset = write_numeric_dataset(db, IME_UNIX_SERVICE_TEST_TABLE_DIR,
+            config, output, 384, nullptr, &decryption, true);
+        if (manual_dataset.included_ids.size() != 1 || manual_dataset.included_ids.front() !=
+                std::string("45") + std::string(30, '0')) good = false;
+        {
+            std::ifstream manual_rows(output);
+            std::string line;
+            int copies = 0;
+            while (std::getline(manual_rows, line)) ++copies;
+            if (copies != 3) good = false;
+        }
         vocab[1427] = "wrong token";  // "你" is token 1427 in this checkpoint.
         std::ofstream(directory / "ime_vocab.json") << nlohmann::json{{"tokens", vocab}}.dump();
         bool mismatched = false;
@@ -426,10 +446,38 @@ bool commit_test() {
 
 }  // namespace
 
+// The history tree's shortcut follows the Windows manager: the common ancestor
+// of two runs must be a real lineage node, and malformed history is refused.
+bool lora_lca_test() {
+    using ime::unix_service::LoraHistoryParent;
+    using ime::unix_service::tarjan_lca;
+    bool good = true;
+    const std::vector<LoraHistoryParent> chain{{1, 0}, {2, 1}, {3, 2}};
+    good = good && tarjan_lca(chain, 3, 2) == 2;
+    good = good && tarjan_lca(chain, 2, 3) == 2;
+    good = good && tarjan_lca(chain, 3, 1) == 1;
+    good = good && tarjan_lca(chain, 1, 1) == 1;
+    good = good && tarjan_lca(chain, 3, 0) == 0;
+    const std::vector<LoraHistoryParent> branch{{1, 0}, {2, 1}, {3, 1}, {4, 3}};
+    good = good && tarjan_lca(branch, 2, 3) == 1;
+    good = good && tarjan_lca(branch, 4, 2) == 1;
+    good = good && tarjan_lca(branch, 4, 3) == 3;
+    const std::vector<LoraHistoryParent> siblings{{1, 0}, {2, 0}};
+    good = good && tarjan_lca(siblings, 1, 2) == 0;
+    if (tarjan_lca(chain, 3, 9)) good = false;                    // unknown run
+    if (tarjan_lca(chain, 0, 0) != 0) good = false;               // base only
+    const std::vector<LoraHistoryParent> duplicate{{1, 0}, {1, 0}};
+    if (tarjan_lca(duplicate, 1, 1)) good = false;                // duplicate IDs
+    const std::vector<LoraHistoryParent> orphan{{1, 0}, {2, 99}};
+    if (tarjan_lca(orphan, 1, 2)) good = false;                   // missing parent
+    return good;
+}
+
 int main() {
     struct Case { const char* name; bool (*run)(); };
     const Case cases[] = {{"protocol", protocol_test}, {"core-adapter", core_adapter_test},
-                          {"core-runtime", core_runtime_test}, {"session", session_test}, {"commit", commit_test}};
+                          {"core-runtime", core_runtime_test}, {"session", session_test}, {"commit", commit_test},
+                          {"lora-lca", lora_lca_test}};
     bool good = true;
     for (const auto& item : cases) {
         if (item.run()) continue;

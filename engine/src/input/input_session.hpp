@@ -37,6 +37,10 @@ struct MixedDecisionState {
     }
 };
 
+// Where the last resolved context came from. The memory probe is only worth
+// its writes when nothing else produced text.
+enum class ContextSource : std::uint8_t { None, Client, Accessibility, Memory };
+
 // Per-input-context editing state. The engine swaps the whole object in and
 // out of the active input context, so every field always travels together.
 struct InputSession {
@@ -53,7 +57,7 @@ struct InputSession {
     // Text before the caret as read from the current prediction source for the
     // pending request. Never accumulated by this IME.
     std::u16string context_text;
-
+    ContextSource context_source = ContextSource::None;
     PredictionState prediction;
 
     InputStateKind kind() const { return input_state_kind(state); }

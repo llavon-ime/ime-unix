@@ -22,6 +22,8 @@
 
 namespace llavon::ime {
 
+class MemoryContextProvider;
+
 // A commit can be withdrawn by an immediate Backspace within this window; the
 // service holds staged commits for the same span before writing them.
 inline constexpr std::chrono::seconds kCommitCorrectionWindow{10};
@@ -35,6 +37,10 @@ struct EngineOptions {
     // creates the AT-SPI context provider and relies on Host::surrounding_text
     // alone.
     bool enable_accessibility = true;
+    // When true the engine may create the memory probe context source; the
+    // `memory_context` setting still gates whether it actually probes. Hosts on
+    // platforms with the probe helper set this.
+    bool enable_memory_context = false;
     // A host-independent sink for committed Bopomofo training samples. It is
     // called after Host::commit; a missing sink never records user text.
     std::function<void(const InputEffect::CommitSample&, std::u16string_view)> on_training_commit;
@@ -91,7 +97,13 @@ public:
 
     // Drops any cached context text (used when a context becomes sensitive).
     void clear_context_text(ContextId context);
+
+    // Context most recently adopted for this input context (diagnostics and
+    // host-side display); empty when no source produced context.
+    std::u16string context_text(ContextId context) const;
     AccessibilityContextState accessibility_state() const;
+    AccessibilityContextState memory_context_state() const;
+    std::size_t memory_probe_count() const;
 
     // Raw session access for host diagnostics and tests. The engine keeps
     // ownership; prefer the event API for normal operation.
@@ -103,6 +115,7 @@ private:
     void apply_effect(ContextId context, InputSession& session, const InputEffect& effect);
 
     void request_prediction(ContextId context, InputSession& session);
+    bool should_probe_memory(ContextId context, const InputSession& session) const;
     void open_prediction_session(ContextId context, std::uint64_t generation);
     void send_prediction(ContextId context, InputSession& session, std::uint64_t generation);
     void handle_prediction_response(ContextId context, std::uint64_t generation, protocol::Message response);
@@ -114,6 +127,15 @@ private:
     // of an empty composition inside the correction window.
     void withdraw_recent_commit(ContextId context);
     protocol::PredictRequest build_predict_request(ContextId context, const InputSession& session) const;
+    // Adopts a sample from a context source, stripping the composition preedit
+    // when the sample was published after the composition started. Memory
+    // samples never contain the composition (they are the text in front of the
+    // committed run), so they pass strip_preedit = false.
+    std::optional<std::u16string> adopt_context_sample(const InputSession& session,
+                                                       const AccessibilityContextSample& sample,
+                                                       std::uint64_t base_sequence,
+                                                       std::uint64_t composition_base,
+                                                       bool strip_preedit = true) const;
     std::optional<std::u16string> strip_accessibility_preedit(const InputSession& session,
                                                               const std::u16string& sample) const;
     void apply_context_sources();
@@ -144,6 +166,15 @@ private:
     std::uint64_t accessibility_base_sequence_ = 0;
     std::uint64_t accessibility_composition_base_ = 0;
     std::size_t accessibility_max_code_units_ = 0;
+    std::unique_ptr<MemoryContextProvider> memory_context_;
+    std::uint64_t memory_base_sequence_ = 0;
+    // The context the memory probe currently belongs to (0 = none focused).
+    ContextId memory_probe_context_ = 0;
+    // Recently committed text of the focused client. Clients that do not draw
+    // the composition into their document still write the committed text
+    // there, so the probe can locate the caret with it. Cleared whenever the
+    // caret may have moved without a commit (forwarded key, focus change).
+    std::u16string memory_commit_history_;
 };
 
 }  // namespace llavon::ime
