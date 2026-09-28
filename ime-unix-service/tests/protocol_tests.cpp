@@ -1,6 +1,7 @@
 #include "pipe/protocol.hpp"
 #include "session/session_manager.hpp"
 #include "training/commit_store.hpp"
+#include "training/lora_history_lca.hpp"
 #include "training/numeric_dataset.hpp"
 
 #include <sqlite3.h>
@@ -445,10 +446,38 @@ bool commit_test() {
 
 }  // namespace
 
+// The history tree's shortcut follows the Windows manager: the common ancestor
+// of two runs must be a real lineage node, and malformed history is refused.
+bool lora_lca_test() {
+    using ime::unix_service::LoraHistoryParent;
+    using ime::unix_service::tarjan_lca;
+    bool good = true;
+    const std::vector<LoraHistoryParent> chain{{1, 0}, {2, 1}, {3, 2}};
+    good = good && tarjan_lca(chain, 3, 2) == 2;
+    good = good && tarjan_lca(chain, 2, 3) == 2;
+    good = good && tarjan_lca(chain, 3, 1) == 1;
+    good = good && tarjan_lca(chain, 1, 1) == 1;
+    good = good && tarjan_lca(chain, 3, 0) == 0;
+    const std::vector<LoraHistoryParent> branch{{1, 0}, {2, 1}, {3, 1}, {4, 3}};
+    good = good && tarjan_lca(branch, 2, 3) == 1;
+    good = good && tarjan_lca(branch, 4, 2) == 1;
+    good = good && tarjan_lca(branch, 4, 3) == 3;
+    const std::vector<LoraHistoryParent> siblings{{1, 0}, {2, 0}};
+    good = good && tarjan_lca(siblings, 1, 2) == 0;
+    if (tarjan_lca(chain, 3, 9)) good = false;                    // unknown run
+    if (tarjan_lca(chain, 0, 0) != 0) good = false;               // base only
+    const std::vector<LoraHistoryParent> duplicate{{1, 0}, {1, 0}};
+    if (tarjan_lca(duplicate, 1, 1)) good = false;                // duplicate IDs
+    const std::vector<LoraHistoryParent> orphan{{1, 0}, {2, 99}};
+    if (tarjan_lca(orphan, 1, 2)) good = false;                   // missing parent
+    return good;
+}
+
 int main() {
     struct Case { const char* name; bool (*run)(); };
     const Case cases[] = {{"protocol", protocol_test}, {"core-adapter", core_adapter_test},
-                          {"core-runtime", core_runtime_test}, {"session", session_test}, {"commit", commit_test}};
+                          {"core-runtime", core_runtime_test}, {"session", session_test}, {"commit", commit_test},
+                          {"lora-lca", lora_lca_test}};
     bool good = true;
     for (const auto& item : cases) {
         if (item.run()) continue;

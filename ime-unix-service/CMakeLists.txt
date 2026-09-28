@@ -97,7 +97,7 @@ target_compile_definitions(llavon-ime-lora PRIVATE
 target_include_directories(llavon-ime-lora PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(llavon-ime-lora PRIVATE ${LLAVON_IME_SQLITE_TARGET} utf8cpp::utf8cpp nlohmann_json::nlohmann_json unofficial-sodium::sodium)
 install(TARGETS llavon-ime-lora RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-add_executable(llavon-ime-lora-gui src/training/lora_gui.cpp src/training/commit_store.cpp src/pipe/protocol.cpp)
+add_executable(llavon-ime-lora-gui src/training/lora_gui.cpp src/training/commit_store.cpp src/training/lora_history_lca.cpp src/pipe/protocol.cpp)
 target_compile_features(llavon-ime-lora-gui PRIVATE cxx_std_23)
 target_compile_definitions(llavon-ime-lora-gui PRIVATE
     LLAVON_IME_LORA_PINNED_COMMIT="${LLAVON_LORA_COMMIT}"
@@ -125,6 +125,7 @@ if(IME_UNIX_SERVICE_BUILD_TESTS)
         src/session/session_manager.cpp
         src/training/commit_store.cpp
         src/training/numeric_dataset.cpp
+        src/training/lora_history_lca.cpp
     )
     target_compile_features(ime_unix_service_tests PRIVATE cxx_std_23)
     target_include_directories(ime_unix_service_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")

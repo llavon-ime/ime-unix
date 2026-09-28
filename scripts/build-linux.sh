@@ -133,6 +133,46 @@ echo "Installing ime-unix-service, fcitx5 addon, memory probe helper, and model.
 "${SUDO[@]}" cmake --install "${ROOT_DIR}/build/memscan"
 "${SUDO[@]}" install -Dm644 "${MODEL_PATH}" "${MODEL_INSTALL_PATH}"
 
+# The manager watches its own binary: a reinstalled build replaces the running
+# process and keeps the page address, and the page reloads itself when it sees
+# the new build (the same idea as the memory helper restarting on reinstall).
+# A manager from an older build that predates that behaviour cannot hand itself
+# over; stop it so the next menu open uses the new build. A training job is
+# never interrupted.
+GUI_PATH="${LLAVON_IME_LORA_GUI_PATH:-/usr/bin/llavon-ime-lora-gui}"
+if [[ -z "${LLAVON_IME_SKIP_LORA_GUI_RESTART:-}" ]]; then
+    sleep 2  # give a running manager time to hand itself over
+    installed_inode="$(stat -c '%i' "${GUI_PATH}" 2>/dev/null || true)"
+    for pid in $(pgrep -f 'llavon-ime-lora-gui' 2>/dev/null || true); do
+        exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+        case "${exe}" in
+            "${GUI_PATH}" | "${GUI_PATH} (deleted)") ;;
+            *) continue ;;
+        esac
+        if [[ -n "${installed_inode}" &&
+              "$(stat -Lc '%i' "/proc/${pid}/exe" 2>/dev/null || true)" == "${installed_inode}" ]]; then
+            continue  # already the reinstalled build
+        fi
+        state_dir="${LLAVON_IME_LORA_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/llavon-ime/training}"
+        url="$(head -n 1 "${state_dir}/gui.lock" 2>/dev/null || true)"
+        if [[ "${url}" == http://127.0.0.1:* ]]; then
+            token="${url#*#}"
+            endpoint="${url%%#*}"
+            status="$(curl -s --max-time 2 -H "X-Llavon-Token: ${token}" "${endpoint}api/state" || true)"
+            case "${status}" in
+                *'"state":"running"'*)
+                    echo "LoRA manager (PID ${pid}) is training; it keeps running and is replaced afterwards." >&2
+                    continue ;;
+            esac
+        fi
+        if kill "${pid}" 2>/dev/null; then
+            echo "Stopped the stale LoRA manager (PID ${pid}); the next open uses the new build."
+        else
+            echo "Could not stop the stale LoRA manager (PID ${pid}); close it manually." >&2
+        fi
+    done
+fi
+
 # Reading another process needs ptrace permission. CAP_SYS_PTRACE on the helper
 # is the narrow option; kernel.yama.ptrace_scope=0 also works but applies to
 # every process of the user.

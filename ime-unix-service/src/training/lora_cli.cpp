@@ -818,10 +818,9 @@ TrainingBase resolve_training_base(Database& db, const Options& options) {
     return base;
 }
 
-void train(Database& db, const Options& options, const fs::path& model_dir, const fs::path& tables,
-            const fs::path& output, const fs::path& db_path, const ime::unix_service::CommitCipher& cipher) {
-    if (options.contains("--trainer"))
-        throw std::invalid_argument("--trainer is no longer supported; use the pinned trainer installer");
+// Resolves the installed trainer and refuses a stale or incomplete install
+// unless a development override names the executable.
+fs::path verified_trainer(const fs::path& db_path) {
     const fs::path trainer = installed_trainer(db_path);
     const char* override = std::getenv("LLAVON_IME_LORA_CLI_PATH");
     if (!override || !*override) {
@@ -830,6 +829,78 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         if (!has_trainer_libraries(trainer.parent_path()))
             throw std::runtime_error("installed trainer is missing its native libraries; reinstall the pinned trainer");
     }
+    return trainer;
+}
+
+// Converts an adapter into the quantized GGUF the input method loads. The
+// intermediate f16 file is removed again; only the adapter is kept.
+void export_model(const fs::path& trainer, const fs::path& model_dir, const fs::path& adapter,
+                  const fs::path& gguf) {
+    auto f16 = gguf;
+    f16.replace_filename("personalized-f16.gguf");
+    run(trainer, {"export-gguf", "--model-config", (model_dir / "config.json").string(),
+                  "--model", model_dir.string(), "--vocab-file", (model_dir / "ime_vocab.json").string(),
+                  "--adapter", adapter.string(), "--outfile", f16.string(), "--outtype", "f16",
+                  "--quantize", "Q4_K_M", "--quantized-outfile", gguf.string(), "--force"});
+    if (!fs::is_regular_file(gguf) || fs::file_size(gguf) == 0)
+        throw std::runtime_error("trainer did not produce a GGUF model");
+    fs::remove(f16);
+}
+
+// Re-exports the GGUF of a finished run from its retained adapter, mirroring
+// the Windows manager's ensure_model_exported.
+void export_run_model(Database& db, std::int64_t run_id, const fs::path& model_dir,
+                      const fs::path& db_path) {
+    ensure_run_history(db);
+    Statement query(db.get(), "SELECT base_revision,adapter_path,model_path FROM lora_runs WHERE id=?");
+    sqlite3_bind_int64(query.get(), 1, run_id);
+    if (query.next() != SQLITE_ROW) throw std::runtime_error("training run not found");
+    const std::string revision = query.text(0);
+    const fs::path adapter = query.text(1);
+    const fs::path gguf = query.text(2);
+    if (!fs::is_regular_file(adapter / "adapter_model.safetensors"))
+        throw std::runtime_error("run adapter is missing");
+    const fs::path training_model_dir = model_dir.parent_path() / revision;
+    if (!fs::is_regular_file(training_model_dir / "config.json") ||
+        !fs::is_regular_file(training_model_dir / "ime_vocab.json") ||
+        !fs::is_regular_file(training_model_dir / "model.safetensors"))
+        throw std::runtime_error("run's base checkpoint is missing");
+    const auto trainer = verified_trainer(db_path);
+    export_model(trainer, training_model_dir, adapter, gguf);
+    std::cout << "model=" << gguf << '\n';
+}
+
+// Reports how many records a training run would actually use, without
+// touching the database or the trainer: the same conversion the run performs,
+// written to a throwaway file. The page shows this exact count in its
+// confirmation and marks the skipped records in the review list.
+void count_dataset(sqlite3* db, const Options& options, const fs::path& model_dir, const fs::path& tables,
+                   const ime::unix_service::CommitCipher& cipher) {
+    const int max_length = integer_option(options, "--max-seq-length", 384, 2, 384);
+    const bool manual_only = integer_option(options, "--only-manually-selected", 0, 0, 1) != 0;
+    auto temporary = fs::temp_directory_path() /
+        ("llavon-ime-count-" + std::to_string(::getpid()) + ".jsonl");
+    const auto decryption = cipher.decryption();
+    const auto dataset = ime::unix_service::write_numeric_dataset(
+        db, tables, model_dir / "config.json", temporary, max_length, nullptr, &decryption, manual_only);
+    fs::remove(temporary);
+    // The skipped ids let the manager mark records that will never train; the
+    // list is capped so a huge pending set cannot flood the page.
+    constexpr std::size_t kMaxSkippedIds = 500;
+    nlohmann::json skipped_ids = nlohmann::json::array();
+    for (std::size_t index = 0; index < dataset.skipped_ids.size() && index < kMaxSkippedIds; ++index)
+        skipped_ids.push_back(dataset.skipped_ids[index]);
+    std::cout << nlohmann::json{{"trainable", dataset.included_ids.size()},
+                                {"skipped", dataset.skipped},
+                                {"samples", dataset.samples},
+                                {"skipped_ids", std::move(skipped_ids)}}.dump() << '\n';
+}
+
+void train(Database& db, const Options& options, const fs::path& model_dir, const fs::path& tables,
+            const fs::path& output, const fs::path& db_path, const ime::unix_service::CommitCipher& cipher) {
+    if (options.contains("--trainer"))
+        throw std::invalid_argument("--trainer is no longer supported; use the pinned trainer installer");
+    const fs::path trainer = verified_trainer(db_path);
     // Make sure the trainer can use this machine's GPU; machines without an
     // accelerator are left alone, and a failure only costs GPU training.
     try {
@@ -870,6 +941,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
             throw std::runtime_error("base run's base checkpoint is missing");
     }
     const bool manual_only = integer_option(options, "--only-manually-selected", 0, 0, 1) != 0;
+    const bool stabilize = integer_option(options, "--stabilize-intruders", 0, 0, 1) != 0;
     std::unordered_set<std::string> selected;
     if (options.contains("--selected-ids")) {
         const auto selection = nlohmann::json::parse(std::ifstream(require(options, "--selected-ids")));
@@ -916,6 +988,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
     const auto dataset = ime::unix_service::write_numeric_dataset(db.get(), tables, training_model_dir / "config.json",
         dataset_path, parameters.max_length, options.contains("--selected-ids") ? &selected : nullptr, &decryption,
         manual_only);
+    if (dataset.included_ids.empty()) throw std::runtime_error("no trainable pending Bopomofo records");
     std::cout << "trainable=" << dataset.included_ids.size() << " skipped=" << dataset.skipped << std::endl;
     // The manager keeps the full parameter set of every run so the history
     // page and a later branched run agree on what was trained.
@@ -923,6 +996,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         {"preset_version", 1},
         {"strength", ime::unix_service::lora_strength_name(*strength)},
         {"only_manually_selected", manual_only},
+        {"stabilize_intruders", stabilize},
         {"parent_id", base.id},
         {"base_model_revision", revision},
         {"trainer_commit", LLAVON_IME_LORA_PINNED_COMMIT},
@@ -940,8 +1014,14 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         {"max_sequence_length", parameters.max_length}, {"dtype", parameters.dtype},
         {"target_modules", parameters.modules},
     };
+    { std::ofstream record(output / "training_request.json", std::ios::trunc);
+      record << request.dump(2) << '\n';
+      if (!record) throw std::runtime_error("cannot store the training request"); }
+    // With forgetting mitigation enabled the raw training output is kept apart
+    // so the stabilization step can rewrite it into the final adapter, exactly
+    // like the Windows manager.
+    const auto raw_adapter = stabilize ? output / "adapter-before-stabilization" : output / "adapter";
     const auto adapter = output / "adapter";
-    const auto f16 = output / "personalized-f16.gguf";
     const auto gguf = output / "personalized-Q4_K_M.gguf";
     // The numeric dataset is readable text, so it only lives while this run
     // needs it; a killed process leaves at most the partial file, which the
@@ -951,7 +1031,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
                        std::to_string(dataset.vocab_size), "--max-seq-length", std::to_string(parameters.max_length)});
         std::vector<std::string> args{
             "train", "--model-config", (training_model_dir / "config.json").string(), "--model", training_model_dir.string(),
-            "--train-data", dataset_path.string(), "--output-dir", adapter.string(),
+            "--train-data", dataset_path.string(), "--output-dir", raw_adapter.string(),
             "--target-modules", parameters.modules, "--pad-token-id", std::to_string(dataset.pad_token_id),
             "--max-seq-length", std::to_string(parameters.max_length), "--rank", std::to_string(parameters.rank),
             "--alpha", as_argument(parameters.alpha), "--dropout", as_argument(parameters.dropout),
@@ -972,20 +1052,35 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
             args.insert(args.end(), {"--resume-adapter", path.string()});
         }
         run(trainer, args);
-        run(trainer, {"export-gguf", "--model-config", (training_model_dir / "config.json").string(),
-                      "--model", training_model_dir.string(), "--vocab-file", (training_model_dir / "ime_vocab.json").string(),
-                      "--adapter", adapter.string(), "--outfile", f16.string(), "--outtype", "f16",
-                       "--quantize", "Q4_K_M", "--quantized-outfile", gguf.string(), "--force"});
-        if (!fs::is_regular_file(gguf) || fs::file_size(gguf) == 0)
-            throw std::runtime_error("trainer did not produce a GGUF model");
-        fs::remove(f16);
+        if (stabilize) {
+            // Suppress the top intruder dimension of each matrix; the trainer
+            // keeps the alpha/rank scaling while the adapter rank may grow.
+            run(trainer, {"stabilize-adapter", "--model", training_model_dir.string(),
+                          "--adapter", raw_adapter.string(), "--output-dir", adapter.string(),
+                          "--scale", "0.9", "--force"});
+        }
+        export_model(trainer, training_model_dir, adapter, gguf);
         discard_plaintext_dataset(dataset_path);
     } catch (...) {
         discard_plaintext_dataset(dataset_path);
         throw;
     }
-    publish_run(db, dataset, adapter, gguf, revision, parameters.rank, parameters.alpha, parameters.dropout,
+    // The run record carries the adapter that was actually written: the
+    // stabilization step can change rank and alpha, and the next run has to
+    // continue from those values.
+    int published_rank = parameters.rank;
+    double published_alpha = parameters.alpha;
+    try {
+        const auto final_config = nlohmann::json::parse(std::ifstream(adapter / "adapter_config.json"));
+        published_rank = final_config.value("r", parameters.rank);
+        published_alpha = final_config.value("lora_alpha", parameters.alpha);
+    } catch (...) {}
+    publish_run(db, dataset, adapter, gguf, revision, published_rank, published_alpha, parameters.dropout,
                 parameters.modules, base.id, base.cumulative, request.dump());
+    if (stabilize) {
+        std::error_code ignored;
+        fs::remove_all(raw_adapter, ignored);
+    }
     std::cout << "model=" << gguf << '\n';
 }
 
@@ -994,7 +1089,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
 int main(int argc, char** argv) {
     try {
         ::umask(0077);  // Datasets and adapter outputs contain user typing.
-        if (argc < 2) throw std::invalid_argument("usage: llavon-ime-lora check-model|fetch-model|check-trainer|install-trainer|protection-status|configure-password|set-recording|reset-conversation-data|list|exclude|delete|dataset|train [--option value ...]");
+        if (argc < 2) throw std::invalid_argument("usage: llavon-ime-lora check-model|fetch-model|check-trainer|install-trainer|protection-status|configure-password|set-recording|reset-conversation-data|list|exclude|delete|dataset|count-dataset|train|export-model [--option value ...]");
         const auto options = parse(argc, argv);
         if (std::string_view(argv[1]) == "install-trainer") {
             install_trainer(fs::absolute(require(options, "--output-dir")));
@@ -1044,6 +1139,18 @@ int main(int argc, char** argv) {
         Database db(database);
         if (action == "list") list(db.get(), options);
         else if (action == "exclude" || action == "delete") change_state(db, action, require(options, "--id"));
+        else if (action == "export-model") {
+            const auto run_id = integer64_option(options, "--run-id", 0, 1,
+                                                 std::numeric_limits<std::int64_t>::max());
+            export_run_model(db, run_id, fs::absolute(require(options, "--model-dir")), database);
+        }
+        else if (action == "count-dataset") {
+            const fs::path model_dir = fs::absolute(require(options, "--model-dir"));
+            const fs::path tables = fs::absolute(require(options, "--tables-dir"));
+            ime::unix_service::CommitCipher cipher;
+            unlock(cipher, db.get(), options);
+            count_dataset(db.get(), options, model_dir, tables, cipher);
+        }
         else if (action == "dataset" || action == "train") {
             const fs::path model_dir = fs::absolute(require(options, "--model-dir"));
             const fs::path tables = fs::absolute(require(options, "--tables-dir"));
@@ -1056,6 +1163,7 @@ int main(int argc, char** argv) {
                 const auto dataset = ime::unix_service::write_numeric_dataset(
                     db.get(), tables, model_dir / "config.json", require(options, "--output"), 384, nullptr,
                     &decryption, integer_option(options, "--only-manually-selected", 0, 0, 1) != 0);
+                if (dataset.included_ids.empty()) throw std::runtime_error("no trainable pending Bopomofo records");
                 std::cout << "trainable=" << dataset.included_ids.size() << " skipped=" << dataset.skipped << '\n';
             }
         } else throw std::invalid_argument("unknown action");

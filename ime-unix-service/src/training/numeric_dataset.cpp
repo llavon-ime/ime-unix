@@ -246,10 +246,15 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
             if (manual_only && !row.manually_selected) return;
             if (selected_ids && !selected_ids->contains(row.id)) return;
             if (auto numeric = build_row(row, tables, max_sequence_length)) {
-                for (int copy = 0; copy < (row.manually_selected ? 3 : 1); ++copy)
+                const int copies = row.manually_selected ? 3 : 1;
+                for (int copy = 0; copy < copies; ++copy)
                     file << numeric->dump() << '\n';
+                result.samples += static_cast<std::size_t>(copies);
                 result.included_ids.push_back(row.id);
-            } else ++result.skipped;
+            } else {
+                ++result.skipped;
+                result.skipped_ids.push_back(row.id);
+            }
         };
         int status;
         while ((status = sqlite3_step(query)) == SQLITE_ROW) {
@@ -277,7 +282,9 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         if (status != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
         flush();
         file.flush();
-        if (!file || result.included_ids.empty()) throw std::runtime_error("no trainable pending Bopomofo records");
+        // An empty dataset is not an error here: the caller decides whether it
+        // wants to report the skipped records or refuse the run.
+        if (!file) throw std::runtime_error("cannot write numeric dataset");
         file.close();
         sqlite3_finalize(query); query = nullptr;
         std::filesystem::rename(partial, output);
