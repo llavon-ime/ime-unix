@@ -207,7 +207,17 @@ Linux preset 使用本儲存庫的 vcpkg 工具鏈，並啟用 Vulkan backend（
 
 ### macOS
 
-開發者可直接建置原生 InputMethodKit app，不需要 fcitx5-macos：
+最簡單的方式與 Linux 相同：
+
+```bash
+git clone --recurse-submodules https://github.com/llavon-ime/ime-unix.git
+cd ime-unix
+./scripts/build-macos.sh
+```
+
+腳本會初始化子模組與 vcpkg、建置並測試服務與原生 app、下載固定版本的
+LoRA Trainer，最後進行安裝；需要系統權限時會使用 `sudo`。
+開發者也可直接用底層的 app 建置腳本，不需要 fcitx5-macos：
 
 ```bash
 macos/scripts/build-native-app.sh --install
@@ -225,6 +235,13 @@ macos/scripts/build-native-app.sh --install
 brew install cmake pkg-config
 ```
 
+第一次建置時 vcpkg 會從原始碼編譯 libsodium，需要 autotools；缺少時 vcpkg 會
+提示 `BUILD_FAILED`，可用 Homebrew 補上：
+
+```bash
+brew install autoconf autoconf-archive automake libtool
+```
+
 腳本會使用 vcpkg 編譯推論引擎、以 `swiftc` 編譯前端、進行 ad-hoc 簽章，並安裝到：
 
 ```text
@@ -237,19 +254,17 @@ brew install cmake pkg-config
 /Library/Application Support/llavon-ime/payload
 ```
 
-模型預設位於：
-
-```text
-/Library/Application Support/llavon-ime/models
-```
+模型預設位於 `/Library/Application Support/llavon-ime/models`，固定版本的 LoRA
+Trainer 位於 `/Library/Application Support/llavon-ime/tools/lora`。
 
 沒有 `sudo` 權限時，可改用：
 
 ```bash
-macos/scripts/build-native-app.sh --install --user
+./scripts/build-macos.sh --user
 ```
 
-只想更新輸入法 app、不重新建置 service 時，可加上 `--no-service`。
+只想更新輸入法 app、不重新建置 service 與 LoRA Trainer 時，可加上
+`--no-service`（兩個建置腳本都支援這些選項）。
 
 開發版第一次安裝後，可能需要登出再登入，讓 macOS 重新掃描輸入來源。修改程式後可重新執行相同建置指令；需要時可先執行：
 

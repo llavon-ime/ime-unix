@@ -18,17 +18,32 @@ fcitx5-macos 前端；Linux 仍繼續使用 fcitx5 附加元件。
 ## 建置與安裝
 
 ```sh
-macos/scripts/build-native-app.sh            # 建置 dist/macos/LlavonIME.app
-macos/scripts/build-native-app.sh --install  # 安裝 app 與服務
+scripts/build-macos.sh                       # 與 Linux 對稱的入口：建置、測試並安裝全部
+scripts/build-macos.sh --user                # 裝到 ~/Library（不需要 sudo）
+scripts/build-macos.sh --no-service          # 只建置與安裝 app
+
+macos/scripts/build-native-app.sh            # 只建置 dist/macos/LlavonIME.app
+macos/scripts/build-native-app.sh --install  # 安裝 app 與服務（與上方共用同一套流程）
 ```
 
-建置需要 `pkg-config`（vcpkg 用）與 CMake；腳本會自己 bootstrap vcpkg。
+`scripts/build-macos.sh` 是 `scripts/build-linux.sh` 的 macOS 對應入口，內部呼叫
+`macos/scripts/build-native-app.sh --install`。
+
+建置需要 `pkg-config`（vcpkg 用）與 CMake；腳本會自己 bootstrap vcpkg。第一次
+建置時 vcpkg 會從原始碼編譯 libsodium，需要 autotools：`brew install autoconf
+autoconf-archive automake libtool`。
 
 `--install` 也會透過 `scripts/build-macos-service.sh` 建置、測試並安裝 AI 預測
 服務：系統安裝裝到 `/Library/Application Support/llavon-ime/payload`（套件使用、
 app 優先讀取的路徑），`--user` 時裝到 `~/Library/fcitx5`。位於
 `/Library/Application Support/llavon-ime/models` 的模型已存在就沿用，否則下載。
-`--no-service` 會跳過服務，只安裝 app。
+
+服務安裝也會下載固定版本的 LoRA Trainer 到套件相同的位置：系統安裝是
+`/Library/Application Support/llavon-ime/tools/lora`，`--user` 是
+`~/Library/fcitx5/lib/llavon-ime/tools/lora`（`LLAVON_IME_SKIP_LORA_TRAINER`
+可跳過）。安裝完成後會停掉仍在執行舊版、無法自我接手的 LoRA 管理器
+（`LLAVON_IME_SKIP_LORA_GUI_RESTART` 可跳過；訓練中的管理器不受影響）。
+`--no-service` 會跳過服務與 LoRA Trainer，只安裝 app。
 
 安裝步驟會把 app 複製到 `/Library/Input Methods/`，也就是套件使用的位置，因此
 套件安裝與開發安裝不會互相 shadow。它會先移除 `~/Library/Input Methods/` 的
@@ -77,7 +92,8 @@ JSON/INI 的（反）序列化、C ABI 的 schema 匯出與兩邊的設定介面
 相同的臨時本機瀏覽器介面；原生設定視窗仍負責靜態設定欄位。套件會把固定版本的
 LoRA Trainer 發行版放在 `/Library/Application Support/llavon-ime/tools/lora` 下；
 如果該目錄不存在（例如手動清理過），postinstall 腳本會下載它，下載失敗不會中斷
-安裝，因為設定頁面之後仍可安裝。
+安裝，因為設定頁面之後仍可安裝。開發安裝（`scripts/build-macos.sh` 或
+`macos/scripts/build-native-app.sh --install`）同樣會下載這份 trainer。
 
 模型路徑的規則與 fcitx5 附加元件相同：以設定檔儲存的值為準，否則使用
 `/Library/Application Support/llavon-ime/models` 下已安裝的模型。

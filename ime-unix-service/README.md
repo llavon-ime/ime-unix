@@ -125,9 +125,11 @@ TorchSharp 會載入隨執行檔附帶的原生函式庫；只含執行檔的壓
 與 Windows 相同，`lora-trainer` 是固定版本的原始碼子模組：其 Git commit 決定
 要用的對應發行執行檔，但 app 不會從子模組建置 Torch。安裝器會等 `latest.json`
 回報該 commit，然後在發佈執行檔前檢查不可變的版本化發行 manifest 與平台壓縮檔的
-SHA-256。永遠不會用其他發行 commit 替代。`scripts/build-linux.sh` 會在安裝時
-執行同樣的驗證下載，並把 trainer 放到
-`<private library dir>/llavon-ime/tools/lora`；設定
+SHA-256。永遠不會用其他發行 commit 替代。`scripts/build-linux.sh` 與 macOS 的
+`scripts/build-macos.sh` 會在安裝時執行同樣的驗證下載：Linux 放到
+`<private library dir>/llavon-ime/tools/lora`，macOS 系統安裝放到
+`/Library/Application Support/llavon-ime/tools/lora`、`--user` 安裝放到
+`<install prefix>/lib/llavon-ime/tools/lora`；設定
 `LLAVON_IME_SKIP_LORA_TRAINER` 可跳過。deb、RPM 與 macOS 套件會在打包時內附該
 固定發行版（CI 在 release workflow 下載），因此安裝後就已帶有 trainer；GUI
 動作之後會為目前使用者就地更新。開發與測試時，`LLAVON_IME_LORA_CLI_PATH` 可
