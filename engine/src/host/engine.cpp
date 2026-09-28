@@ -327,8 +327,10 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         // The prediction path already strips client preedit when sampling it.
         const auto training_context = session.context_text;
         const auto accessibility_sequence = accessibility_context_ ? accessibility_context_->sequence() : 0;
-        const bool allow_training = effect.training_sample && config_.collect_training_data &&
-                                    !host_.is_sensitive(context);
+        // The engine hands every qualifying commit to the transport; the
+        // service only stores them once the personalization manager has set a
+        // password and enabled encrypted collection.
+        const bool allow_training = effect.training_sample && !host_.is_sensitive(context);
         host_.commit(context, effect.commit);
         // The committed text lands in the client's document; clients that do
         // not draw the composition itself (Konsole, VTE) can still be located

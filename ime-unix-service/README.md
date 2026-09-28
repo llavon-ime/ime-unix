@@ -44,8 +44,8 @@ dist/bin/llavon-ime-unix-service \
 
 ## 選用的本機 LoRA 訓練
 
-輸入法的「**收集個人化訓練資料**」選項預設關閉。啟用後，完成且非敏感的注音提交
-會送到每位使用者自己的服務，並儲存在 Linux 的
+收集預設關閉：在個人化訓練管理介面設定密碼並啟用加密收集後，完成且非敏感的
+注音提交會送到每位使用者自己的服務，並儲存在 Linux 的
 `${XDG_STATE_HOME:-$HOME/.local/state}/llavon-ime/training/commits.sqlite3` 或
 macOS 的 `~/Library/Application Support/llavon-ime/training/commits.sqlite3`。
 `LLAVON_IME_TRAINING_DATABASE_PATH` 可覆寫該檔案。文字只存在本機，永遠不會送到

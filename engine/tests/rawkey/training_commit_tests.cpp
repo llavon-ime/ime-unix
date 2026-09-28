@@ -19,7 +19,6 @@ RAWKEY_SUITE("training commit samples", training_commit_samples) {
     };
     std::vector<Observed> samples;
     HarnessOptions options;
-    options.config.collect_training_data = true;
     options.on_training_commit = [&](const auto& sample, std::u16string_view context) {
         samples.push_back({sample, std::u16string(context)});
     };
@@ -51,11 +50,6 @@ RAWKEY_SUITE("training commit samples", training_commit_samples) {
     harness.host().set_sensitive(false);
     harness.type("abc");
     harness.key("Return");
-    RAWKEY_ASSERT(samples.size() == 2);
-
-    harness.set_config("CollectTrainingData", "False");
-    harness.type("su3");
-    harness.expect_commit("你");
     RAWKEY_ASSERT(samples.size() == 2);
 }
 
@@ -104,7 +98,6 @@ RAWKEY_SUITE("training commit transport", training_commit_transport) {
     {
         HarnessOptions options;
         options.socket_path = socket.string();
-        options.config.collect_training_data = true;
         Harness harness(options);
         harness.set_surrounding("早安", 2, 2);
         harness.type("su3");
@@ -127,7 +120,6 @@ RAWKEY_SUITE("training commit correction", training_commit_correction) {
     std::size_t commits = 0;
     std::vector<llavon::ime::protocol::SessionId> discards;
     HarnessOptions options;
-    options.config.collect_training_data = true;
     options.on_training_commit = [&](const auto&, std::u16string_view) { ++commits; };
     options.on_training_discard = [&](const auto& id) { discards.push_back(id); };
     Harness harness(options);
@@ -187,7 +179,6 @@ RAWKEY_SUITE("training mixed commit samples", training_mixed_commit_samples) {
     };
     std::vector<Observed> samples;
     HarnessOptions options;
-    options.config.collect_training_data = true;
     options.on_training_commit = [&](const auto& sample, std::u16string_view context) {
         samples.push_back({sample, std::u16string(context)});
     };
@@ -236,7 +227,6 @@ RAWKEY_SUITE("training mixed commit samples", training_mixed_commit_samples) {
 RAWKEY_SUITE("training commit correction window", training_commit_correction_window) {
     std::size_t commits = 0, discards = 0;
     HarnessOptions options;
-    options.config.collect_training_data = true;
     options.commit_correction_window = std::chrono::milliseconds(1000);
     options.on_training_commit = [&](const auto&, std::u16string_view) { ++commits; };
     options.on_training_discard = [&](const auto&) { ++discards; };
@@ -311,7 +301,6 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
     {
         HarnessOptions options;
         options.socket_path = socket.string();
-        options.config.collect_training_data = true;
         Harness harness(options);
         harness.set_surrounding("早安", 2, 2);
         harness.type("su3");

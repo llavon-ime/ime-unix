@@ -114,8 +114,6 @@ const std::vector<ConfigField>& config_fields() {
         boolean_field("esc_clears_entire_buffer", "EscKeyClearsEntireComposingBuffer", "Esc 鍵清除整個組字區",
                       "輸入行為", &Config::esc_clears_entire_buffer),
         boolean_field("smart_english", "SmartEnglish", "智慧型中英文", "輸入行為", &Config::smart_english),
-        boolean_field("collect_training_data", "CollectTrainingData", "收集個人化訓練資料", "輸入行為",
-                      &Config::collect_training_data),
         boolean_field("memory_context", "MemoryContext", "記憶體上下文取樣", "模型與執行",
                       &Config::memory_context),
     };

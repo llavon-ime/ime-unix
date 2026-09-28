@@ -350,8 +350,6 @@ void Harness::set_config(std::string_view path, std::string_view value) {
     const bool on = value == "True" || value == "true" || value == "1";
     if (path == "SmartEnglish") {
         updated.smart_english = on;
-    } else if (path == "CollectTrainingData") {
-        updated.collect_training_data = on;
     } else if (path == "BopomofoKeyboardLayout") {
         updated.keyboard_layout = (value == "許氏" || value == "hsu") ? "hsu" : "standard";
     } else if (path == "ShiftLetterKeys") {
