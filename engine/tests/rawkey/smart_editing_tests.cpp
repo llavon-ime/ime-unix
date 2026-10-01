@@ -366,6 +366,36 @@ RAWKEY_SUITE("smart editing English negative controls", smart_edit_english) {
     }
 }
 
+RAWKEY_SUITE("smart English lexical prefixes stay literal on every key", smart_english_prefixes) {
+    for (const auto& [layout, chinese_keys] : layouts) {
+        for (const auto word : {"clang", "make", "rfc", "sort", "configure", "migration",
+                                "benchmark", "performance", "semicolon", "syntax",
+                                "hello", "world", "testing", "cache", "version"}) {
+            for (const bool confirmed_prefix : {false, true}) {
+                Harness harness(smart(layout));
+                const std::string prefix = confirmed_prefix ? "你好" : "";
+                if (confirmed_prefix) {
+                    harness.type(chinese_keys);
+                    harness.key("Down");
+                    harness.choose_text("你好");
+                }
+                std::string typed;
+                for (const char key : std::string_view(word)) {
+                    typed += key;
+                    harness.type(std::string(1, key));
+                    if (harness.preedit() != prefix + typed) {
+                        throw Failure{std::string(layout) + ": English prefix " + typed + " of " + word +
+                                      " became " + harness.preedit()};
+                    }
+                    RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(typed));
+                    RAWKEY_ASSERT(harness.commits().empty());
+                }
+                harness.expect_commit(prefix + word);
+            }
+        }
+    }
+}
+
 RAWKEY_SUITE("smart isolated tone keys stay literal without a syllable", smart_isolated_tone_literals) {
     for (const auto& [layout, prefix] : layouts) {
         const auto keyboard = bopomofo_keyboard_layout(layout);
@@ -716,16 +746,15 @@ RAWKEY_SUITE("smart first tone punctuation keys do not depend on a preceding Chi
         RAWKEY_ASSERT(harness.preedit() != raw);
         harness.expect_commit(harness.preedit());
     }
-    // The evidence is a ranking signal, not a rule forcing every punctuation
-    // spelling into Chinese. A stronger literal interpretation stays usable,
-    // and its valid first-tone alternative can still be explicitly selected.
+    // An isolated completed phonetic spelling now prefers Chinese, with the
+    // exact literal still available without configuring a replacement rule.
     {
         Harness harness(smart("standard"));
         harness.type("d; ");
-        RAWKEY_ASSERT(harness.preedit() == "d; ");
+        RAWKEY_ASSERT(harness.preedit() == "康");
         harness.key("Down");
-        harness.choose_text("康");
-        harness.expect_commit("康");
+        harness.choose_text("d; ");
+        harness.expect_commit("d; ");
     }
     for (const auto& [layout, raw, following] : std::array{
         std::tuple{"standard", "e; ", "h96"}, std::tuple{"ginyieh", "r; ", "j9q"},
@@ -760,9 +789,8 @@ RAWKEY_SUITE("smart first tone punctuation keys do not depend on a preceding Chi
 }
 
 RAWKEY_SUITE("smart leading reading audit preserves Chinese and exact raw recovery", smart_leading_audit_recovery) {
-    // These common readings can lose to a literal at the beginning. Do not
-    // pin that deficient default ranking: require their explicit Chinese and
-    // exact raw alternatives, so a future automatic improvement remains free.
+    // Independent physical keys across layouts: ordinary leading readings
+    // should not need manual recovery, and literal intent remains reversible.
     constexpr std::array keys{
         std::array{"standard", "d; ", "w; ", "d/ ", "t. ", "y; "},
         std::array{"hsu", "kk ", "tk ", "kl ", "vo ", "zk "},
@@ -774,8 +802,33 @@ RAWKEY_SUITE("smart leading reading audit preserves Chinese and exact raw recove
     };
     constexpr std::array words{"康", "湯", "坑", "抽", "髒"};
     for (const auto& row : keys) {
+        const auto greeting = std::ranges::find_if(layouts, [&](const auto& entry) {
+            return std::string_view(entry.first) == row[0];
+        });
+        RAWKEY_ASSERT(greeting != layouts.end());
         for (size_t index = 0; index < words.size(); ++index) {
             Harness chinese(smart(row[0]));
+            const auto body = std::string(row[index + 1]).substr(0, std::string_view(row[index + 1]).size() - 1);
+            std::string typed;
+            for (const char key : body) {
+                typed += key;
+                chinese.type(std::string(1, key));
+                RAWKEY_ASSERT(chinese.preedit() == typed);
+                RAWKEY_ASSERT(chinese.commits().empty());
+            }
+            chinese.key("space");
+            if (chinese.preedit() != words[index]) {
+                throw Failure{std::string(row[0]) + ": leading " + words[index] + " became " + chinese.preedit()};
+            }
+            RAWKEY_ASSERT(chinese.session()->pending_token.raw == utf8_to_u16(row[index + 1]));
+            chinese.key("Shift+BackSpace");
+            RAWKEY_ASSERT(chinese.session()->pending_token.raw == utf8_to_u16(body));
+            chinese.key("space");
+            RAWKEY_ASSERT(chinese.preedit() == words[index]);
+            chinese.key("BackSpace");
+            RAWKEY_ASSERT(chinese.composition_empty());
+            chinese.type(row[index + 1]);
+            chinese.expect_commit(words[index]);
             chinese.type(row[index + 1]);
             chinese.key("Down");
             chinese.choose_text(words[index]);
@@ -784,6 +837,12 @@ RAWKEY_SUITE("smart leading reading audit preserves Chinese and exact raw recove
             literal.type(row[index + 1]);
             literal.key("Down");
             literal.choose_text(row[index + 1]);
+            literal.type(greeting->second);
+            RAWKEY_ASSERT(literal.preedit() == std::string(row[index + 1]) + "你好");
+            literal.key("BackSpace");
+            RAWKEY_ASSERT(literal.preedit() == std::string(row[index + 1]) + "你");
+            literal.key("BackSpace");
+            RAWKEY_ASSERT(literal.preedit() == row[index + 1]);
             literal.expect_commit(row[index + 1]);
         }
     }
