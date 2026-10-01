@@ -1,0 +1,8 @@
+{
+  "articles": [],
+  "edit_workflows": [
+    {"id":"singleton-smart-automatic","expected":"巫師三","steps":[{"zh":"巫師三","readings":"ㄨ|ㄕ|ㄙㄢ"},{"key":"Return"}]},
+    {"id":"singleton-traditional-automatic","expected":"巫師三","steps":[{"config":{"SmartEnglish":"False"}},{"zh":"巫師三","readings":"ㄨ|ㄕ|ㄙㄢ"},{"key":"Return"}]},
+    {"id":"singleton-smart-manual-recovery","expected":"巫師三","steps":[{"zh":"巫","readings":"ㄨ"},{"key":"Down"},{"choose":"巫"},{"zh":"師","readings":"ㄕ"},{"key":"Down"},{"choose":"師"},{"zh":"三","readings":"ㄙㄢ"},{"key":"Return"}]}
+  ]
+}

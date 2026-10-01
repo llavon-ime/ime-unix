@@ -118,20 +118,6 @@ class EngineCore {
         return String(cString: buffer)
     }
 
-    func config() -> EngineConfig? {
-        guard let json = configJson(), let data = json.data(using: .utf8) else { return nil }
-        guard let schema = EngineCore.configSchema() else { return nil }
-        return EngineConfig.decode(schema: schema, json: data)
-    }
-
-    // The engine owns the config schema; the settings window renders it.
-    static func configSchema() -> ConfigSchema? {
-        let length = lv_config_schema_json(nil, 0)
-        guard length > 0 else { return nil }
-        var buffer = [CChar](repeating: 0, count: length + 1)
-        guard lv_config_schema_json(&buffer, buffer.count) > 0 else { return nil }
-        return ConfigSchema.decode(String(cString: buffer))
-    }
 
     @discardableResult
     func setConfigJson(_ json: String) -> Bool {
@@ -151,14 +137,6 @@ class EngineCore {
         return bytes.withUnsafeBufferPointer { buffer in
             lv_engine_reload_config_json(engine, buffer.baseAddress, buffer.count)
         } == 0
-    }
-
-    @discardableResult
-    func setConfig(_ config: EngineConfig) -> Bool {
-        guard let data = config.jsonData(), let json = String(data: data, encoding: .utf8) else {
-            return false
-        }
-        return setConfigJson(json)
     }
 
     func reloadPhraseOverrides() {
@@ -227,6 +205,15 @@ class EngineCore {
     }
 
     // MARK: - Rendering
+
+    // Inspect every attached client, not just the currently active one. This
+    // is read-only: an updater must not commit text to make termination safe.
+    var hasPendingComposition: Bool {
+        hosts.contains { context, host in
+            guard host.value != nil, let state = snapshot(context) else { return false }
+            return !state.compositionEmpty || !state.preedit.isEmpty
+        }
+    }
 
     func snapshot(_ context: UInt64) -> RenderSnapshot? {
         guard let engine, let info = lv_engine_render(engine, context) else { return nil }

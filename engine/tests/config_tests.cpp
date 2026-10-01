@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
@@ -35,7 +37,7 @@ private:
 // The schema is the single source of truth for every config option: each field
 // must carry a unique key, a default, and survive the generic JSON codec and
 // the INI parser without per-field code.
-bool test_config_schema() {
+static bool test_config_schema() {
     using namespace llavon::ime;
     bool ok = true;
     const auto& fields = config_fields();
@@ -60,18 +62,18 @@ bool test_config_schema() {
         ConfigValue changed = original;
         switch (field.kind) {
             case ConfigValueKind::Boolean:
-                changed.boolean = !original.boolean;
+                changed = !std::get<bool>(original);
                 break;
             case ConfigValueKind::Integer:
-                changed.integer = original.integer == field.maximum ? field.minimum : field.maximum;
+                changed = std::get<int>(original) == field.maximum ? field.minimum : field.maximum;
                 break;
             case ConfigValueKind::Text:
-                changed.text = original.text + "-schema";
+                changed = std::get<std::string>(original) + "-schema";
                 break;
             case ConfigValueKind::Choice:
                 for (const auto& choice : field.choices) {
-                    if (choice.value != original.text) {
-                        changed.text = choice.value;
+                    if (choice.value != std::get<std::string>(original)) {
+                        changed = choice.value;
                         break;
                     }
                 }
@@ -82,20 +84,26 @@ bool test_config_schema() {
         const auto roundtrip = config_field_value(decoded, field);
         switch (field.kind) {
             case ConfigValueKind::Boolean:
-                ok = ok && roundtrip.boolean == changed.boolean;
+                ok = ok && roundtrip == changed;
                 break;
             case ConfigValueKind::Integer:
-                ok = ok && roundtrip.integer == changed.integer;
+                ok = ok && roundtrip == changed;
                 break;
             case ConfigValueKind::Text:
             case ConfigValueKind::Choice:
-                ok = ok && roundtrip.text == changed.text;
+                ok = ok && roundtrip == changed;
                 break;
         }
     }
 
     // The exported schema describes every field for host UIs.
     const auto schema = config_schema_json();
+    ok = ok && std::ranges::none_of(fields, [](const auto& field) {
+        return field.key == "smart_model_preview" || field.ini_key == "SmartModelPreview";
+    });
+    const auto legacy = config_from_json({{"smart_english", true}, {"smart_model_preview", false}});
+    ok = ok && legacy.smart_english && legacy.smart_model_preview;
+    ok = ok && !to_json(legacy).contains("smart_model_preview");
     ok = ok && schema.contains("fields") && schema["fields"].size() == fields.size();
     for (size_t i = 0; i < fields.size() && i < schema["fields"].size(); ++i) {
         const auto& entry = schema["fields"].at(i);
@@ -130,8 +138,21 @@ bool test_config_schema() {
                 ok = ok && !config_value_from_ini(field, "yes").has_value();
                 break;
             case ConfigValueKind::Integer:
-                ok = ok && config_value_from_ini(field, std::to_string(value.integer)).has_value();
+                ok = ok && config_value_from_ini(field, std::to_string(std::get<int>(value))).has_value();
                 ok = ok && !config_value_from_ini(field, std::to_string(field.maximum + 1)).has_value();
+                for (const auto& spelling : {"+" + std::to_string(field.maximum),
+                                             " \t+" + std::to_string(field.maximum)}) {
+                    const auto parsed = config_value_from_ini(field, spelling);
+                    ok = ok && parsed && std::get<int>(*parsed) == field.maximum;
+                }
+                ok = ok && !config_value_from_ini(field, "2tail").has_value();
+                ok = ok && !config_value_from_ini(field, "999999999999999999999").has_value();
+                {
+                    auto config = default_config();
+                    const auto before = to_json(config);
+                    ok = ok && !set_config_field_value(config, field, ConfigValue{std::string("2")});
+                    ok = ok && to_json(config) == before;
+                }
                 break;
             case ConfigValueKind::Text:
                 ok = ok && config_value_from_ini(field, "text").has_value();
@@ -140,11 +161,11 @@ bool test_config_schema() {
                 for (const auto& choice : field.choices) {
                     const auto label = config_value_from_ini(field, choice.label);
                     const auto canonical = config_value_from_ini(field, choice.value);
-                    ok = ok && label && label->text == choice.value;
-                    ok = ok && canonical && canonical->text == choice.value;
+                    ok = ok && label && std::get<std::string>(*label) == choice.value;
+                    ok = ok && canonical && std::get<std::string>(*canonical) == choice.value;
                     for (const auto& alias : choice.aliases) {
                         const auto parsed = config_value_from_ini(field, alias);
-                        ok = ok && parsed && parsed->text == choice.value;
+                        ok = ok && parsed && std::get<std::string>(*parsed) == choice.value;
                     }
                 }
                 ok = ok && !config_value_from_ini(field, "diagonal").has_value();
@@ -241,9 +262,11 @@ int run_config_tests() {
                << "MoveCursorAfterSelection=True\n"
                << "EscKeyClearsEntireComposingBuffer=True\n"
                << "CapsLockInputsBopomofo=False\n"
+               << "SmartModelPreview=False\n"
                << "ShiftLetterKeys=直接放入組字區\n";
     }
     const auto loaded = llavon::ime::load_config();
+    ok = ok && loaded.smart_model_preview;
     ok = ok && loaded.model_path == "/tmp/model.gguf";
     ok = ok && loaded.context_length == 1024;
     ok = ok && loaded.thread_count == 2;
@@ -312,8 +335,8 @@ int run_config_tests() {
             std::ofstream output(llavon::ime::config_path());
             output << "BopomofoKeyboardLayout=" << value << "\n";
         }
-        const auto loaded = llavon::ime::load_config();
-        ok = ok && loaded.keyboard_layout == "hsu";
+        const auto hsu_loaded = llavon::ime::load_config();
+        ok = ok && hsu_loaded.keyboard_layout == "hsu";
     }
     {
         std::ofstream output(llavon::ime::config_path());

@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(llavon_ime_memscan VERSION 0.1.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../engine/cmake/Warnings.cmake")
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "llavon-ime-memscan is Linux only (process_vm_readv)")
@@ -24,7 +25,7 @@ set_target_properties(memscan_core PROPERTIES
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
 )
-target_compile_options(memscan_core PRIVATE -Wall -Wextra -Wpedantic)
+llavon_ime_enable_warnings(memscan_core)
 if(LLAVON_IME_DEBUG)
     target_compile_definitions(memscan_core PRIVATE LLAVON_IME_DEBUG=1)
 endif()
@@ -37,7 +38,7 @@ set_target_properties(llavon-ime-memscan PROPERTIES
     CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO
 )
-target_compile_options(llavon-ime-memscan PRIVATE -Wall -Wextra -Wpedantic)
+llavon_ime_enable_warnings(llavon-ime-memscan)
 if(LLAVON_IME_DEBUG)
     target_compile_definitions(llavon-ime-memscan PRIVATE LLAVON_IME_DEBUG=1)
 endif()
@@ -54,7 +55,7 @@ if(LLAVON_IME_MEMSCAN_BUILD_TESTS)
         CXX_STANDARD_REQUIRED YES
         CXX_EXTENSIONS NO
     )
-    target_compile_options(memscan_tests PRIVATE -Wall -Wextra -Wpedantic)
+    llavon_ime_enable_warnings(memscan_tests)
     target_link_libraries(memscan_tests PRIVATE memscan_core)
     add_test(NAME memscan_tests COMMAND memscan_tests)
 endif()

@@ -8,11 +8,12 @@ final class EngineBridge: EngineCore {
 
     private let supportRoot = "/Library/Application Support/llavon-ime"
 
-    // The manager is a separate, short-lived program. It reuses a running
-    // browser session and never runs training inside InputMethodKit.
-    func openLoraManager() -> Bool {
+    // Settings and personalization share one native app. Opening a page also
+    // activates that page when the app is already running.
+    func openSettingsApp(page: String = "settings") -> Bool {
         let environment = ProcessInfo.processInfo.environment
         let candidates = [
+            environment["LLAVON_IME_SETTINGS_APP_PATH"],
             environment["LLAVON_IME_LORA_GUI_PATH"],
             "\(supportRoot)/payload/bin/llavon-ime-lora-gui",
             "\(home)/Library/fcitx5/bin/llavon-ime-lora-gui",
@@ -22,9 +23,12 @@ final class EngineBridge: EngineCore {
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["--page", page]
         do { try process.run(); return true }
         catch { NSLog("llavon-ime: cannot open LoRA manager: \(error)"); return false }
     }
+
+    func openLoraManager() -> Bool { openSettingsApp(page: "records") }
 
     // Set by the caller before launch to point the prediction service at a
     // development model. Captured here because applyServiceEnvironment() writes
@@ -89,13 +93,13 @@ final class EngineBridge: EngineCore {
     // activation, without settling the sessions, and refreshes the phrase
     // overrides so external edits take effect.
     func reloadConfigFromDisk() {
-        guard let configJson = effectiveConfigJSON() else { return }
-        let previous = self.config()
-        _ = reloadConfigJson(configJson)
         reloadPhraseOverrides()
+        guard let configJson = effectiveConfigJSON() else { return }
+        let previous = ConfigJSON.object(self.configJson())
+        _ = reloadConfigJson(configJson)
         // External edits to the service settings need the same restart the
         // settings window asks for; the engine alone cannot apply them.
-        if let previous, let current = self.config(),
+        if let previous, let current = ConfigJSON.object(self.configJson()),
            Self.serviceSettingsChanged(from: previous, to: current) {
             applyServiceEnvironment()
             restartPredictionService()
@@ -112,7 +116,7 @@ final class EngineBridge: EngineCore {
             configJson = String(data: data, encoding: .utf8)
         }
         let effectiveModelPath = configuredModelPath(in: configJson) ?? installedModelPath()
-        let filled = EngineConfig.fillingModelPath(configJson, with: effectiveModelPath)
+        let filled = ConfigJSON.fillingModelPath(configJson, with: effectiveModelPath)
         if let length = configuredContextLength(in: filled) {
             contextLength = length
         }
@@ -128,33 +132,6 @@ final class EngineBridge: EngineCore {
         return value
     }
 
-    // Applies the settings in memory and persists them for the next launch.
-    // Settings the prediction service owns are only read when its process
-    // starts, so a restart is requested when they change.
-    @discardableResult
-    func saveConfig(_ config: EngineConfig) -> Bool {
-        let previous = self.config()
-        guard setConfig(config) else { return false }
-        guard let data = config.jsonData() else { return false }
-        do {
-            try FileManager.default.createDirectory(at: configFileURL.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
-            try data.write(to: configFileURL, options: .atomic)
-        } catch {
-            NSLog("llavon-ime: failed to save settings: \(error)")
-            return false
-        }
-        if Self.serviceSettingsChanged(from: previous, to: config) {
-            applyServiceEnvironment()
-            restartPredictionService()
-        }
-        // The surrounding sample window follows the same setting.
-        if let length = config.value("context_length")?.intValue, length > 0 {
-            contextLength = length
-        }
-        return true
-    }
-
     // MARK: - Prediction service
 
     // Settings only the service process reads; the engine passes them on the
@@ -167,22 +144,21 @@ final class EngineBridge: EngineCore {
         "idle_timeout_seconds",
     ]
 
-    private static func serviceSettingsChanged(from previous: EngineConfig?, to next: EngineConfig) -> Bool {
-        guard let previous else { return true }
-        return serviceSettings.contains { previous.value($0) != next.value($0) }
+    private static func serviceSettingsChanged(from previous: [String: Any], to next: [String: Any]) -> Bool {
+        return serviceSettings.contains { (previous[$0] as? NSObject) != (next[$0] as? NSObject) }
     }
 
     // The service inherits the app's environment, so the settings it owns are
     // passed here instead of through the command line the engine captured when
     // it was created. Refreshed at launch and whenever they are saved.
     private func applyServiceEnvironment() {
-        guard let config = self.config() else { return }
+        guard let config = ConfigJSON.object(configJson()) else { return }
         let values: [(String, String?)] = [
-            ("LLAVON_IME_MODEL_PATH", modelPathOverride ?? config.value("model_path")?.stringValue),
-            ("LLAVON_IME_CONTEXT_LENGTH", config.value("context_length")?.intValue.map { String($0) }),
-            ("LLAVON_IME_THREADS", config.value("thread_count")?.intValue.map { String($0) }),
-            ("LLAVON_IME_GPU_LAYERS", config.value("gpu_layers")?.intValue.map { $0 == -2 ? "auto" : String($0) }),
-            ("LLAVON_IME_IDLE_TIMEOUT", config.value("idle_timeout_seconds")?.intValue.map { String($0) }),
+            ("LLAVON_IME_MODEL_PATH", modelPathOverride ?? config["model_path"] as? String),
+            ("LLAVON_IME_CONTEXT_LENGTH", (config["context_length"] as? Int).map { String($0) }),
+            ("LLAVON_IME_THREADS", (config["thread_count"] as? Int).map { String($0) }),
+            ("LLAVON_IME_GPU_LAYERS", (config["gpu_layers"] as? Int).map { $0 == -2 ? "auto" : String($0) }),
+            ("LLAVON_IME_IDLE_TIMEOUT", (config["idle_timeout_seconds"] as? Int).map { String($0) }),
         ]
         for (name, value) in values {
             if let value {

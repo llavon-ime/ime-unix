@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <cstdlib>
 #include <string>
 
@@ -60,9 +62,9 @@ int run_buffer_tests() {
     ok = ok && buffer.add_bopomofo(U'ㄧ');
     ok = ok && buffer.add_bopomofo(U'ˇ');
     llavon::ime::FallbackEngine fallback(LLAVON_IME_TEST_TABLE_PATH);
-    const auto predictions = fallback.predict(buffer);
-    ok = ok && predictions.size() == 1;
-    ok = ok && !predictions.front().candidates.empty();
+    const auto initial_predictions = fallback.predict(buffer);
+    ok = ok && initial_predictions.size() == 1;
+    ok = ok && !initial_predictions.front().candidates.empty();
 
     buffer.clear();
     ok = ok && type_keys(buffer, fallback, U"su3cl3");

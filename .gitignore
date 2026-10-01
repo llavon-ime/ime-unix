@@ -48,3 +48,6 @@ reports/
 
 llama-*
 fcitx5/third_party/llama.cpp/
+
+# Machine-local iterative research session state
+.opencode/ralph-loop.local.md

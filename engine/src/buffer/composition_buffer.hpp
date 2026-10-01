@@ -54,7 +54,8 @@ public:
         std::u16string_view keys,
         char32_t tone_key,
         BopomofoKeyboardLayout layout,
-        bool strict);
+        bool strict,
+        std::u16string_view expected_reading = {});
     bool add_literal(char32_t symbol);
     bool backspace();
     bool delete_forward();

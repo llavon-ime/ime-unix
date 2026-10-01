@@ -3,6 +3,7 @@
 #include "training/commit_store.hpp"
 #include "training/lora_history_lca.hpp"
 #include "training/numeric_dataset.hpp"
+#include "training/sqlite.hpp"
 
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
@@ -92,7 +93,7 @@ class MockEngine final : public ime::unix_service::ISessionEngine {
 public:
     std::vector<std::vector<char32_t>> predict(const ime::unix_service::protocol::PredictRequest& request) override {
         std::vector<std::vector<char32_t>> result;
-        for (const auto& entry : request.padding) result.push_back(entry.chosen ? std::vector<char32_t>{entry.chosen_char} : std::vector<char32_t>{U'你'});
+        for (const auto& entry : request.padding) result.push_back(entry.chosen() ? std::vector<char32_t>{entry.chosen_char()} : std::vector<char32_t>{U'你'});
         return result;
     }
     bool loaded() const noexcept override { return true; }
@@ -360,6 +361,15 @@ bool commit_test() {
         CommitCipher cipher;
         cipher.unlock(db, password);
         const auto decryption = cipher.decryption();
+        // A filesystem failure after preparing the dataset query must leave
+        // the same connection usable, without a live statement holding it.
+        bool output_refused = false;
+        try {
+            (void)write_numeric_dataset(db, IME_UNIX_SERVICE_TEST_TABLE_DIR, config,
+                                        config / "impossible.jsonl", 384, nullptr, &decryption);
+        } catch (const std::filesystem::filesystem_error&) { output_refused = true; }
+        if (!output_refused || sqlite3_next_stmt(db, nullptr) != nullptr)
+            throw std::runtime_error("dataset output failure leaked a statement");
         NumericDataset dataset;
         try { dataset = write_numeric_dataset(db, IME_UNIX_SERVICE_TEST_TABLE_DIR, config, output, 384, nullptr, &decryption); }
         catch (const std::exception& error) { throw std::runtime_error(std::string("dataset failed: ") + error.what()); }
@@ -473,11 +483,27 @@ bool lora_lca_test() {
     return good;
 }
 
+bool sqlite_exception_test() {
+    using namespace ime::unix_service;
+    const auto db = sqlite::open(":memory:", SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+    initialize_commit_database(db.get());
+    if (sqlite3_exec(db.get(), "INSERT INTO commit_protection VALUES(1,1,'invalid','invalid',1)",
+                     nullptr, nullptr, nullptr) != SQLITE_OK) return false;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        bool refused = false;
+        try { CommitCipher cipher; cipher.unlock(db.get(), "password"); }
+        catch (const std::runtime_error&) { refused = true; }
+        if (!refused || sqlite3_next_stmt(db.get(), nullptr) != nullptr) return false;
+    }
+    const auto query = sqlite::prepare(db.get(), "SELECT 42");
+    return sqlite3_step(query.get()) == SQLITE_ROW && sqlite3_column_int(query.get(), 0) == 42;
+}
+
 int main() {
     struct Case { const char* name; bool (*run)(); };
     const Case cases[] = {{"protocol", protocol_test}, {"core-adapter", core_adapter_test},
                           {"core-runtime", core_runtime_test}, {"session", session_test}, {"commit", commit_test},
-                          {"lora-lca", lora_lca_test}};
+                          {"lora-lca", lora_lca_test}, {"sqlite-exception", sqlite_exception_test}};
     bool good = true;
     for (const auto& item : cases) {
         if (item.run()) continue;

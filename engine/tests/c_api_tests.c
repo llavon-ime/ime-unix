@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 /* Exercises the C ABI exactly as a C or Swift host would. */
 #ifndef _WIN32
 

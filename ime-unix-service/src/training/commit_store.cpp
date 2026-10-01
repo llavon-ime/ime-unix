@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "commit_crypto.hpp"
+#include "sqlite.hpp"
 
 namespace ime::unix_service {
 namespace {
@@ -26,18 +27,17 @@ void execute(sqlite3* db, const char* sql) {
 
 class Statement {
 public:
-    Statement(sqlite3* db, const char* sql) : db_(db) { check(sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr), db); }
-    ~Statement() { sqlite3_finalize(stmt_); }
+    Statement(sqlite3* db, const char* sql) : db_(db), stmt_(sqlite::prepare(db, sql)) {}
     void text(int index, const std::string& value) {
-        check(sqlite3_bind_text(stmt_, index, value.data(), static_cast<int>(value.size()), SQLITE_TRANSIENT), db_);
+        check(sqlite3_bind_text(stmt_.get(), index, value.data(), static_cast<int>(value.size()), SQLITE_TRANSIENT), db_);
     }
-    void integer(int index, std::int64_t value) { check(sqlite3_bind_int64(stmt_, index, value), db_); }
-    void step() { check(sqlite3_step(stmt_), db_); }
-    void reset() { check(sqlite3_reset(stmt_), db_); check(sqlite3_clear_bindings(stmt_), db_); }
-    sqlite3_stmt* get() const { return stmt_; }
+    void integer(int index, std::int64_t value) { check(sqlite3_bind_int64(stmt_.get(), index, value), db_); }
+    void step() { check(sqlite3_step(stmt_.get()), db_); }
+    void reset() { check(sqlite3_reset(stmt_.get()), db_); check(sqlite3_clear_bindings(stmt_.get()), db_); }
+    sqlite3_stmt* get() const { return stmt_.get(); }
 private:
     sqlite3* db_;
-    sqlite3_stmt* stmt_ = nullptr;
+    sqlite::Statement stmt_;
 };
 
 std::string event_id(const protocol::SessionId& bytes) {
@@ -87,21 +87,22 @@ CommitProtectionStatus protection_status_of(sqlite3* db) {
     // A database written before encrypted recording has no table at all.
     if (sqlite3_prepare_v2(db, "SELECT enabled FROM commit_protection WHERE id=1", -1, &statement, nullptr) != SQLITE_OK)
         return {};
+    const sqlite::Statement owned(statement);
     const bool row = sqlite3_step(statement) == SQLITE_ROW;
     const auto result = row ? CommitProtectionStatus{true, sqlite3_column_int(statement, 0) != 0}
                             : CommitProtectionStatus{};
-    sqlite3_finalize(statement);
     return result;
 }
 
 commit_crypto::PublicParameters parameters_of(sqlite3* db) {
-    sqlite3_stmt* statement = nullptr;
-    if (sqlite3_prepare_v2(db, "SELECT version,salt,public_key FROM commit_protection WHERE id=1", -1, &statement, nullptr) != SQLITE_OK) {
-        sqlite3_finalize(statement);
+    sqlite::Statement owned;
+    try {
+        owned = sqlite::prepare(db, "SELECT version,salt,public_key FROM commit_protection WHERE id=1");
+    } catch (const std::runtime_error&) {
         throw std::runtime_error("commit password is not configured");
     }
+    auto* statement = owned.get();
     if (sqlite3_step(statement) != SQLITE_ROW || sqlite3_column_int(statement, 0) != 1) {
-        sqlite3_finalize(statement);
         throw std::runtime_error("commit password is not configured");
     }
     commit_crypto::PublicParameters parameters;
@@ -109,7 +110,6 @@ commit_crypto::PublicParameters parameters_of(sqlite3* db) {
                          {reinterpret_cast<unsigned char*>(parameters.salt.data()), parameters.salt.size()});
     commit_crypto::unhex(column_text(statement, 2),
                          {reinterpret_cast<unsigned char*>(parameters.key.data()), parameters.key.size()});
-    sqlite3_finalize(statement);
     return parameters;
 }
 

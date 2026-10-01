@@ -20,6 +20,8 @@ BUILD_SERVICE=1
 SYSTEM_INSTALL_DIR="${LLAVON_IME_SYSTEM_INSTALL_DIR:-/Library/Input Methods}"
 SYSTEM_PAYLOAD_DIR="${LLAVON_IME_SYSTEM_PAYLOAD_DIR:-/Library/Application Support/llavon-ime/payload}"
 TIS_TOOL="${BUILD_DIR}/llavon-ime-tis"
+UPDATES_ENABLED="${LLAVON_IME_ENABLE_UPDATES:-0}"
+source "${ROOT_DIR}/macos/scripts/sparkle-config.sh"
 
 for argument in "$@"; do
     case "${argument}" in
@@ -41,7 +43,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "This script only supports macOS." >&2
     exit 2
 fi
-for command in cmake swiftc codesign; do
+for command in cmake swiftc codesign curl python3; do
     if ! command -v "${command}" >/dev/null 2>&1; then
         echo "Required command not found: ${command}" >&2
         if [[ "${command}" == "cmake" ]]; then
@@ -55,6 +57,16 @@ if ! command -v pkg-config >/dev/null 2>&1; then
     echo "Install it with: brew install pkg-config" >&2
     exit 2
 fi
+
+if [[ "${UPDATES_ENABLED}" != "0" && "${UPDATES_ENABLED}" != "1" ]]; then
+    echo "LLAVON_IME_ENABLE_UPDATES must be 0 or 1." >&2
+    exit 2
+fi
+if [[ "${UPDATES_ENABLED}" == "1" && -z "${LLAVON_IME_VERSION:-}" ]]; then
+    echo "Enabled updates require an explicit release version." >&2
+    exit 2
+fi
+prepare_sparkle
 
 if [[ -z "${VERSION}" ]]; then
     # Prefer the highest release tag: the squashed main/preview branches do not
@@ -98,13 +110,14 @@ build_tis_tool() {
     if [[ -x "${TIS_TOOL}" && "${TIS_TOOL}" -nt "${ROOT_DIR}/packaging/macos/tools/tis.c" ]]; then
         return 0
     fi
-    xcrun clang -O2 -Wall -Wextra -framework Carbon \
+    xcrun clang -O2 -Wall -Wextra -Wconversion -Wsign-conversion -Werror -framework Carbon \
         -o "${TIS_TOOL}" "${ROOT_DIR}/packaging/macos/tools/tis.c"
 }
 
 echo "Building the engine..."
 cmake -S "${ROOT_DIR}/engine" -B "${ENGINE_BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
     -DLLAVON_IME_ENGINE_BUILD_TESTS=OFF
 cmake --build "${ENGINE_BUILD_DIR}" --target llavon_ime_engine --parallel
@@ -112,9 +125,17 @@ cmake --build "${ENGINE_BUILD_DIR}" --target llavon_ime_engine --parallel
 echo "Compiling the input method..."
 rm -rf "${APP_DIR}"
 mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+mkdir -p "${APP_DIR}/Contents/Resources/ThirdParty"
+cp "${ROOT_DIR}/engine/data/README.md" "${APP_DIR}/Contents/Resources/ThirdParty/mixed-lexicon-attribution.md"
+mkdir -p "${APP_DIR}/Contents/Frameworks"
+ditto "${SPARKLE_DIR}/Sparkle.framework" "${APP_DIR}/Contents/Frameworks/Sparkle.framework"
+cp "${SPARKLE_DIR}/LICENSE" "${APP_DIR}/Contents/Resources/ThirdParty/Sparkle-LICENSE"
 
-swiftc -O -parse-as-library \
+swiftc -O -warnings-as-errors -parse-as-library \
+    -target "$(uname -m)-apple-macos13.0" \
     -module-name LlavonIMEApp \
+    -F "${SPARKLE_DIR}" -framework Sparkle \
+    -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     -I "${ROOT_DIR}/engine/include" \
     "${ROOT_DIR}"/macos/Core/*.swift \
     "${ROOT_DIR}"/macos/App/*.swift \
@@ -130,20 +151,53 @@ sed -e "s/@APP_NAME@/${APP_NAME}/g" \
     -e "s/@VERSION@/${VERSION}/g" \
     -e "s/@DISPLAY_VERSION@/${DISPLAY_VERSION}/g" \
     "${ROOT_DIR}/macos/App/Info.plist.in" > "${APP_DIR}/Contents/Info.plist"
+UPDATES_ENABLED="${UPDATES_ENABLED}" APP_PLIST="${APP_DIR}/Contents/Info.plist" python3 <<'PY'
+import base64
+import os
+import plistlib
+import re
+from urllib.parse import urlparse
+
+path = os.environ["APP_PLIST"]
+with open(path, "rb") as file:
+    plist = plistlib.load(file)
+enabled = os.environ["UPDATES_ENABLED"] == "1"
+plist["LlavonIMEUpdatesEnabled"] = enabled
+if enabled:
+    key = os.environ.get("SPARKLE_PUBLIC_ED_KEY", "").strip()
+    if len(base64.b64decode(key, validate=True)) != 32:
+        raise ValueError("SPARKLE_PUBLIC_ED_KEY must be an Ed25519 public key")
+    version = plist["CFBundleVersion"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("updatable release version must use major.minor.patch")
+    repository = os.environ.get("LLAVON_IME_RELEASE_REPOSITORY", "llavon-ime/ime-unix")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("invalid release repository")
+    feed = os.environ.get("LLAVON_IME_UPDATE_FEED_URL", f"https://github.com/{repository}/releases/download/macos-updates/appcast.xml")
+    if urlparse(feed).scheme != "https" or not urlparse(feed).netloc:
+        raise ValueError("the update feed must use HTTPS")
+    plist.update(SUFeedURL=feed, SUPublicEDKey=key, SUEnableAutomaticChecks=True,
+                 SUAutomaticallyUpdate=True, SUScheduledCheckInterval=86400,
+                 SUSendProfileInfo=False, SUVerifyUpdateBeforeExtraction=True,
+                 SURequireSignedFeed=True)
+with open(path, "wb") as file:
+    plistlib.dump(plist, file)
+PY
 printf 'APPL????' > "${APP_DIR}/Contents/PkgInfo"
 for icon in "${ROOT_DIR}"/macos/App/MenuIcon*.png; do
     [[ -f "${icon}" ]] || continue
     cp "${icon}" "${APP_DIR}/Contents/Resources/$(basename "${icon}")"
 done
 
-if [[ -f "${ROOT_DIR}/macos/App/AppIcon.png" ]] &&
+APP_ICON_SOURCE="${ROOT_DIR}/ime-unix-service/src/training/native/AppIcon.png"
+if [[ -f "${APP_ICON_SOURCE}" ]] &&
    command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
     iconset="$(mktemp -d)/AppIcon.iconset"
     mkdir -p "${iconset}"
     for size in 16 32 128 256 512; do
-        sips -z "${size}" "${size}" "${ROOT_DIR}/macos/App/AppIcon.png" \
+        sips -z "${size}" "${size}" "${APP_ICON_SOURCE}" \
             --out "${iconset}/icon_${size}x${size}.png" >/dev/null
-        sips -z "$((size * 2))" "$((size * 2))" "${ROOT_DIR}/macos/App/AppIcon.png" \
+        sips -z "$((size * 2))" "$((size * 2))" "${APP_ICON_SOURCE}" \
             --out "${iconset}/icon_${size}x${size}@2x.png" >/dev/null
     done
     iconutil -c icns -o "${APP_DIR}/Contents/Resources/AppIcon.icns" "${iconset}"
@@ -157,7 +211,8 @@ for lproj in Base zh-Hant; do
 done
 
 echo "Signing (ad-hoc)..."
-codesign --force --deep --sign - "${APP_DIR}"
+sign_sparkle "${APP_DIR}/Contents/Frameworks/Sparkle.framework" -
+codesign --force --sign - "${APP_DIR}"
 
 if [[ "${INSTALL}" == "1" && "${BUILD_SERVICE}" == "1" ]]; then
     if [[ "${INSTALL_USER}" == "1" ]]; then
@@ -202,7 +257,22 @@ if [[ "${INSTALL}" == "1" ]]; then
     else
         echo "Installing to ${destination} (sudo required)..."
     fi
+    if [[ "${have_tis_tool}" == "1" ]]; then
+        source "${ROOT_DIR}/macos/scripts/input-source-lifecycle.sh"
+        llavon_tis() { "${TIS_TOOL}" "$@"; }
+        # Restore the user's original source also on a failed install.
+        trap 'llavon_restore_input_source || true' EXIT
+        llavon_prepare_input_source "${BUNDLE_ID}"
+    fi
     pkill -x "${APP_NAME}" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        pgrep -x "${APP_NAME}" >/dev/null 2>&1 || break
+        sleep 1
+    done
+    if pgrep -x "${APP_NAME}" >/dev/null 2>&1; then
+        echo "The input method is still running; installation stopped before replacing the app." >&2
+        exit 1
+    fi
     if [[ "${INSTALL_USER}" == "1" ]]; then
         mkdir -p "${install_dir}"
         rm -rf "${destination}"
@@ -263,11 +333,11 @@ if [[ "${INSTALL}" == "1" ]]; then
         fi
     fi
 
-    # TextInputSwitcher caches input source icons in memory and ignores
-    # SIGTERM, so a stale instance keeps showing an icon-less switcher HUD.
-    # The menu agent and CursorUIViewService are left alone: killing them takes
-    # the input menu and the caret UI down with it.
-    killall -9 TextInputSwitcher 2>/dev/null || true
+    if [[ "${have_tis_tool}" == "1" ]]; then
+        llavon_restore_input_source
+        trap - EXIT
+        "${TIS_TOOL}" status "${BUNDLE_ID}"
+    fi
 
     cat <<'EOF'
 Installed. Select 「拉風輸入法」 under System Settings > Keyboard > Input Sources.

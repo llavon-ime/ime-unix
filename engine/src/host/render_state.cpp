@@ -67,7 +67,7 @@ RenderState build_render_state(InputSession& session, const Config& config, Mixe
     if (session.mixed_decision.active() && session.choosing_candidate()) {
         session.displayed_candidates.clear();
         const auto entries = decoder.expand_candidates(session.mixed_decision.result,
-                                                       InputProcessor::candidate_page_size(session, config),
+                                                       static_cast<std::size_t>(InputProcessor::candidate_page_size(session, config)),
                                                        session.mixed_decision.preview_path);
         for (const auto& entry : entries) session.displayed_candidates.push_back(entry.text);
         state.candidate_target = RenderTarget::Candidates;

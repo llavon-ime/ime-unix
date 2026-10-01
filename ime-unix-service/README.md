@@ -25,10 +25,20 @@ cmake --install build/linux
 bin/llavon-ime-unix-service
 bin/llavon-ime-lora
 bin/llavon-ime-lora-gui
+bin/llavon-ime-lora-backend
+bin/llavon-ime-settings
+bin/llavon-ime-phrases
 share/llavon-ime/tables/
 ```
 
 ## 執行
+
+原生管理器需要 Qt 6.4 以上的 Widgets / Network（Linux 另需 DBus）。macOS 開發環境可用
+`brew install qtbase`；Linux 請安裝 Qt 6 開發套件與對應的平台插件。
+詳細建置、架構與實際 UI 驗證方式見 [原生設定與個人化管理器](../docs/native-lora-manager.md)。
+
+`llavon-ime-settings` 開啟輸入法設定；`llavon-ime-phrases` 開啟替代詞彙。
+兩平台共用同一個 app，保留原本的設定檔位置與格式。重複啟動會切換既有視窗到指定頁面。
 
 明確傳入必要的模型檔與表目錄：
 
@@ -55,8 +65,9 @@ macOS 的 `~/Library/Application Support/llavon-ime/training/commits.sqlite3`。
 讀音，但不會回復已經訓練完成的 adapter。
 
 輸入法選單的「**管理個人化訓練…**」動作會啟動 `llavon-ime-lora-gui`，這是一個
-獨立的本機網頁介面。macOS 的設定視窗有「**使用我的輸入改進模型**」按鈕；Linux 的
-同一個按鈕位於 Fcitx5 輸入法設定中。與 Windows 相同，頁面會檢查或下載固定的
+獨立的 **C++23 / Qt 6 Widgets 原生桌面 app**，不使用 Python、瀏覽器、Electron 或
+WebView。macOS「設定…」與訓練選單都開啟這個 app；Linux 狀態選單與 Fcitx5
+設定工具提供設定、替代詞彙與訓練頁的入口。管理器會檢查或下載固定的
 checkpoint，並提供相同的訓練設定：五種**訓練強度**（極低、低、中、高、進階；預設
 極低）。非進階強度會套用共用的 preset（rank/alpha 8/16、dropout 0、batch size 與
 gradient accumulation 1、固定 adapter 結構、FP32、`q_proj,v_proj`、device `auto`），
@@ -76,16 +87,16 @@ adapter 的 rank、alpha、dropout 與 target modules 帶入進階欄位。
 「忘記密碼，清除所有對話資料」。
 待訓練紀錄全部會加入下一次訓練，不需要的紀錄在頁面上刪除。
 按「開始訓練」時會先計算**實際可訓練的筆數**（無法轉換的紀錄會跳過）再確認，
-進度與完成訊息也會顯示這個實際筆數。訓練資料摘要會顯示
-`共 N 筆 · 手動選字 M 筆 · 可訓練 K 筆`，無法轉換的紀錄在列表上標為
-「無法轉換（訓練時會跳過）」；有設定密碼時，精確筆數會在輸入訓練密碼後自動計算。
-`預計最多 N steps` 使用樣本數計算（手動選字過的紀錄每個算三個樣本），與 Windows
-相同，且在精確筆數已知時直接使用它。
-頁面會輪詢資料庫，因此開啟期間輸入的紀錄會自動出現；顯示進度與執行歷史，
-並可取消自己的行程群組。訓練歷程以 **Base model 為根的節點圖**呈現每次訓練
-（父執行、分支、`新增/累計` 筆數、optimizer 步數、資料範圍、降低模型遺忘、
-訓練強度或完整參數、`目前套用`／`最新訓練` 標籤），可以拖曳自由平移、
-Ctrl＋滾輪縮放（0.6x–2.5x），也有 `＋`／`－`／`重設視圖` 按鈕；點選節點後可以
+訓練資料摘要顯示待訓練與手動選字筆數；開始訓練前會驗證密碼，使用真正的資料轉換器
+計算可訓練筆數、樣本數與跳過的紀錄，再顯示確認視窗。無法轉換的紀錄會在列表標示。
+管理器每三秒更新資料與工作狀態，因此開啟期間輸入的紀錄會自動出現；下載、安裝、
+訓練與匯出在背景執行，視窗保持可操作。取消會終止自己的行程群組，五秒後仍未結束
+則強制停止。
+訓練歷程以 **Base model 為根的原生節點圖**呈現父執行、分支、`新增/累計` 筆數、
+optimizer 步數、目前套用與最新訓練的版本。拖曳空白可自由平移，拖曳節點可調整位置，
+連線隨之更新；Ctrl／Command＋滾輪或 `＋`／`－` 可縮放（60%–250%），「重設視圖」
+調整視角，「整理節點」恢復自動佈局。背景更新會保留本次開啟期間的節點位置與視角。
+選取版本可檢視主要參數，滑鼠停留在詳情區可查看模型路徑與完整參數，並且可以
 「**設為訓練基底**」或「**立即套用**」該次的 GGUF，套用 Base model 會清除自訂
 模型路徑、改用安裝的預設模型。最新兩次訓練有共同的祖先 run 時，樹上會出現
 「**共同祖先（Tarjan）**」按鈕，與 Windows 的 Tarjan 快捷相同。
@@ -93,19 +104,15 @@ Ctrl＋滾輪縮放（0.6x–2.5x），也有 `＋`／`－`／`重設視圖` 按
 一個。完成的 GGUF 可以直接從其歷史節點選為推論模型：套用時只保留該模型，其他
 run 的 GGUF 會刪除（每個 run 的 adapter 一律保留）；若該 GGUF 已被先前的套用
 刪除，會先從它的 adapter 重新匯出再套用（套用 Base model 則刪除所有個人化
-GGUF、改用安裝的預設模型）。每筆紀錄會以驗證網頁介面的
-風格渲染成附帶注音的預覽；頁面會到已安裝的字表（`bopomofo_char.json`）查讀音，
-紀錄中的讀音缺少時改用字表，並標記字表未列出該字讀音的情況。
-管理器會呼叫獨立的 `llavon-ime-lora` CLI。管理器只綁定 `127.0.0.1` 的隨機埠，
-並使用每次啟動的存取 token。再次開啟時會沿用執行中的管理器；以較新原始碼建置的
-管理器會取代閒置中的執行個體，讓瀏覽器不會停留在過舊的介面，但有工作進行中的
-執行個體不受影響。管理器也會監看自己的執行檔：重新安裝二進位（例如
-`scripts/build-linux.sh` 的安裝步驟）後，執行中的管理器會自動換成新版、保留同一個
-頁面網址與 token，頁面偵測到新版 build 會自動重新載入；有訓練工作進行中時會等它
-結束再替換。建置腳本另外會停掉仍在執行舊版（沒有自動替換能力）的管理器，並跳過
-正在訓練的執行個體（`LLAVON_IME_SKIP_LORA_GUI_RESTART` 可停用）。頁面關閉後管理器會在閒置時結束，有訓練工作進行中則會繼續執行。
-Linux 套件用 `xdg-open`、macOS 用 `/usr/bin/open` 開啟預設瀏覽器。想從終端機
-啟動時，直接執行 `llavon-ime-lora-gui`（或套件中的私有執行檔路徑）。
+GGUF、改用安裝的預設模型）。原生資料列表分欄顯示輸入文字、前文、紀錄中的注音與
+手動選字狀態；文字欄支援長句省略與完整內容提示。
+GUI 透過匿名管線與單執行緒的 `llavon-ime-lora-backend` 溝通，後者沿用原本的加密資料
+與 `llavon-ime-lora` CLI 管理邏輯。密碼不會放在命令列或環境變數中。沒有 HTTP
+監聽埠；本機 Unix socket 只用於再次啟動時喚回既有視窗，不承載文字或密碼。
+關閉視窗時，若仍有工作進行，會詢問是否取消；再次啟動會沿用現有視窗。
+macOS 會安裝自帶 Qt runtime 的 `.app` 與相容的 `bin/llavon-ime-lora-gui` 啟動腳本；
+Linux 使用系統 Qt 函式庫並提供 `.desktop` 啟動入口。從終端機可直接執行
+`llavon-ime-lora-gui`（或套件中的私有執行檔路徑）。
 
 `llavon-ime-lora` 是獨立的命令列管理器；不會在輸入法或預測服務裡執行 Torch。
 GUI 的「**安裝／更新 LoRA Trainer**」動作會從

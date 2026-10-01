@@ -4,6 +4,50 @@
 
 using namespace llavon::ime::rawkey;
 
+RAWKEY_SUITE("update readiness observes composition without committing", update_readiness) {
+    Harness harness;
+    harness.set_config("SmartEnglish", "False");
+    harness.type("su");
+    RAWKEY_ASSERT(!harness.update_ready());
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        RAWKEY_ASSERT(!harness.composition_empty());
+        RAWKEY_ASSERT(harness.preedit() == "ㄋㄧ");
+        RAWKEY_ASSERT(harness.commits().empty());
+    }
+    harness.key("3");
+    RAWKEY_ASSERT(!harness.composition_empty());
+    RAWKEY_ASSERT(harness.preedit() == "你");
+    RAWKEY_ASSERT(harness.commits().empty());
+    harness.expect_commit("你");
+    RAWKEY_ASSERT(harness.update_ready());
+    RAWKEY_ASSERT(harness.composition_empty());
+    RAWKEY_ASSERT(harness.commits().size() == 1);
+
+    harness.type("su");
+    harness.key("Escape");
+    RAWKEY_ASSERT(harness.composition_empty());
+    RAWKEY_ASSERT(harness.commits().size() == 1);
+}
+
+RAWKEY_SUITE("update readiness covers every attached client", update_all_clients) {
+    Harness harness;
+    harness.set_config("SmartEnglish", "False");
+    harness.type("su");
+    harness.use_context(2);
+    RAWKEY_ASSERT(harness.composition_empty());
+    RAWKEY_ASSERT(!harness.update_ready());
+    harness.type("su3");
+    harness.expect_commit("你");
+    RAWKEY_ASSERT(!harness.update_ready());
+    harness.use_context(1);
+    RAWKEY_ASSERT(harness.preedit() == "ㄋㄧ");
+    RAWKEY_ASSERT(harness.commits().size() == 1);
+    harness.key("Escape");
+    RAWKEY_ASSERT(harness.update_ready());
+    RAWKEY_ASSERT(harness.preedit().empty());
+    RAWKEY_ASSERT(harness.commits().size() == 1);
+}
+
 RAWKEY_SUITE("lifecycle", lifecycle) {
     // Focus-out commits a complete composition.
     {

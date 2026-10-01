@@ -12,7 +12,7 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("meeting");
-        harness.expect_direct_commit("meeting ", Key(" "));
+        harness.expect_space_then_commit("meeting ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -33,7 +33,7 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("deadline");
-        harness.expect_direct_commit("deadline ", Key(" "));
+        harness.expect_space_then_commit("deadline ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -42,7 +42,7 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("review");
-        harness.expect_direct_commit("review ", Key(" "));
+        harness.expect_space_then_commit("review ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -69,7 +69,7 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("good");
         RAWKEY_ASSERT(harness.preedit() == "你good");
-        harness.expect_direct_commit("你good ", Key(" "));
+        harness.expect_space_then_commit("你good ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -79,7 +79,7 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("bug");
-        harness.expect_direct_commit("bug ", Key(" "));
+        harness.expect_space_then_commit("bug ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("2k7");
         RAWKEY_ASSERT(harness.preedit() == "的");
@@ -106,7 +106,7 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("github");
-        harness.expect_direct_commit("github ", Key(" "));
+        harness.expect_space_then_commit("github ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -115,10 +115,10 @@ RAWKEY_SUITE("smart work", engine_test_smart_work) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("test");
-        harness.expect_direct_commit("test ", Key(" "));
+        harness.expect_space_then_commit("test ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("ok");
-        harness.expect_direct_commit("ok ", Key(" "));
+        harness.expect_space_then_commit("ok ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 }

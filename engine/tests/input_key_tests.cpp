@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <cstdlib>
 
 #include "input/input_key.hpp"

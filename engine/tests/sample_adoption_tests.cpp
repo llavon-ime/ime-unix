@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "context/sample_adoption.hpp"
 
 #include <cstdlib>

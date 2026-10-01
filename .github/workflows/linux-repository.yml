@@ -1,0 +1,82 @@
+name: Build signed Linux update repositories
+
+on:
+  workflow_run:
+    workflows: ["Release Linux packages"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published stable release version without v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-repository-publication
+  cancel-in-progress: false
+
+jobs:
+  repository:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LINUX_REPOSITORY_PRIVATE_KEY: ${{ secrets.LINUX_REPOSITORY_PRIVATE_KEY }}
+      LINUX_REPOSITORY_KEY_ID: ${{ vars.LINUX_REPOSITORY_KEY_ID }}
+    steps:
+      # workflow_run always uses tooling from the default branch. Never execute
+      # build scripts from a release artifact or an untrusted triggering branch.
+      - uses: actions/checkout@v4
+      - name: Resolve published release and signing configuration
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${LINUX_REPOSITORY_PRIVATE_KEY}" || ! "${LINUX_REPOSITORY_KEY_ID}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
+            echo "Configure LINUX_REPOSITORY_PRIVATE_KEY and LINUX_REPOSITORY_KEY_ID first." >&2
+            exit 1
+          fi
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            tag="v${INPUT_VERSION}"
+          else
+            # Each verified package artifact belongs to a particular release,
+            # unlike /releases/latest which macOS may publish independently.
+            gh run download "${RUN_ID}" --name linux-deb --dir verified-deb
+            package="$(find verified-deb -name '*.deb' -print -quit)"
+            tag="v$(dpkg-deb --field "${package}" Version)"
+          fi
+          [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          gh release view "${tag}" --json isDraft,isPrerelease --jq '.isDraft == false and .isPrerelease == false' | grep -qx true
+          echo "REPOSITORY_RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+      - name: Install repository tools
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg rpm createrepo-c
+      - name: Download verified release packages
+        run: |
+          set -euo pipefail
+          gh release download "${REPOSITORY_RELEASE_TAG}" --pattern '*.deb' --pattern '*.rpm' --dir packages
+          [[ "$(find packages -name '*.deb' | wc -l)" == 1 ]]
+          [[ "$(find packages -name '*.rpm' | wc -l)" == 1 ]]
+      - name: Generate and verify signed repository snapshots
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="${RUNNER_TEMP}/repository-key"
+          mkdir -m 700 "${GNUPGHOME}"
+          trap 'rm -rf "${GNUPGHOME}"' EXIT
+          printf '%s' "${LINUX_REPOSITORY_PRIVATE_KEY}" | gpg --batch --import
+          bash scripts/build-linux-repository.sh deb packages/*.deb repository "${LINUX_REPOSITORY_KEY_ID}"
+          bash scripts/build-linux-repository.sh rpm packages/*.rpm repository "${LINUX_REPOSITORY_KEY_ID}"
+          gpg --verify repository/debian13/amd64/InRelease
+          gpg --verify repository/fedora43/x86_64/repodata/repomd.xml.asc repository/fedora43/x86_64/repodata/repomd.xml
+          rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --import repository/llavon-ime-repository.asc
+          rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --checksig repository/fedora43/x86_64/packages/*.rpm
+          tar -czf "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" -C repository .
+      - name: Attach repository deployment bundle to release
+        run: |
+          set -euo pipefail
+          gh release upload "${REPOSITORY_RELEASE_TAG}" "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" --clobber
+          gh release upload "${REPOSITORY_RELEASE_TAG}" repository/llavon-ime-repository.asc --clobber
+          echo "Deploy the extracted tree to the configured HTTPS repository host before announcing this update."

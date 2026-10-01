@@ -25,8 +25,6 @@ std::vector<Suite>& registry() {
 
 namespace llavon::ime::rawkey {
 
-int committed_client_main(std::string_view format, int commands, int responses);
-
 SuiteRegistrar::SuiteRegistrar(const char* name, void (*body)()) {
     registry().push_back(Suite{name, body});
 }

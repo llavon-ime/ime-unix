@@ -5,6 +5,13 @@ APP="/Library/Input Methods/LlavonIME.app"
 PAYLOAD="/Library/Application Support/llavon-ime"
 TIS_TOOL="${PAYLOAD}/tools/llavon-ime-tis"
 
+# Sparkle's installer helper owns the relaunch after the entire pkg transaction
+# finishes. A normal Finder/Homebrew installation keeps the existing launch path.
+sparkle_install=0
+if /usr/bin/pgrep -f 'LlavonIME[.]app/Contents/Frameworks/Sparkle[.]framework/.*(Autoupdate|Updater[.]app)' >/dev/null 2>&1; then
+    sparkle_install=1
+fi
+
 console_user="$(stat -f %Su /dev/console 2>/dev/null || true)"
 if [ -z "${console_user}" ] || [ "${console_user}" = "root" ] || [ "${console_user}" = "loginwindow" ]; then
     console_user="${SUDO_USER:-}"
@@ -36,7 +43,9 @@ if [ -n "${console_user}" ] && id "${console_user}" >/dev/null 2>&1; then
     # and the app's own registration is what makes the new bundle current.
     # Launching it here also makes the input method usable without logging
     # out.
-    if as_user /usr/bin/open "${APP}" 2>/dev/null; then
+    if [ "${sparkle_install}" = "1" ]; then
+        echo "llavon-ime: Sparkle will relaunch the updated input method."
+    elif as_user /usr/bin/open "${APP}" 2>/dev/null; then
         for _ in 1 2 3 4 5; do
             /usr/bin/pgrep -x -u "${uid}" LlavonIME >/dev/null 2>&1 && break
             sleep 1

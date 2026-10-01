@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "input/ascii_tokenizer.hpp"
 
 #include <cstdio>

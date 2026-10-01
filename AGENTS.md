@@ -9,3 +9,4 @@
 
 - macOS 設定 CMake 時加上 `-DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"`；先確保 `ime-core`、`vcpkg` submodule 已初始化，且 vcpkg 已 bootstrap。
 - 使用c++23
+- 編譯時把所有警告都開啟

@@ -2,6 +2,8 @@
 #include "gpu_vendor.hpp"
 #include "lora_history_lca.hpp"
 #include "lora_presets.hpp"
+#include "sqlite.hpp"
+#include "../../../engine/src/util/parse_number.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -54,6 +56,7 @@ void request_stop(int) { stop_requested = 1; }
 // Records shown per page; the page script steps its offset by the same value.
 constexpr int kRecordsPerPage = 20;
 
+#ifndef LLAVON_NATIVE_GUI
 constexpr std::string_view page = R"LLAVON(<!doctype html>
 <html lang="zh-Hant"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer"><link rel="icon" type="image/png" href="@@LOGO@@"><title>拉風輸入法・個人化訓練</title>
@@ -1387,6 +1390,8 @@ std::string render_page() {
     return html;
 }
 
+#endif
+
 std::string trim(std::string text) {
     const auto first = text.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) return {};
@@ -1394,6 +1399,7 @@ std::string trim(std::string text) {
     return text.substr(first, last - first + 1);
 }
 
+#ifndef LLAVON_NATIVE_GUI
 std::string random_token() {
     std::random_device random;
     constexpr char hex[] = "0123456789abcdef";
@@ -1415,8 +1421,10 @@ void send_all(int fd, std::string_view data) {
 // would keep showing an outdated interface after an update. The lock file
 // records the owning PID and this stamp, and a newer build takes over an idle
 // instance (a running job is left alone).
-constexpr std::string_view build_stamp = __DATE__ " " __TIME__;
+#endif
+constexpr std::string_view build_stamp = "native-manager-0.2.0";
 
+#ifndef LLAVON_NATIVE_GUI
 std::string http_get_state(const std::string& url) {
     const auto scheme_end = url.find("://");
     const auto host_start = scheme_end == std::string::npos ? std::string::npos : scheme_end + 3;
@@ -1456,10 +1464,12 @@ std::string http_get_state(const std::string& url) {
     return body == std::string::npos ? std::string{} : response.substr(body + 4);
 }
 
+#endif
 struct Request {
     std::string method, path, origin, host, token, content_type, body;
 };
 
+#ifndef LLAVON_NATIVE_GUI
 Request read_request(int fd) {
     Request request;
     std::string raw;
@@ -1519,6 +1529,8 @@ void respond(int fd, int status, std::string_view type, std::string_view body) {
     send_all(fd, header); send_all(fd, body);
 }
 
+#endif
+
 fs::path executable_path(const char* argv0) {
 #ifdef __APPLE__
     std::uint32_t size = 0;
@@ -1545,6 +1557,7 @@ fs::path default_state() {
 #endif
 }
 
+#ifndef LLAVON_NATIVE_GUI
 void open_browser(const std::string& url, bool enabled) {
     if (!enabled) return;
     const pid_t child = ::fork();
@@ -1570,6 +1583,8 @@ void open_browser(const std::string& url, bool enabled) {
             std::cerr << "Could not open a browser; open " << url << '\n';
     }
 }
+
+#endif
 
 std::string last_log(const fs::path& path) {
     std::ifstream stream(path, std::ios::binary | std::ios::ate);
@@ -1714,28 +1729,22 @@ bool trainer_ready(const fs::path& executable, const fs::path& state) {
 }
 
 json query_database(const fs::path& path, const char* sql, int columns) {    if (!fs::is_regular_file(path)) return json::array();
-    sqlite3* db = nullptr;
-    if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-        const std::string error = db ? sqlite3_errmsg(db) : "cannot open training database";
-        sqlite3_close(db); throw std::runtime_error(error);
-    }
+    const auto owned_db = ime::unix_service::sqlite::open(path, SQLITE_OPEN_READONLY);
+    auto* db = owned_db.get();
     sqlite3_busy_timeout(db, 1000);
-    sqlite3_stmt* stmt = nullptr;
+    const auto owned_stmt = ime::unix_service::sqlite::prepare(db, sql);
+    auto* stmt = owned_stmt.get();
     json result = json::array();
-    try {
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
-        int rc;
-        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            json row = json::array();
-            for (int i = 0; i < columns; ++i) {
-                const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
-                row.push_back(text ? text : "");
-            }
-            result.push_back(std::move(row));
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        json row = json::array();
+        for (int i = 0; i < columns; ++i) {
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
+            row.push_back(text ? text : "");
         }
-        if (rc != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
-    } catch (...) { sqlite3_finalize(stmt); sqlite3_close(db); throw; }
-    sqlite3_finalize(stmt); sqlite3_close(db);
+        result.push_back(std::move(row));
+    }
+    if (rc != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
     return result;
 }
 
@@ -1755,20 +1764,17 @@ class DatabaseHandle {
 public:
     explicit DatabaseHandle(const fs::path& path) {
         if (!fs::is_regular_file(path)) throw std::runtime_error("找不到訓練資料庫");
-        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
-            const std::string error = db_ ? sqlite3_errmsg(db_) : "cannot open training database";
-            sqlite3_close(db_); db_ = nullptr; throw std::runtime_error(error);
-        }
-        sqlite3_busy_timeout(db_, 1000);
-        ime::unix_service::initialize_commit_database(db_);
+        db_ = ime::unix_service::sqlite::open(path, SQLITE_OPEN_READWRITE);
+        sqlite3_busy_timeout(db_.get(), 1000);
+        ime::unix_service::initialize_commit_database(db_.get());
     }
-    ~DatabaseHandle() { if (db_) sqlite3_close(db_); }
+    ~DatabaseHandle() = default;
     DatabaseHandle(const DatabaseHandle&) = delete;
     DatabaseHandle& operator=(const DatabaseHandle&) = delete;
-    sqlite3* get() const { return db_; }
+    sqlite3* get() const { return db_.get(); }
 
 private:
-    sqlite3* db_ = nullptr;
+    ime::unix_service::sqlite::Database db_;
 };
 
 // Windows exposes the same override for its dev/test asset root.
@@ -1801,7 +1807,12 @@ Options parse_options(int argc, char** argv) {
         else if (name == "--db") options.db = value;
         else if (name == "--cli") options.cli = value;
         else if (name == "--tables-dir") options.tables = value;
-        else if (name == "--idle-seconds") options.idle_seconds = std::stoi(value);
+        else if (name == "--idle-seconds") {
+            // Keep the historical stoi prefix grammar, including leading '+'.
+            const auto seconds = llavon::ime::parse_decimal<int>(value, false);
+            if (!seconds) throw std::invalid_argument("invalid idle timeout");
+            options.idle_seconds = *seconds;
+        }
         else throw std::invalid_argument("unknown option: " + name);
     }
     if (options.idle_seconds < 1) throw std::invalid_argument("idle timeout must be at least 1 second");
@@ -1821,6 +1832,7 @@ struct Job {
     pid_t pid = -1;
     fs::path log, output;
     bool cancelling = false;
+    Clock::time_point cancel_started{};
 };
 
 class Gui {
@@ -1828,6 +1840,61 @@ public:
     explicit Gui(Options options) : options_(std::move(options)),
         db_(options_.db.empty() ? options_.state / "commits.sqlite3" : options_.db) {}
 
+#ifdef LLAVON_NATIVE_GUI
+    // A single-threaded helper owns the existing database and fork/exec logic.
+    // The Widgets process speaks JSON lines over private anonymous pipes: no
+    // TCP listener, browser, token file, or plaintext password in argv.
+    int run() {
+        fs::create_directories(options_.state);
+        struct stat directory {};
+        if (::lstat(options_.state.c_str(), &directory) || !S_ISDIR(directory.st_mode) ||
+            directory.st_uid != ::getuid() || ::chmod(options_.state.c_str(), 0700))
+            throw std::runtime_error("unsafe training data directory");
+        lock_ = ::open((options_.state / "gui.lock").c_str(), O_CREAT | O_RDWR | O_NOFOLLOW, 0600);
+        struct stat file {};
+        if (lock_ < 0 || ::fstat(lock_, &file) || !S_ISREG(file.st_mode) || file.st_uid != ::getuid() ||
+            ::fchmod(lock_, 0600) || ::fcntl(lock_, F_SETFD, FD_CLOEXEC) || ::flock(lock_, LOCK_EX | LOCK_NB))
+            throw std::runtime_error("已有個人化管理器開啟，請先關閉舊版管理器");
+        std::string pending;
+        while (!stop_requested) {
+            update_job();
+            pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+            const int ready = ::poll(&descriptor, 1, 200);
+            if (ready < 0) { if (errno == EINTR) continue; break; }
+            if (!ready) continue;
+            std::array<char, 4096> buffer{};
+            const auto count = ::read(STDIN_FILENO, buffer.data(), buffer.size());
+            if (count <= 0) break;
+            pending.append(buffer.data(), static_cast<std::size_t>(count));
+            if (pending.size() > 65536) throw std::runtime_error("管理器請求過長");
+            for (auto newline = pending.find('\n'); newline != std::string::npos; newline = pending.find('\n')) {
+                std::string line = pending.substr(0, newline);
+                pending.erase(0, newline + 1);
+                json response{{"id", nullptr}};
+                try {
+                    auto input = json::parse(line);
+                    response["id"] = input.at("id");
+                    Request request;
+                    request.method = input.value("method", "GET");
+                    request.path = input.at("path").get<std::string>();
+                    request.content_type = "application/json";
+                    request.body = input.value("body", json::object()).dump();
+                    response["result"] = dispatch(request);
+                    sodium_memzero(request.body.data(), request.body.size());
+                } catch (const std::exception& error) { response["error"] = error.what(); }
+                sodium_memzero(line.data(), line.size());
+                std::cout << response.dump() << std::endl;
+            }
+        }
+        if (job_.pid >= 0) {
+            (void)::kill(-job_.pid, SIGTERM);
+            for (int i = 0; i < 25 && job_.pid >= 0; ++i) { ::usleep(100000); update_job(); }
+            if (job_.pid >= 0) { (void)::kill(-job_.pid, SIGKILL); (void)::waitpid(job_.pid, nullptr, 0); }
+        }
+        ::close(lock_);
+        return 0;
+    }
+#else
     int run() {
         fs::create_directories(options_.state);
         struct stat directory {};
@@ -1839,7 +1906,9 @@ public:
         const bool inherited = ::getenv("LLAVON_IME_GUI_INHERIT_FD") != nullptr;
         if (inherited) {
             try {
-                listen_ = std::stoi(::getenv("LLAVON_IME_GUI_INHERIT_FD"));
+                const auto inherited_fd = llavon::ime::parse_decimal<int>(::getenv("LLAVON_IME_GUI_INHERIT_FD"), false);
+                if (!inherited_fd) throw std::invalid_argument("invalid inherited descriptor");
+                listen_ = *inherited_fd;
             } catch (...) { throw std::runtime_error("invalid inherited GUI socket"); }
             const char* token = ::getenv("LLAVON_IME_GUI_INHERIT_TOKEN");
             if (token && *token) token_ = token;
@@ -1875,7 +1944,7 @@ public:
                     url = trim(url); stamp = trim(stamp_line);
                     const auto pid_text = trim(pid_line);
                     if (!pid_text.empty()) {
-                        try { owner = static_cast<pid_t>(std::stol(pid_text)); } catch (...) { owner = 0; }
+                        owner = static_cast<pid_t>(llavon::ime::parse_decimal<long>(pid_text, false).value_or(0));
                     }
                 }
             }
@@ -1970,8 +2039,10 @@ public:
         }
         return 0;
     }
+#endif
 
 private:
+#ifndef LLAVON_NATIVE_GUI
     // Hands the listening socket and page token to the reinstalled binary and
     // replaces this process image with it. Returns false when the replacement
     // could not start, so the caller keeps the current build serving.
@@ -1999,8 +2070,11 @@ private:
         return false;
     }
 
+#endif
     void update_job() {
         if (job_.pid < 0) return;
+        if (job_.cancelling && Clock::now() - job_.cancel_started > std::chrono::seconds(5))
+            (void)::kill(-job_.pid, SIGKILL);
         int status;
         const auto ended = ::waitpid(job_.pid, &status, WNOHANG);
         if (ended == 0) return;
@@ -2480,6 +2554,8 @@ private:
         const auto child = ::fork();
         if (child < 0) throw std::runtime_error("cannot start CLI");
         if (child == 0) {
+            // Keep command output off the native JSON-lines reply channel.
+            (void)::dup2(STDERR_FILENO, STDOUT_FILENO);
             ::execl(options_.cli.c_str(), options_.cli.c_str(), action.c_str(), "--db", db_.c_str(), "--id", id.c_str(),
                     static_cast<char*>(nullptr));
             _exit(127);
@@ -2489,6 +2565,7 @@ private:
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) throw std::runtime_error("紀錄操作失敗");
     }
 
+#ifndef LLAVON_NATIVE_GUI
     void handle(int fd) {
         const auto request = read_request(fd);
         const std::string host = "127.0.0.1:" + std::to_string(port_);
@@ -2502,6 +2579,12 @@ private:
             respond(fd, 403, "application/json", R"({"error":"unauthorized"})"); return;
         }
         last_seen_ = Clock::now();
+        const auto result = dispatch(request);
+        respond(fd, 200, "application/json", result.dump());
+    }
+#endif
+
+    json dispatch(const Request& request) {
         if (request.method == "GET") {
             const json result = request.path == "/api/state" ? state() :
                                 request.path == "/api/protection" ? protection() :
@@ -2510,12 +2593,7 @@ private:
                                 request.path.starts_with("/api/records?") || request.path == "/api/records" ? records(request.path) :
                                 request.path == "/api/runs" ? runs() :
                                 request.path == "/api/history" ? history() : json{{"error","not found"}};
-            respond(fd, request.path.starts_with("/api/") && request.path != "/api/state" &&
-                        request.path != "/api/protection" && request.path != "/api/pending-count" &&
-                        request.path != "/api/readings" &&
-                        request.path != "/api/records" && !request.path.starts_with("/api/records?") &&
-                        request.path != "/api/runs" && request.path != "/api/history" ? 404 : 200,
-                    "application/json", result.dump()); return;
+            return result;
         }
         if (request.method != "POST" || request.content_type != "application/json")
             throw std::runtime_error("unsupported request");
@@ -2586,12 +2664,10 @@ private:
                 const auto begin = last == std::string::npos ? std::string::npos : text.rfind('\n', last);
                 report = json::parse(begin == std::string::npos ? text : text.substr(begin + 1));
             } catch (...) { report = json::object(); }
-            respond(fd, 200, "application/json",
-                    json{{"records", report.value("trainable", 0)},
-                         {"skipped", report.value("skipped", 0)},
-                         {"samples", report.value("samples", 0)},
-                         {"skipped_ids", report.contains("skipped_ids") ? report["skipped_ids"] : json::array()}}.dump());
-            return;
+            return json{{"records", report.value("trainable", 0)},
+                          {"skipped", report.value("skipped", 0)},
+                          {"samples", report.value("samples", 0)},
+                          {"skipped_ids", report.contains("skipped_ids") ? report["skipped_ids"] : json::array()}};
         } else if (request.path == "/api/train") {
             if (!trainer_ready(options_.trainer, options_.state))
                 throw std::runtime_error("LoRA Trainer 尚未安裝或版本不符，請安裝／更新 LoRA Trainer");
@@ -2657,6 +2733,7 @@ private:
             update_job();
             if (job_.pid < 0) throw std::runtime_error("沒有執行中的工作");
             job_.cancelling = true;
+            job_.cancel_started = Clock::now();
             if (::kill(-job_.pid, SIGTERM) != 0 && errno != ESRCH) throw std::runtime_error("無法取消工作");
         } else if (request.path == "/api/use-model") {
             update_job();
@@ -2698,24 +2775,29 @@ private:
             command(action, request.path.substr(std::string("/api/records/").size(),
                                                 end - std::string("/api/records/").size()));
         } else {
-            respond(fd, 404, "application/json", R"({"error":"not found"})"); return;
+            throw std::runtime_error("unknown manager action");
         }
-        respond(fd, 200, "application/json", R"({"ok":true})");
+        return json{{"ok",true}};
     }
 
     Options options_;
     fs::path db_;
-    int lock_ = -1, listen_ = -1, port_ = 0;
+    int lock_ = -1;
+#ifndef LLAVON_NATIVE_GUI
+    int listen_ = -1, port_ = 0;
     std::string token_;
+#endif
     Job job_;
     Clock::time_point last_seen_{};
     json readings_cache_ = json::object();
     bool readings_loaded_ = false;
     // The manager watches its own binary so a reinstall replaces the running
     // build the same way the memory helper is replaced.
+#ifndef LLAVON_NATIVE_GUI
     fs::file_time_type self_mtime_{};
     bool watch_self_ = false;
     int restart_failures_ = 0;
+#endif
     // A model to apply once the running re-export job finishes.
     std::optional<fs::path> pending_export_apply_;
     // Only while the review password is entered; locking wipes the key.

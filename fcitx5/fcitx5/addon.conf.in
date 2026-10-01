@@ -6,3 +6,6 @@ Library=llavon-ime-addon
 Type=SharedLibrary
 OnDemand=True
 Configurable=True
+
+[Addon/OptionalDependencies]
+0=dbus

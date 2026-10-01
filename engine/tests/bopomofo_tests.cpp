@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "bopomofo/keymap.hpp"
 #include "bopomofo/syllable.hpp"
 #include "bopomofo/table_engine.hpp"

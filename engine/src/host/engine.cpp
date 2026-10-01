@@ -1,4 +1,5 @@
 #include "host/engine.hpp"
+#include "input/mixed_lexicon.hpp"
 
 #include <algorithm>
 #include <random>
@@ -8,6 +9,7 @@
 #include "context/memory_context.hpp"
 #include "context/sample_adoption.hpp"
 #include "debug/context_log.hpp"
+#include "engine/pending_model_preview.hpp"
 #include "host/render_state.hpp"
 #include "input/input_processor.hpp"
 #include "input/mixed_input_decoder.hpp"
@@ -15,6 +17,14 @@
 #include "util/env.hpp"
 
 namespace llavon::ime {
+
+bool Engine::has_pending_composition() const {
+    for (const auto& [id, session] : sessions_) {
+        (void)id;
+        if (!session->empty()) return true;
+    }
+    return false;
+}
 
 namespace {
 
@@ -94,7 +104,9 @@ Engine::Engine(EngineOptions options, Host& host)
       host_(host),
       fallback_(options_.table_path),
       decoder_([this](std::u16string_view reading) { return fallback_.lookup(reading); },
-               [this](std::u16string_view word) { return fallback_.latin_frequency(word); }),
+               [this](std::u16string_view word) { return fallback_.latin_frequency(word); },
+               [](std::u16string_view word, bool prefix) { return MixedLexicon::instance().english_score(word, prefix); },
+               [](std::u16string_view history, char32_t ch) { return MixedLexicon::instance().chinese_score(history, ch); }),
       phrase_overrides_(options_.phrase_overrides_path),
       processor_(fallback_, decoder_, phrase_overrides_),
       transport_(options_.transport),
@@ -126,6 +138,7 @@ Engine::Engine(EngineOptions options, Host& host)
 
 Engine::~Engine() {
     alive_.reset();
+    pending_models_.clear();
     // Transport callbacks hold a weak lifetime token; drain them while the
     // engine is still alive.
     transport_.stop();
@@ -141,7 +154,9 @@ void Engine::detach(ContextId context) {
     if (memory_probe_context_ == context) memory_commit_history_.clear();
     if (memory_probe_context_ == context && memory_context_) memory_context_->invalidate();
     close_prediction_session(*it->second);
+    pending_models_.erase(context);
     sessions_.erase(it);
+    context_lifetimes_.erase(context);
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
     if (memory_probe_context_ == context) memory_probe_context_ = 0;
 }
@@ -159,6 +174,7 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
     if (key.sym == keysym::BackSpace) withdraw_recent_commit(context);
     else recent_commit_.reset();
     auto& session = find_or_create(context);
+    if (config_.smart_english) resync_context(context, session);
     const auto effect = processor_.process(key, session, config_);
     apply_effect(context, session, effect);
     if (!effect.handled) {
@@ -224,6 +240,7 @@ void Engine::deactivate(ContextId context) {
 void Engine::reset(ContextId context, InputResetReason reason, bool clear_context) {
     auto* session = find(context);
     if (session == nullptr) return;
+    pending_models_.erase(context);
     if (memory_context_) memory_context_->invalidate();
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
     if (reason == InputResetReason::FocusOut) {
@@ -253,6 +270,7 @@ RenderState Engine::render_state(ContextId context) {
 
 void Engine::set_config(Config config, bool settle_sessions) {
     config_ = std::move(config);
+    pending_models_.clear();
     apply_context_sources();
     if (!settle_sessions) return;
     for (auto& [context, session] : sessions_) {
@@ -262,6 +280,8 @@ void Engine::set_config(Config config, bool settle_sessions) {
 }
 
 void Engine::set_transport_options(ServiceTransportOptions options) {
+    pending_models_.clear();
+    options_.transport = options;
     transport_.reconfigure(std::move(options));
     // The previous service process staged its commits; it cannot withdraw them.
     recent_commit_.reset();
@@ -279,6 +299,7 @@ void Engine::reload_phrase_overrides() {
 }
 
 void Engine::clear_context_text(ContextId context) {
+    pending_models_.erase(context);
     auto* session = find(context);
     if (session != nullptr) {
         session->context_text.clear();
@@ -315,6 +336,7 @@ InputSession& Engine::find_or_create(ContextId context) {
     auto it = sessions_.find(context);
     if (it == sessions_.end()) {
         it = sessions_.emplace(context, std::make_unique<InputSession>()).first;
+        context_lifetimes_.emplace(context, std::make_shared<bool>(true));
         std::random_device random;
         for (auto& byte : it->second->training_source_id) byte = static_cast<std::uint8_t>(random());
     }
@@ -381,6 +403,48 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
     // Memory probing observes the client's natural preedit; publish the new
     // preedit before the prediction path schedules its memory scan.
     if (effect.request_prediction) request_prediction(context, session);
+    update_pending_model(context);
+}
+
+bool Engine::pending_model_idle(ContextId context) const {
+    const auto it = pending_models_.find(context);
+    return it == pending_models_.end() || it->second->idle();
+}
+
+std::uint64_t Engine::pending_model_requests(ContextId context) const {
+    const auto it = pending_models_.find(context);
+    return it == pending_models_.end() ? 0 : it->second->requests();
+}
+
+void Engine::update_pending_model(ContextId context) {
+    auto* session = find(context);
+    if (!session) return;
+    if (!config_.smart_english || !config_.smart_model_preview) {
+        pending_models_.erase(context);
+        return;
+    }
+    auto it = pending_models_.find(context);
+    if (it == pending_models_.end()) {
+        if (session->pending_token.empty() || !session->mixed_decision.active() ||
+            session->mixed_decision.preview_path == 0 || session->choosing_candidate()) return;
+        PendingModelPreview::Client client;
+        client.session = [this, context] { return find(context); };
+        client.config = [this]() -> const Config& { return config_; };
+        client.context = [this, context] {
+            auto* current = find(context);
+            if (!current) return std::u16string{};
+            resync_context(context, *current);
+            return current->context_text;
+        };
+        client.sensitive = [this, context] { return host_.is_sensitive(context); };
+        client.post = [this](auto body) { host_.post(std::move(body)); };
+        client.redraw = [this, context] { host_.update_ui(context); };
+        const auto tables = options_.transport.tables_dir.empty() ? options_.table_path.parent_path() :
+                                                                  options_.transport.tables_dir;
+        it = pending_models_.emplace(context, std::make_unique<PendingModelPreview>(
+            std::move(client), fallback_, transport_, tables / "tokens/bpmf.json")).first;
+    }
+    it->second->on_input();
 }
 
 void Engine::remember_recent_commit(ContextId context, const protocol::SessionId& event_id,
@@ -454,17 +518,24 @@ void Engine::request_prediction(ContextId context, InputSession& session) {
 
 void Engine::open_prediction_session(ContextId context, std::uint64_t generation) {
     const std::weak_ptr<bool> alive = alive_;
-    transport_.open_session([this, alive, context, generation](protocol::Message response) mutable {
+    const std::weak_ptr<bool> context_alive = context_lifetimes_.at(context);
+    transport_.open_session([this, alive, context_alive, context, generation](protocol::Message response) mutable {
         if (alive.expired()) return;
-        host_.post([this, alive, context, generation, response = std::move(response)]() mutable {
+        host_.post([this, alive, context_alive, context, generation, posted_response = std::move(response)]() mutable {
             if (alive.expired()) return;
             auto* session = find(context);
-            if (session == nullptr) return;
-            if (session->prediction.generation != generation || !session->prediction.pending ||
+            if (context_alive.expired() || session == nullptr ||
+                session->prediction.generation != generation || !session->prediction.pending ||
                 session->prediction.session_open()) {
+                // The service may have opened the object after it was detached
+                // or reset. Release that orphan without assigning it to a new
+                // input context that happens to reuse the same host handle.
+                if (const auto* opened = std::get_if<protocol::OpenSessionResponse>(&posted_response)) {
+                    transport_.close_session(opened->session_id, {});
+                }
                 return;
             }
-            if (const auto* opened = std::get_if<protocol::OpenSessionResponse>(&response)) {
+            if (const auto* opened = std::get_if<protocol::OpenSessionResponse>(&posted_response)) {
                 session->prediction.session_id = opened->session_id;
                 send_prediction(context, *session, generation);
                 return;
@@ -495,13 +566,14 @@ void Engine::send_prediction(ContextId context, InputSession& session, std::uint
     session.prediction.inflight_request_id = request.request_id;
     session.prediction.inflight_revision = request.buffer_revision;
     const std::weak_ptr<bool> alive = alive_;
+    const std::weak_ptr<bool> context_alive = context_lifetimes_.at(context);
     transport_.predict(
         request.session_id, request.request_id, request.buffer_revision, std::move(request.context),
-        std::move(request.padding), [this, alive, context, generation](protocol::Message response) mutable {
+        std::move(request.padding), [this, alive, context_alive, context, generation](protocol::Message response) mutable {
             if (alive.expired()) return;
-            host_.post([this, alive, context, generation, response = std::move(response)]() mutable {
-                if (alive.expired()) return;
-                handle_prediction_response(context, generation, std::move(response));
+            host_.post([this, alive, context_alive, context, generation, posted_response = std::move(response)]() mutable {
+                if (alive.expired() || context_alive.expired()) return;
+                handle_prediction_response(context, generation, std::move(posted_response));
             });
         });
 }
@@ -518,11 +590,10 @@ void Engine::handle_prediction_response(ContextId context, std::uint64_t generat
         if (accepted && session->prediction.matches_composition(
                             *prediction, session->buffer.raw_composition(), session->buffer.revision())) {
             processor_.apply_prediction(*session, *prediction);
-        } else if (accepted) {
-            for (const auto index : session->prediction.segment_indices) {
-                processor_.apply_fallback_candidates(*session, index);
-            }
         }
+        // A correlated but stale response must not revert already-refined
+        // characters to fallback. Editing initializes changed readings itself;
+        // dirty bookkeeping schedules a prediction for the latest buffer.
     } else if (const auto* error = std::get_if<protocol::Error>(&response)) {
         accepted = session->prediction.correlates(*error);
         if (accepted) {
@@ -540,6 +611,7 @@ void Engine::handle_prediction_response(ContextId context, std::uint64_t generat
 
     const bool dirty = session->prediction.finish();
     if (dirty) request_prediction(context, *session);
+    update_pending_model(context);
     host_.update_ui(context);
 }
 
@@ -567,7 +639,7 @@ void Engine::resync_context(ContextId context, InputSession& session) {
         const std::size_t cursor = std::min(surrounding.cursor, surrounding.anchor);
         const std::size_t bounded = std::min(cursor, surrounding.text.size());
         auto text = utf16_tail(std::u16string_view(surrounding.text).substr(0, bounded), limit);
-        if (!text.empty() && !InputProcessor::composition_empty(session)) {
+        if (surrounding.may_include_preedit && !text.empty() && !InputProcessor::composition_empty(session)) {
             // Some clients include the composition itself in the surrounding
             // text; it is not document context and must not reach the model.
             if (const auto stripped = strip_accessibility_preedit(session, text)) text = *stripped;
@@ -676,10 +748,9 @@ protocol::PredictRequest Engine::build_predict_request(ContextId context, const 
         if (!segment.complete()) continue;
 
         protocol::PaddingEntry entry;
-        entry.bopomofo = segment.reading();
+        entry = protocol::PaddingEntry(segment.reading());
         if (segment.manually_chosen && segment.selected_candidate() != 0) {
-            entry.chosen = true;
-            entry.chosen_char = segment.selected_candidate();
+            entry = protocol::PaddingEntry(segment.selected_candidate());
         }
         request.padding.push_back(std::move(entry));
     }

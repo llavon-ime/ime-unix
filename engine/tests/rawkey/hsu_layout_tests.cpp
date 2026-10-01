@@ -2,8 +2,8 @@
 
 using namespace llavon::ime::rawkey;
 
-// Hsu (許氏) keyboard layout: punctuation commits halfwidth symbols, tones are
-// digits, and digits join the composition.
+// Hsu (許氏) keyboard layout: unshifted punctuation is halfwidth, tones use
+// letter keys, and digits join completed composition as literals.
 RAWKEY_SUITE("hsu input", hsu_input) {
     Harness harness;
     harness.set_config("BopomofoKeyboardLayout", "許氏");

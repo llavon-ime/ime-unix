@@ -81,14 +81,14 @@ RAWKEY_SUITE("training commit transport", training_commit_transport) {
                 } else if (const auto* request = std::get_if<protocol::PredictRequest>(&message)) {
                     connection.send_all(protocol::encode(protocol::Prediction{
                         session, request->request_id, request->buffer_revision, {{U'你'}}}));
-                } else if (const auto* request = std::get_if<protocol::RecordCommitRequest>(&message)) {
-                    valid = request->context == u"早安" && request->answer == u"你" &&
-                            request->entries.size() == 1 && request->entries[0].reading == u"ㄋㄧˇ";
-                    connection.send_all(protocol::encode(protocol::RecordCommitResponse{request->event_id, true}));
+                } else if (const auto* record = std::get_if<protocol::RecordCommitRequest>(&message)) {
+                    valid = record->context == u"早安" && record->answer == u"你" &&
+                            record->entries.size() == 1 && record->entries[0].reading == u"ㄋㄧˇ";
+                    connection.send_all(protocol::encode(protocol::RecordCommitResponse{record->event_id, true}));
                     received = true;
                     break;
-                } else if (const auto* request = std::get_if<protocol::CloseSessionRequest>(&message)) {
-                    connection.send_all(protocol::encode(protocol::CloseSessionResponse{request->session_id, true}));
+                } else if (const auto* close = std::get_if<protocol::CloseSessionRequest>(&message)) {
+                    connection.send_all(protocol::encode(protocol::CloseSessionResponse{close->session_id, true}));
                     break;
                 } else { valid = false; break; }
             }
@@ -191,8 +191,7 @@ RAWKEY_SUITE("training mixed commit samples", training_mixed_commit_samples) {
     // the Windows manager.
     harness.type("su3");
     harness.type("hello");
-    harness.expect_direct_commit("你hello ", Key(" "));
-    std::fprintf(stderr, "[debug] mixed samples=%zu\n", samples.size());
+    harness.expect_space_then_commit("你hello ");
     RAWKEY_ASSERT(samples.size() == 1);
     RAWKEY_ASSERT(samples[0].sample.answer == u"你hello ");
     RAWKEY_ASSERT(samples[0].sample.entries.size() == 7);
@@ -207,7 +206,7 @@ RAWKEY_SUITE("training mixed commit samples", training_mixed_commit_samples) {
 
     // A commit without a single composed position is not training data.
     harness.type("hello");
-    harness.expect_direct_commit("hello ", Key(" "));
+    harness.expect_space_then_commit("hello ");
     RAWKEY_ASSERT(samples.size() == 1);
 
     // Literal punctuation settled into the composition keeps the earlier
@@ -282,16 +281,16 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
                 } else if (const auto* request = std::get_if<protocol::PredictRequest>(&message)) {
                     connection.send_all(protocol::encode(protocol::Prediction{
                         session, request->request_id, request->buffer_revision, {{U'你'}}}));
-                } else if (const auto* request = std::get_if<protocol::RecordCommitRequest>(&message)) {
-                    committed_id = request->event_id;
-                    connection.send_all(protocol::encode(protocol::RecordCommitResponse{request->event_id, true}));
-                } else if (const auto* request = std::get_if<protocol::DiscardCommitRequest>(&message)) {
-                    matched = request->event_id == committed_id;
-                    connection.send_all(protocol::encode(protocol::DiscardCommitResponse{request->event_id, true}));
+                } else if (const auto* record = std::get_if<protocol::RecordCommitRequest>(&message)) {
+                    committed_id = record->event_id;
+                    connection.send_all(protocol::encode(protocol::RecordCommitResponse{record->event_id, true}));
+                } else if (const auto* discard = std::get_if<protocol::DiscardCommitRequest>(&message)) {
+                    matched = discard->event_id == committed_id;
+                    connection.send_all(protocol::encode(protocol::DiscardCommitResponse{discard->event_id, true}));
                     discarded = true;
                     break;
-                } else if (const auto* request = std::get_if<protocol::CloseSessionRequest>(&message)) {
-                    connection.send_all(protocol::encode(protocol::CloseSessionResponse{request->session_id, true}));
+                } else if (const auto* close = std::get_if<protocol::CloseSessionRequest>(&message)) {
+                    connection.send_all(protocol::encode(protocol::CloseSessionResponse{close->session_id, true}));
                     break;
                 } else { matched = false; break; }
             }

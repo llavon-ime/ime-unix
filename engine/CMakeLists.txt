@@ -31,6 +31,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 include(GNUInstallDirs)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/README.md"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/llavon-ime"
+    RENAME mixed-lexicon-attribution.md)
 
 option(LLAVON_IME_ENGINE_BUILD_TESTS "Build llavon-ime engine tests" ON)
 option(LLAVON_IME_REQUIRE_ATSPI "Fail configuration when the AT-SPI backend is unavailable" OFF)
@@ -45,7 +48,7 @@ if(NOT DEFINED LLAVON_IME_INSTALLED_MEMSCAN_PATH)
         CACHE FILEPATH "Installed memory probe helper used by the context fallback")
 endif()
 
-add_library(llavon_ime_engine STATIC src/llavon_ime_engine.cpp)
+add_library(llavon_ime_engine STATIC)
 set_target_properties(llavon_ime_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(llavon_ime_engine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -57,7 +60,8 @@ target_compile_definitions(llavon_ime_engine PRIVATE
     LLAVON_IME_INSTALLED_MODEL_PATH="${LLAVON_IME_INSTALLED_MODEL_PATH}"
     LLAVON_IME_INSTALLED_MEMSCAN_PATH="${LLAVON_IME_INSTALLED_MEMSCAN_PATH}"
 )
-target_compile_options(llavon_ime_engine PRIVATE -Wall -Wextra -Wpedantic)
+include(cmake/Warnings.cmake)
+llavon_ime_enable_warnings(llavon_ime_engine)
 if(LLAVON_IME_DEBUG)
     target_compile_definitions(llavon_ime_engine PRIVATE LLAVON_IME_DEBUG=1)
 endif()
@@ -81,6 +85,7 @@ target_sources(llavon_ime_engine PRIVATE src/config/config.cpp)
 target_sources(llavon_ime_engine PRIVATE src/config/config_schema.cpp)
 target_sources(llavon_ime_engine PRIVATE
     c_api/llavon_ime.cpp
+    src/host/host.cpp
     src/host/engine.cpp
     src/host/render_state.cpp
     src/text/utf.cpp
@@ -89,10 +94,12 @@ target_sources(llavon_ime_engine PRIVATE
     src/bopomofo/table_engine.cpp
     src/buffer/composition_buffer.cpp
     src/engine/fallback_engine.cpp
+    src/engine/pending_model_preview.cpp
     src/input/ascii_tokenizer.cpp
     src/input/keypad.cpp
     src/input/input_processor.cpp
     src/input/mixed_input_decoder.cpp
+    src/input/mixed_lexicon.cpp
     src/input/punctuation.cpp
     src/protocol/protocol.cpp
     src/symbol/symbol_menu.cpp
@@ -123,7 +130,7 @@ endif()
 if(ATSPI_FOUND AND ATSPI_LINK_FOUND AND NOT WIN32 AND NOT APPLE)
     add_executable(atspi_probe tools/atspi_probe.cpp)
     target_link_libraries(atspi_probe PRIVATE PkgConfig::ATSPI_LINK llavon_ime_engine)
-    target_compile_options(atspi_probe PRIVATE -Wall -Wextra)
+    llavon_ime_enable_warnings(atspi_probe)
     install(TARGETS atspi_probe RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 elseif(PkgConfig_FOUND AND NOT WIN32)
     message(STATUS "atspi-2 not found; skipping atspi_probe tool")

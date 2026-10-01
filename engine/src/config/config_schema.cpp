@@ -1,4 +1,5 @@
 #include "config/config_schema.hpp"
+#include "util/parse_number.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -85,7 +86,11 @@ const std::vector<ConfigField>& config_fields() {
         // Keyboard and candidates.
         choice_field("keyboard_layout", "BopomofoKeyboardLayout", "注音鍵盤配置", "鍵盤與候選字",
                      &Config::keyboard_layout,
-                     {{"standard", "標準", {}}, {"hsu", "許氏", {"Hsu", "許氏鍵盤"}}}),
+                      {{"standard", "標準", {}}, {"hsu", "許氏", {"Hsu", "許氏鍵盤"}},
+                       {"ibm", "IBM", {"IBM鍵盤"}}, {"et", "倚天", {"ET", "ET41", "倚天41鍵"}},
+                       {"ginyieh", "精業", {"GinYieh", "精業鍵盤"}},
+                       {"et26", "倚天26鍵", {"ET26", "倚天26"}},
+                       {"dachen_cp26", "大千26鍵", {"DachenCP26", "大千26", "dc26"}}}),
         choice_field("selection_keys", "SelectionKeys", "候選選字鍵", "鍵盤與候選字", &Config::selection_keys,
                      {{"1234567890", "數字鍵", {"123456789"}},
                       {"asdfghjkl", "本位列", {}},
@@ -125,45 +130,34 @@ const std::vector<ConfigField>& config_fields() {
 }
 
 ConfigValue config_field_value(const Config& config, const ConfigField& field) {
-    ConfigValue value;
-    std::visit(
-        [&](auto member) {
-            using Member = decltype(member);
-            if constexpr (std::is_same_v<Member, bool Config::*>) {
-                value.boolean = config.*member;
-            } else if constexpr (std::is_same_v<Member, int Config::*>) {
-                value.integer = config.*member;
-            } else {
-                value.text = config.*member;
-            }
-        },
-        field.member);
-    return value;
+    return std::visit([&](auto member) -> ConfigValue { return config.*member; }, field.member);
 }
 
 bool set_config_field_value(Config& config, const ConfigField& field, const ConfigValue& value) {
     switch (field.kind) {
         case ConfigValueKind::Boolean:
-            if (const auto* member = std::get_if<bool Config::*>(&field.member)) {
-                config.*(*member) = value.boolean;
+            if (const auto* member = std::get_if<bool Config::*>(&field.member); member && std::holds_alternative<bool>(value)) {
+                config.*(*member) = std::get<bool>(value);
                 return true;
             }
             return false;
         case ConfigValueKind::Integer:
-            if (value.integer < field.minimum || value.integer > field.maximum) return false;
+            if (!std::holds_alternative<int>(value)) return false;
+            if (std::get<int>(value) < field.minimum || std::get<int>(value) > field.maximum) return false;
             if (const auto* member = std::get_if<int Config::*>(&field.member)) {
-                config.*(*member) = value.integer;
+                config.*(*member) = std::get<int>(value);
                 return true;
             }
             return false;
         case ConfigValueKind::Text:
-            if (const auto* member = std::get_if<std::string Config::*>(&field.member)) {
-                config.*(*member) = value.text;
+            if (const auto* member = std::get_if<std::string Config::*>(&field.member); member && std::holds_alternative<std::string>(value)) {
+                config.*(*member) = std::get<std::string>(value);
                 return true;
             }
             return false;
         case ConfigValueKind::Choice: {
-            const auto canonical = canonical_choice(field, value.text);
+            if (!std::holds_alternative<std::string>(value)) return false;
+            const auto canonical = canonical_choice(field, std::get<std::string>(value));
             const auto* member = std::get_if<std::string Config::*>(&field.member);
             if (!canonical || member == nullptr) return false;
             config.*(*member) = *canonical;
@@ -207,27 +201,20 @@ std::string choice_label(const ConfigField& field, std::string_view value) {
 std::optional<ConfigValue> config_value_from_ini(const ConfigField& field, const std::string& value) {
     switch (field.kind) {
         case ConfigValueKind::Boolean:
-            if (value == "True" || value == "true" || value == "1") return ConfigValue{.boolean = true};
-            if (value == "False" || value == "false" || value == "0") return ConfigValue{.boolean = false};
+            if (value == "True" || value == "true" || value == "1") return ConfigValue{true};
+            if (value == "False" || value == "false" || value == "0") return ConfigValue{false};
             return std::nullopt;
         case ConfigValueKind::Integer: {
-            try {
-                size_t parsed = 0;
-                const int integer = std::stoi(value, &parsed);
-                if (parsed != value.size() || integer < field.minimum || integer > field.maximum) {
-                    return std::nullopt;
-                }
-                return ConfigValue{.integer = integer};
-            } catch (...) {
-                return std::nullopt;
-            }
+            const auto integer = parse_decimal<int>(value);
+            if (!integer || *integer < field.minimum || *integer > field.maximum) return std::nullopt;
+            return ConfigValue{*integer};
         }
         case ConfigValueKind::Text:
-            return ConfigValue{.text = value};
+            return ConfigValue{value};
         case ConfigValueKind::Choice: {
             const auto canonical = canonical_choice(field, value);
             if (!canonical) return std::nullopt;
-            return ConfigValue{.text = *canonical};
+            return ConfigValue{*canonical};
         }
     }
     return std::nullopt;
@@ -246,21 +233,21 @@ nlohmann::json config_schema_json() {
         switch (field.kind) {
             case ConfigValueKind::Boolean:
                 entry["kind"] = "boolean";
-                entry["default"] = default_value.boolean;
+                entry["default"] = std::get<bool>(default_value);
                 break;
             case ConfigValueKind::Integer:
                 entry["kind"] = "integer";
                 entry["minimum"] = field.minimum;
                 entry["maximum"] = field.maximum;
-                entry["default"] = default_value.integer;
+                entry["default"] = std::get<int>(default_value);
                 break;
             case ConfigValueKind::Text:
                 entry["kind"] = "text";
-                entry["default"] = default_value.text;
+                entry["default"] = std::get<std::string>(default_value);
                 break;
             case ConfigValueKind::Choice: {
                 entry["kind"] = "choice";
-                entry["default"] = default_value.text;
+                entry["default"] = std::get<std::string>(default_value);
                 nlohmann::json choices = nlohmann::json::array();
                 for (const auto& choice : field.choices) {
                     choices.push_back({{"value", choice.value}, {"label", choice.label}});

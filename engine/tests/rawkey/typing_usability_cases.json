@@ -1,0 +1,67 @@
+{
+  "articles": [
+    {
+      "id": "weekend-diary", "category": "chinese", "title": "週末日記",
+      "clauses": [
+        {"parts":[{"text":"今天早上我和朋友一起去公園散步","readings":"ㄐㄧㄣ|ㄊㄧㄢ|ㄗㄠˇ|ㄕㄤˋ|ㄨㄛˇ|ㄏㄢˋ|ㄆㄥˊ|ㄧㄡˇ|ㄧˋ|ㄑㄧˇ|ㄑㄩˋ|ㄍㄨㄥ|ㄩㄢˊ|ㄙㄢˋ|ㄅㄨˋ"}],"punctuation":"，"},
+        {"parts":[{"text":"天氣很好","readings":"ㄊㄧㄢ|ㄑㄧˋ|ㄏㄣˇ|ㄏㄠˇ"}],"punctuation":"，"},
+        {"parts":[{"text":"但是路上有一點冷","readings":"ㄉㄢˋ|ㄕˋ|ㄌㄨˋ|ㄕㄤˋ|ㄧㄡˇ|ㄧˋ|ㄉㄧㄢˇ|ㄌㄥˇ"}],"punctuation":"。"},
+        {"parts":[{"text":"走累了以後","readings":"ㄗㄡˇ|ㄌㄟˋ|ㄌㄜ˙|ㄧˇ|ㄏㄡˋ"}],"punctuation":"，"},
+        {"parts":[{"text":"我們找了一家咖啡店休息","readings":"ㄨㄛˇ|ㄇㄣ˙|ㄓㄠˇ|ㄌㄜ˙|ㄧˋ|ㄐㄧㄚ|ㄎㄚ|ㄈㄟ|ㄉㄧㄢˋ|ㄒㄧㄡ|ㄒㄧˊ"}],"punctuation":"。"},
+        {"parts":[{"text":"下午回家整理房間","readings":"ㄒㄧㄚˋ|ㄨˇ|ㄏㄨㄟˊ|ㄐㄧㄚ|ㄓㄥˇ|ㄌㄧˇ|ㄈㄤˊ|ㄐㄧㄢ"}],"punctuation":"，"},
+        {"parts":[{"text":"順便準備明天的工作","readings":"ㄕㄨㄣˋ|ㄅㄧㄢˋ|ㄓㄨㄣˇ|ㄅㄟˋ|ㄇㄧㄥˊ|ㄊㄧㄢ|ㄉㄜ˙|ㄍㄨㄥ|ㄗㄨㄛˋ"}],"punctuation":"。"}
+      ]
+    },
+    {
+      "id": "learning-essay", "category": "chinese", "title": "學習心得",
+      "clauses": [
+        {"parts":[{"text":"最近我開始練習每天寫一篇文章","readings":"ㄗㄨㄟˋ|ㄐㄧㄣˋ|ㄨㄛˇ|ㄎㄞ|ㄕˇ|ㄌㄧㄢˋ|ㄒㄧˊ|ㄇㄟˇ|ㄊㄧㄢ|ㄒㄧㄝˇ|ㄧˋ|ㄆㄧㄢ|ㄨㄣˊ|ㄓㄤ"}],"punctuation":"。"},
+        {"parts":[{"text":"剛開始的時候","readings":"ㄍㄤ|ㄎㄞ|ㄕˇ|ㄉㄜ˙|ㄕˊ|ㄏㄡˋ"}],"punctuation":"，"},
+        {"parts":[{"text":"常常不知道應該怎麼表達自己的想法","readings":"ㄔㄤˊ|ㄔㄤˊ|ㄅㄨˋ|ㄓ|ㄉㄠˋ|ㄧㄥ|ㄍㄞ|ㄗㄣˇ|ㄇㄜ˙|ㄅㄧㄠˇ|ㄉㄚˊ|ㄗˋ|ㄐㄧˇ|ㄉㄜ˙|ㄒㄧㄤˇ|ㄈㄚˇ"}],"punctuation":"。"},
+        {"parts":[{"text":"後來我發現","readings":"ㄏㄡˋ|ㄌㄞˊ|ㄨㄛˇ|ㄈㄚ|ㄒㄧㄢˋ"}],"punctuation":"，"},
+        {"parts":[{"text":"先把重點記下來再慢慢修改","readings":"ㄒㄧㄢ|ㄅㄚˇ|ㄓㄨㄥˋ|ㄉㄧㄢˇ|ㄐㄧˋ|ㄒㄧㄚˋ|ㄌㄞˊ|ㄗㄞˋ|ㄇㄢˋ|ㄇㄢˋ|ㄒㄧㄡ|ㄍㄞˇ"}],"punctuation":"，"},
+        {"parts":[{"text":"就能讓內容變得更清楚","readings":"ㄐㄧㄡˋ|ㄋㄥˊ|ㄖㄤˋ|ㄋㄟˋ|ㄖㄨㄥˊ|ㄅㄧㄢˋ|ㄉㄜ˙|ㄍㄥˋ|ㄑㄧㄥ|ㄔㄨˇ"}],"punctuation":"。"}
+      ]
+    },
+    {
+      "id": "work-update", "category": "mixed", "title": "工作進度更新",
+      "clauses": [
+        {"parts":[{"text":"今天的","readings":"ㄐㄧㄣ|ㄊㄧㄢ|ㄉㄜ˙"},{"text":"meeting"},{"text":"主要討論新的","readings":"ㄓㄨˇ|ㄧㄠˋ|ㄊㄠˇ|ㄌㄨㄣˋ|ㄒㄧㄣ|ㄉㄜ˙"},{"text":"api"}],"punctuation":"。"},
+        {"parts":[{"text":"我用","readings":"ㄨㄛˇ|ㄩㄥˋ"},{"text":"python"},{"text":"寫了一個小程式","readings":"ㄒㄧㄝˇ|ㄌㄜ˙|ㄧˊ|ㄍㄜˋ|ㄒㄧㄠˇ|ㄔㄥˊ|ㄕˋ"}],"punctuation":"，"},
+        {"parts":[{"text":"把","readings":"ㄅㄚˇ"},{"text":"json"},{"text":"資料存進","readings":"ㄗ|ㄌㄧㄠˋ|ㄘㄨㄣˊ|ㄐㄧㄣˋ"},{"text":"postgresql"}],"punctuation":"。"},
+        {"parts":[{"text":"目前還有","readings":"ㄇㄨˋ|ㄑㄧㄢˊ|ㄏㄞˊ|ㄧㄡˇ"},{"text":"3"},{"text":"個","readings":"ㄍㄜˋ"},{"text":"bug"},{"text":"需要修正","readings":"ㄒㄩ|ㄧㄠˋ|ㄒㄧㄡ|ㄓㄥˋ"}],"punctuation":"，"},
+        {"parts":[{"text":"預計星期五完成","readings":"ㄩˋ|ㄐㄧˋ|ㄒㄧㄥ|ㄑㄧˊ|ㄨˇ|ㄨㄢˊ|ㄔㄥˊ"},{"text":"testing"}],"punctuation":"。"},
+        {"parts":[{"text":"測試報告請寄到","readings":"ㄘㄜˋ|ㄕˋ|ㄅㄠˋ|ㄍㄠˋ|ㄑㄧㄥˇ|ㄐㄧˋ|ㄉㄠˋ"},{"text":"dev@example.com"}],"punctuation":"。"}
+      ]
+    },
+    {
+      "id": "technical-chat", "category": "mixed", "title": "技術討論與英文大小寫",
+      "clauses": [
+        {"parts":[{"text":"我剛更新了","readings":"ㄨㄛˇ|ㄍㄤ|ㄍㄥ|ㄒㄧㄣ|ㄌㄜ˙"},{"text":"GitHub"},{"text":"上的","readings":"ㄕㄤˋ|ㄉㄜ˙"},{"text":"README.md"}],"punctuation":"。"},
+        {"parts":[{"text":"請先執行","readings":"ㄑㄧㄥˇ|ㄒㄧㄢ|ㄓˊ|ㄒㄧㄥˊ"},{"text":"npm install"}],"punctuation":"，"},
+        {"parts":[{"text":"再確認","readings":"ㄗㄞˋ|ㄑㄩㄝˋ|ㄖㄣˋ"},{"text":"WebSocket"},{"text":"連線是否正常","readings":"ㄌㄧㄢˊ|ㄒㄧㄢˋ|ㄕˋ|ㄈㄡˇ|ㄓㄥˋ|ㄔㄤˊ"}],"punctuation":"。"},
+        {"parts":[{"text":"如果看到","readings":"ㄖㄨˊ|ㄍㄨㄛˇ|ㄎㄢˋ|ㄉㄠˋ"},{"text":"permission denied"}],"punctuation":"，"},
+        {"parts":[{"text":"可以參考","readings":"ㄎㄜˇ|ㄧˇ|ㄘㄢ|ㄎㄠˇ"},{"text":"https://example.org/docs?v=2"}],"punctuation":"。"},
+        {"parts":[{"text":"我的測試帳號是","readings":"ㄨㄛˇ|ㄉㄜ˙|ㄘㄜˋ|ㄕˋ|ㄓㄤˋ|ㄏㄠˋ|ㄕˋ"},{"text":"user_name42"}],"punctuation":"，"},
+        {"parts":[{"text":"版本是","readings":"ㄅㄢˇ|ㄅㄣˇ|ㄕˋ"},{"text":"v2.1.0"}],"punctuation":"。"}
+      ]
+    }
+  ],
+  "edit_workflows": [
+    {"id":"english-missing-letter","expected":"hello","steps":[{"type":"helo"},{"key":"Left"},{"type":"l"},{"key":"Return"}]},
+    {"id":"english-transposition","expected":"the","steps":[{"type":"teh"},{"key":"BackSpace"},{"key":"BackSpace"},{"type":"he"},{"key":"Return"}]},
+    {"id":"english-middle-delete","expected":"hello world","steps":[{"type":"hello xworld"},{"key":"Left","repeat":5},{"key":"BackSpace"},{"key":"Right","repeat":5},{"key":"Return"}]},
+    {"id":"wrong-tone-immediate","expected":"你好","steps":[{"zh":"你號","readings":"ㄋㄧˇ|ㄏㄠˋ"},{"key":"Shift+BackSpace"},{"tone":"third"},{"key":"Return"}]},
+    {"id":"chinese-middle-delete","expected":"你好","steps":[{"zh":"你號","readings":"ㄋㄧˇ|ㄏㄠˋ"},{"key":"Left"},{"key":"Delete"},{"zh":"好","readings":"ㄏㄠˇ"},{"key":"Return"}]},
+    {"id":"retype-after-commit","expected":"你好","steps":[{"zh":"你","readings":"ㄋㄧˇ"},{"key":"Return"},{"key":"BackSpace"},{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"key":"Return"}]},
+    {"id":"candidate-open-cancel-edit","expected":"你好","steps":[{"zh":"你","readings":"ㄋㄧˇ"},{"key":"Down"},{"key":"Escape"},{"key":"Shift+BackSpace"},{"tone":"third"},{"zh":"好","readings":"ㄏㄠˇ"},{"key":"Return"}]},
+    {"id":"manual-choice-then-mixed","expected":"你hello","steps":[{"zh":"你","readings":"ㄋㄧˇ"},{"key":"Down"},{"choose":"你"},{"type":"hello"},{"key":"Return"}]},
+    {"id":"escape-then-retype","expected":"你好","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"key":"Escape","repeat":2},{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"key":"Return"}]},
+    {"id":"extra-space-then-backspace","expected":"hello world","steps":[{"type":"hello  "},{"key":"BackSpace"},{"type":"world"},{"key":"Return"}]},
+    {"id":"wrong-key-next-to-tone","expected":"你好","steps":[{"zh":"你","readings":"ㄋㄧˇ"},{"type":"x"},{"key":"BackSpace"},{"zh":"好","readings":"ㄏㄠˇ"},{"key":"Return"}]},
+    {"id":"caps-lock-accident","expected":"hello","steps":[{"type":"he"},{"caps_type":"L"},{"key":"BackSpace"},{"type":"llo"},{"key":"Return"}]},
+    {"id":"uppercase-english","expected":"GitHub README.md WebSocket","steps":[{"type":"GitHub README.md WebSocket"},{"key":"Return"}]},
+    {"id":"first-tone-space-repair","expected":"今天","steps":[{"zh":"今天","readings":"ㄐㄧㄣ|ㄊㄧㄢ"},{"key":"Shift+BackSpace"},{"key":"space"},{"key":"Return"}]},
+    {"id":"focus-switch-mid-compose","expected":"hello你好","steps":[{"type":"hello"},{"zh":"你","readings":"ㄋㄧˇ"},{"focus_out":true},{"activate":true},{"zh":"好","readings":"ㄏㄠˇ"},{"key":"Return"}]}
+  ]
+}

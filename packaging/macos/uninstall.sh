@@ -66,11 +66,12 @@ if [ -n "${user_home}" ]; then
         "${target_root}/bin/llavon-ime-unix-service" \
         "${target_root}/bin/llavon-ime-lora" \
         "${target_root}/bin/llavon-ime-lora-gui" \
+        "${target_root}/bin/llavon-ime-lora-backend" \
         "${target_root}/lib/fcitx5/llavon-ime-addon.so" \
         "${target_root}/share/fcitx5/addon/llavon-ime.conf" \
         "${target_root}/share/fcitx5/inputmethod/llavon-ime.conf" \
         "${target_root}/plugin/llavon-ime.json"
-    rm -rf "${target_root}/share/llavon-ime/tables" "${target_root}/lib/llavon-ime/tools"
+    rm -rf "${target_root}/share/llavon-ime/tables" "${target_root}/lib/llavon-ime/tools" "${target_root}/bin/llavon-ime-lora-gui.app"
     find "${target_root}" -name '._*' -delete 2>/dev/null || true
 fi
 

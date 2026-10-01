@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=拉風設定與個人化
+Name[en]=Llavon Settings and Personalization
+Comment=Configure the input method, phrases and personalized models
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/llavon-ime-lora-gui
+Icon=llavon-ime
+Terminal=false
+Categories=Settings;Utility;

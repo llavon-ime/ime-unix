@@ -1,0 +1,34 @@
+{
+  "extends": "model_workflow_cases.json",
+  "articles": [
+    {"id":"account-boundaries","category":"mixed","title":"帳號與聯絡資訊連續輸入","clauses":[
+      {"parts":[{"text":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"text":"user_name42"}],"punctuation":"，"},
+      {"parts":[{"text":"請寄到","readings":"ㄑㄧㄥˇ|ㄐㄧˋ|ㄉㄠˋ"},{"text":"dev@example.com"}],"punctuation":"。"},
+      {"parts":[{"text":"我的帳號是","readings":"ㄨㄛˇ|ㄉㄜ˙|ㄓㄤˋ|ㄏㄠˋ|ㄕˋ"},{"text":"report_2026"}],"punctuation":"，"},
+      {"parts":[{"text":"你的網址是","readings":"ㄋㄧˇ|ㄉㄜ˙|ㄨㄤˇ|ㄓˇ|ㄕˋ"},{"text":"https://example.org/docs?v=2"}],"punctuation":"。"}
+    ]},
+    {"id":"structured-roundtrip","category":"mixed","title":"識別字與中文往返","clauses":[
+      {"parts":[{"text":"我用","readings":"ㄨㄛˇ|ㄩㄥˋ"},{"text":"snake_case"},{"text":"命名","readings":"ㄇㄧㄥˋ|ㄇㄧㄥˊ"}],"punctuation":"。"},
+      {"parts":[{"text":"你的","readings":"ㄋㄧˇ|ㄉㄜ˙"},{"text":"example.org"},{"text":"可以開啟","readings":"ㄎㄜˇ|ㄧˇ|ㄎㄞ|ㄑㄧˇ"}],"punctuation":"，"},
+      {"parts":[{"text":"請用","readings":"ㄑㄧㄥˇ|ㄩㄥˋ"},{"text":"user_2026_name"},{"text":"登入","readings":"ㄉㄥ|ㄖㄨˋ"}],"punctuation":"。"},
+      {"parts":[{"text":"我會寄到","readings":"ㄨㄛˇ|ㄏㄨㄟˋ|ㄐㄧˋ|ㄉㄠˋ"},{"text":"admin@example.net"}],"punctuation":"。"}
+    ]}
+  ],
+  "edit_workflows": [
+    {"id":"zh-identifier","expected":"你好user_name42","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"user_name42"},{"key":"Return"}]},
+    {"id":"zh-email","expected":"你好dev@example.com","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"dev@example.com"},{"key":"Return"}]},
+    {"id":"zh-url","expected":"你好https://example.org/docs?v=2","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"https://example.org/docs?v=2"},{"key":"Return"}]},
+    {"id":"zh-domain","expected":"你好example.org","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"example.org"},{"key":"Return"}]},
+    {"id":"zh-unknown-identifier","expected":"你好florpington_name42","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"florpington_name42"},{"key":"Return"}]},
+    {"id":"email-edit-local","expected":"你好dev@example.com","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"dev@example.con"},{"key":"BackSpace"},{"type":"m"},{"key":"Return"}]},
+    {"id":"identifier-delete-restore","expected":"你好user_name42","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"user_name42"},{"key":"BackSpace","repeat":7},{"type":"_name42"},{"key":"Return"}]},
+    {"id":"identifier-to-english","expected":"你好username","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"user_name42"},{"key":"BackSpace","repeat":7},{"type":"name"},{"key":"Return"}]},
+    {"id":"literal-short-stems","expected":"a_b a@example.com z@example.net","steps":[{"type":"a_b a@example.com z@example.net"},{"key":"Return"}]},
+    {"id":"literal-unknown-stems","expected":"florpington_name42 qwerty@example.org xylophonic.org","steps":[{"type":"florpington_name42 qwerty@example.org xylophonic.org"},{"key":"Return"}]},
+    {"id":"literal-alphanumeric-stems","expected":"abc123_foo x86_64 mp3_file","steps":[{"type":"abc123_foo x86_64 mp3_file"},{"key":"Return"}]},
+    {"id":"literal-url-scheme","expected":"custom+v2://host/path","steps":[{"type":"custom+v2://host/path"},{"key":"Return"}]},
+    {"id":"literal-double-underscore","expected":"__private_name user_2026_name","steps":[{"type":"__private_name user_2026_name"},{"key":"Return"}]},
+    {"id":"zh-identifier-focus","expected":"你好user_name42","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"user_name42"},{"focus_out":true}]},
+    {"id":"zh-identifier-cancel","expected":"hello","steps":[{"zh":"你好","readings":"ㄋㄧˇ|ㄏㄠˇ"},{"type":"user_name42"},{"key":"Escape","repeat":2},{"type":"hello"},{"key":"Return"}]}
+  ]
+}

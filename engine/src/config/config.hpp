@@ -24,9 +24,13 @@ struct Config {
     // CapsLock on still inputs bopomofo (MS IME style).
     bool caps_lock_inputs_bopomofo = true;
     std::string shift_letter_keys = "directly_output_uppercase";
-    // Smart Chinese-English: lowercase letters are held raw as a pending word
-    // until a tone key or space decides whether they were 注音 or English.
+    // Smart Chinese-English keeps reversible raw keys while the decoder ranks
+    // English and 注音 interpretations for the current preview.
     bool smart_english = false;
+    // Internal test/probe control, not a persisted user setting. Production
+    // smart English automatically refines complete readings without waiting
+    // for punctuation; old JSON/INI preview toggles are ignored by the schema.
+    bool smart_model_preview = true;
     // Last-resort context source: probe the focused application's memory for a
     // token the engine inserts at the caret. Needs an external helper with
     // CAP_SYS_PTRACE (or kernel.yama.ptrace_scope=0).

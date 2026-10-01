@@ -17,7 +17,7 @@ RAWKEY_SUITE("smart mixed", engine_test_smart_mixed) {
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("hello");
         RAWKEY_ASSERT(harness.preedit() == "你hello");
-        harness.expect_direct_commit("你hello ", Key(" "));
+        harness.expect_space_then_commit("你hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -28,7 +28,7 @@ RAWKEY_SUITE("smart mixed", engine_test_smart_mixed) {
         harness.set_config("SmartEnglish", "True");
         harness.type("hi");
         RAWKEY_ASSERT(harness.preedit() == "hi");
-        harness.expect_direct_commit("hi ", Key(" "));
+        harness.expect_space_then_commit("hi ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("cl3");
         RAWKEY_ASSERT(harness.preedit() == "好");
@@ -45,7 +45,7 @@ RAWKEY_SUITE("smart mixed", engine_test_smart_mixed) {
         RAWKEY_ASSERT(harness.preedit() == "我會");
         harness.type("today");
         RAWKEY_ASSERT(harness.preedit() == "我會today");
-        harness.expect_direct_commit("我會today ", Key(" "));
+        harness.expect_space_then_commit("我會today ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -65,7 +65,7 @@ RAWKEY_SUITE("smart mixed", engine_test_smart_mixed) {
         RAWKEY_ASSERT(harness.preedit() == "今天");
         harness.type("bye");
         RAWKEY_ASSERT(harness.preedit() == "今天bye");
-        harness.expect_direct_commit("今天bye ", Key(" "));
+        harness.expect_space_then_commit("今天bye ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -79,7 +79,7 @@ RAWKEY_SUITE("smart mixed", engine_test_smart_mixed) {
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("so");
         RAWKEY_ASSERT(harness.preedit() == "你so");
-        harness.expect_direct_commit("你so ", Key(" "));
+        harness.expect_space_then_commit("你so ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("cl3");
         RAWKEY_ASSERT(harness.preedit() == "好");
@@ -121,7 +121,7 @@ RAWKEY_SUITE("smart mixed", engine_test_smart_mixed) {
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("hi");
         RAWKEY_ASSERT(harness.preedit() == "你hi");
-        harness.expect_direct_commit("你hi ", Key(" "));
+        harness.expect_space_then_commit("你hi ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("vu84");
         RAWKEY_ASSERT(harness.preedit() == "下");

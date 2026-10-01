@@ -1,0 +1,17 @@
+{
+  "articles": [],
+  "edit_workflows": [
+    {"id":"doctor","expected":"醫生正在看診","steps":[{"zh":"醫生正在看診","readings":"ㄧ|ㄕㄥ|ㄓㄥˋ|ㄗㄞˋ|ㄎㄢˋ|ㄓㄣˇ"},{"key":"Return"}]},
+    {"id":"poet","expected":"詩人寫了一首詩","steps":[{"zh":"詩人寫了一首詩","readings":"ㄕ|ㄖㄣˊ|ㄒㄧㄝˇ|ㄌㄜ˙|ㄧˋ|ㄕㄡˇ|ㄕ"},{"key":"Return"}]},
+    {"id":"meal","expected":"吃飯以後去公司","steps":[{"zh":"吃飯以後去公司","readings":"ㄔ|ㄈㄢˋ|ㄧˇ|ㄏㄡˋ|ㄑㄩˋ|ㄍㄨㄥ|ㄙ"},{"key":"Return"}]},
+    {"id":"fund","expected":"資金已經到位","steps":[{"zh":"資金已經到位","readings":"ㄗ|ㄐㄧㄣ|ㄧˇ|ㄐㄧㄥ|ㄉㄠˋ|ㄨㄟˋ"},{"key":"Return"}]},
+    {"id":"spider","expected":"蜘蛛躲在角落","steps":[{"zh":"蜘蛛躲在角落","readings":"ㄓ|ㄓㄨ|ㄉㄨㄛˇ|ㄗㄞˋ|ㄐㄧㄠˇ|ㄌㄨㄛˋ"},{"key":"Return"}]},
+    {"id":"turtle","expected":"烏龜慢慢走","steps":[{"zh":"烏龜慢慢走","readings":"ㄨ|ㄍㄨㄟ|ㄇㄢˋ|ㄇㄢˋ|ㄗㄡˇ"},{"key":"Return"}]},
+    {"id":"lion","expected":"獅子正在睡覺","steps":[{"zh":"獅子正在睡覺","readings":"ㄕ|ㄗ˙|ㄓㄥˋ|ㄗㄞˋ|ㄕㄨㄟˋ|ㄐㄧㄠˋ"},{"key":"Return"}]},
+    {"id":"knowledge","expected":"知識需要累積","steps":[{"zh":"知識需要累積","readings":"ㄓ|ㄕˋ|ㄒㄩ|ㄧㄠˋ|ㄌㄟˇ|ㄐㄧ"},{"key":"Return"}]},
+    {"id":"teacher-meal","expected":"老師請大家吃飯","steps":[{"zh":"老師請大家吃飯","readings":"ㄌㄠˇ|ㄕ|ㄑㄧㄥˇ|ㄉㄚˋ|ㄐㄧㄚ|ㄔ|ㄈㄢˋ"},{"key":"Return"}]},
+    {"id":"company-news","expected":"公司公布最新消息","steps":[{"zh":"公司公布最新消息","readings":"ㄍㄨㄥ|ㄙ|ㄍㄨㄥ|ㄅㄨˋ|ㄗㄨㄟˋ|ㄒㄧㄣ|ㄒㄧㄠ|ㄒㄧˊ"},{"key":"Return"}]},
+    {"id":"senior","expected":"師兄正在練習","steps":[{"zh":"師兄正在練習","readings":"ㄕ|ㄒㄩㄥ|ㄓㄥˋ|ㄗㄞˋ|ㄌㄧㄢˋ|ㄒㄧˊ"},{"key":"Return"}]},
+    {"id":"clinic","expected":"醫院需要新的設備","steps":[{"zh":"醫院需要新的設備","readings":"ㄧ|ㄩㄢˋ|ㄒㄩ|ㄧㄠˋ|ㄒㄧㄣ|ㄉㄜ˙|ㄕㄜˋ|ㄅㄟˋ"},{"key":"Return"}]}
+  ]
+}

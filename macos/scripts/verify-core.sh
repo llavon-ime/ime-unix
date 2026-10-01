@@ -45,7 +45,7 @@ swiftc -O -parse-as-library \
     "${ROOT_DIR}"/macos/Core/KeyTranslation.swift \
     "${ROOT_DIR}"/macos/Core/RenderSnapshot.swift \
     "${ROOT_DIR}"/macos/Core/CandidatePageWindow.swift \
-    "${ROOT_DIR}"/macos/Core/EngineConfig.swift \
+    "${ROOT_DIR}"/macos/Core/ConfigJSON.swift \
     "${ROOT_DIR}"/macos/Core/EngineCore.swift \
     "${ROOT_DIR}"/macos/Tests/CoreTests.swift \
     "${BUILD_DIR}/engine/libllavon_ime_engine.a" \

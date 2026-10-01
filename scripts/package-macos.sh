@@ -19,6 +19,7 @@ export COPYFILE_DISABLE=1
 #   LLAVON_IME_VCPKG_FEATURES     service vcpkg features (default llama-metal)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/macos/scripts/sparkle-config.sh"
 APP_NAME="LlavonIME"
 BUNDLE_ID="${LLAVON_IME_BUNDLE_ID:-com.llavon.inputmethod.LlavonIME}"
 VERSION="${LLAVON_IME_VERSION:-0.2.1}"
@@ -193,7 +194,8 @@ find "${PKGROOT}" -name '._*' -delete
 # with it.
 if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
     echo "Signing with Developer ID Application: ${DEVELOPER_ID_APPLICATION}"
-    codesign --force --deep --timestamp --options runtime \
+    sign_sparkle "${app_root}/${APP_NAME}.app/Contents/Frameworks/Sparkle.framework" "${DEVELOPER_ID_APPLICATION}"
+    codesign --force --timestamp --options runtime \
         --sign "${DEVELOPER_ID_APPLICATION}" \
         "${app_root}/${APP_NAME}.app"
     codesign --force --timestamp --options runtime \
@@ -202,17 +204,22 @@ if [[ -n "${DEVELOPER_ID_APPLICATION:-}" ]]; then
     codesign --force --timestamp --options runtime \
         --sign "${DEVELOPER_ID_APPLICATION}" \
         "${payload_root}/bin/llavon-ime-lora"
+    codesign --force --deep --timestamp --options runtime \
+        --sign "${DEVELOPER_ID_APPLICATION}" \
+        "${payload_root}/bin/llavon-ime-lora-gui.app"
     codesign --force --timestamp --options runtime \
         --sign "${DEVELOPER_ID_APPLICATION}" \
-        "${payload_root}/bin/llavon-ime-lora-gui"
+        "${payload_root}/bin/llavon-ime-lora-backend"
 else
     echo "No Developer ID Application identity; keeping the ad-hoc app signature."
     codesign --force --timestamp=none --sign - \
         "${payload_root}/bin/llavon-ime-unix-service"
     codesign --force --timestamp=none --sign - \
         "${payload_root}/bin/llavon-ime-lora"
+    codesign --force --deep --timestamp=none --sign - \
+        "${payload_root}/bin/llavon-ime-lora-gui.app"
     codesign --force --timestamp=none --sign - \
-        "${payload_root}/bin/llavon-ime-lora-gui"
+        "${payload_root}/bin/llavon-ime-lora-backend"
 fi
 
 required_files=(
@@ -221,6 +228,8 @@ required_files=(
     "${payload_root}/bin/llavon-ime-unix-service"
     "${payload_root}/bin/llavon-ime-lora"
     "${payload_root}/bin/llavon-ime-lora-gui"
+    "${payload_root}/bin/llavon-ime-lora-backend"
+    "${payload_root}/bin/llavon-ime-lora-gui.app/Contents/Info.plist"
     "${payload_root}/share/llavon-ime/tables/bopomofo_char.json"
     "${payload_root}/share/llavon-ime/tables/tokens/bpmf.json"
     "${payload_root}/share/llavon-ime/tables/tokens/chars.json"

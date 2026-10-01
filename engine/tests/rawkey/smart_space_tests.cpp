@@ -51,19 +51,20 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         harness.set_config("SmartEnglish", "True");
         harness.type("10");
         harness.key(Key(" "));
-        RAWKEY_ASSERT(harness.preedit() == "10");
+        RAWKEY_ASSERT(harness.preedit() == "班");
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "10");
-        RAWKEY_ASSERT(harness.candidate(1) == "班");
-        harness.expect_direct_commit("10 ", Key("1"));
+        RAWKEY_ASSERT(harness.candidate(0) == "班");
+        RAWKEY_ASSERT(harness.candidate(1) == "10 ");
+        harness.choose_text("10 ");
+        harness.expect_commit("10 ");
 }
     // English via space: word plus a trailing space.
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("hello");
-        harness.expect_direct_commit("hello ", Key(" "));
+        harness.expect_space_then_commit("hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     // English words that look bopomofo-ish still commit as English.
@@ -71,28 +72,28 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("no");
-        harness.expect_direct_commit("no ", Key(" "));
+        harness.expect_space_then_commit("no ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("go");
-        harness.expect_direct_commit("go ", Key(" "));
+        harness.expect_space_then_commit("go ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("so");
-        harness.expect_direct_commit("so ", Key(" "));
+        harness.expect_space_then_commit("so ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("do");
-        harness.expect_direct_commit("do ", Key(" "));
+        harness.expect_space_then_commit("do ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     // Single chars are ambiguous: English is the safe first candidate.
@@ -103,8 +104,8 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         harness.key(Key(" "));
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "a");
-        harness.expect_direct_commit("a ", Key("1"));
+        harness.choose_text("a ");
+        harness.expect_commit("a ");
 }
     {
         Harness harness;
@@ -113,8 +114,8 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         harness.key(Key(" "));
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "i");
-        harness.expect_direct_commit("i ", Key("1"));
+        harness.choose_text("i ");
+        harness.expect_commit("i ");
 }
     // Space commits the whole mixed composition.
     {
@@ -123,7 +124,7 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         harness.type("su3");
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("world");
-        harness.expect_direct_commit("你world ", Key(" "));
+        harness.expect_space_then_commit("你world ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     // First-tone sequence accumulates into one composition.
@@ -153,7 +154,7 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("hi");
-        harness.expect_direct_commit("hi ", Key(" "));
+        harness.expect_space_then_commit("hi ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("rup");
         harness.key(Key(" "));
@@ -164,7 +165,7 @@ RAWKEY_SUITE("smart space", engine_test_smart_space) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("meeting");
-        harness.expect_direct_commit("meeting ", Key(" "));
+        harness.expect_space_then_commit("meeting ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 }

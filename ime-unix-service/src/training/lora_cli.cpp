@@ -2,6 +2,7 @@
 #include "libtorch_cache.hpp"
 #include "lora_presets.hpp"
 #include "numeric_dataset.hpp"
+#include "sqlite.hpp"
 
 #include <nlohmann/json.hpp>
 #include <sqlite3.h>
@@ -190,44 +191,37 @@ fs::path installed_trainer(const fs::path& db_path) {
 
 class Database {
 public:
-    explicit Database(const fs::path& path) {
-        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
-            const std::string error = db_ ? sqlite3_errmsg(db_) : "cannot open training database";
-            sqlite3_close(db_); throw std::runtime_error(error);
-        }
-        sqlite3_busy_timeout(db_, 3000);
+    explicit Database(const fs::path& path)
+        : db_(ime::unix_service::sqlite::open(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX)) {
+        sqlite3_busy_timeout(db_.get(), 3000);
         exec("PRAGMA foreign_keys=ON");
-        ime::unix_service::initialize_commit_database(db_);
+        ime::unix_service::initialize_commit_database(db_.get());
     }
-    ~Database() { sqlite3_close(db_); }
-    sqlite3* get() const { return db_; }
+    sqlite3* get() const { return db_.get(); }
     void exec(const char* sql) {
-        if (sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db_));
+        if (sqlite3_exec(db_.get(), sql, nullptr, nullptr, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db_.get()));
     }
 private:
-    sqlite3* db_ = nullptr;
+    ime::unix_service::sqlite::Database db_;
 };
 
 class Statement {
 public:
-    Statement(sqlite3* db, const char* sql) : db_(db) {
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt_, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
-    }
-    ~Statement() { sqlite3_finalize(stmt_); }
+    Statement(sqlite3* db, const char* sql) : db_(db), stmt_(ime::unix_service::sqlite::prepare(db, sql)) {}
     void bind(int index, const std::string& value) {
-        if (sqlite3_bind_text(stmt_, index, value.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)
+        if (sqlite3_bind_text(stmt_.get(), index, value.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)
             throw std::runtime_error(sqlite3_errmsg(db_));
     }
     int next() {
-        const auto status = sqlite3_step(stmt_);
+        const auto status = sqlite3_step(stmt_.get());
         if (status != SQLITE_ROW && status != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db_));
         return status;
     }
-    const char* text(int index) const { return reinterpret_cast<const char*>(sqlite3_column_text(stmt_, index)); }
-    sqlite3_stmt* get() const { return stmt_; }
+    const char* text(int index) const { return reinterpret_cast<const char*>(sqlite3_column_text(stmt_.get(), index)); }
+    sqlite3_stmt* get() const { return stmt_.get(); }
 private:
     sqlite3* db_;
-    sqlite3_stmt* stmt_ = nullptr;
+    ime::unix_service::sqlite::Statement stmt_;
 };
 
 void run(const fs::path& program, const std::vector<std::string>& args) {

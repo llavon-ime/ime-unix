@@ -18,6 +18,8 @@
 #include <utility>
 
 #if defined(__linux__)
+#include "util/unique_fd.hpp"
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <poll.h>
@@ -32,6 +34,7 @@ namespace {
 constexpr std::size_t kAnchorUnits = 48;
 constexpr auto kFailurePause = std::chrono::seconds(2);
 constexpr std::size_t kMaxConsecutiveFailures = 3;
+#if defined(__linux__)
 // A missed scan is retried while the same preedit state is still current:
 // once for a slow client redraw, plus further attempts for a scan that ran
 // out of its byte or time budget and must resume.
@@ -53,7 +56,6 @@ int encoding_rank(std::string_view encoding) {
     return 8;
 }
 
-#if defined(__linux__)
 // One child per provider, owned by the IME. Only explicit same-UID target PIDs
 // are passed to it; it has no listener or shared/global service endpoint.
 class HelperProcess {
@@ -71,12 +73,12 @@ public:
         const std::string line = input.dump() + '\n';
         std::size_t offset = 0;
         while (offset < line.size()) {
-            pollfd descriptor{to_child_, POLLOUT, 0};
+            pollfd descriptor{to_child_.get(), POLLOUT, 0};
             if (::poll(&descriptor, 1, 300) <= 0 || !(descriptor.revents & POLLOUT)) {
                 close();
                 return std::nullopt;
             }
-            const ssize_t count = ::write(to_child_, line.data() + offset, line.size() - offset);
+            const ssize_t count = ::write(to_child_.get(), line.data() + offset, line.size() - offset);
             if (count < 0 && errno == EINTR) continue;
             if (count <= 0) {
                 close();
@@ -89,14 +91,14 @@ public:
         while (output.size() < 65536 && std::chrono::steady_clock::now() < deadline) {
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now());
-            pollfd descriptor{from_child_, POLLIN, 0};
+            pollfd descriptor{from_child_.get(), POLLIN, 0};
             const int ready = ::poll(&descriptor, 1, std::max(1, static_cast<int>(remaining.count())));
             if (ready < 0 && errno == EINTR) continue;
             if (ready <= 0 || !(descriptor.revents & POLLIN)) break;
-            char buffer[4096];
-            const ssize_t count = ::read(from_child_, buffer, sizeof(buffer));
+            std::array<char, 4096> buffer{};
+            const ssize_t count = ::read(from_child_.get(), buffer.data(), buffer.size());
             if (count <= 0) break;
-            output.append(buffer, static_cast<std::size_t>(count));
+            output.append(buffer.data(), static_cast<std::size_t>(count));
             if (const auto newline = output.find('\n'); newline != std::string::npos) {
                 auto parsed = nlohmann::json::parse(output.substr(0, newline), nullptr, false);
                 if (!parsed.is_discarded() && parsed.is_object()) return parsed;
@@ -108,9 +110,8 @@ public:
     }
 
     void close() {
-        if (to_child_ >= 0) ::close(to_child_);
-        if (from_child_ >= 0) ::close(from_child_);
-        to_child_ = from_child_ = -1;
+        to_child_.reset();
+        from_child_.reset();
         if (pid_ > 0) {
             ::kill(pid_, SIGKILL);
             int status = 0;
@@ -121,13 +122,11 @@ public:
 
 private:
     bool launch() {
-        int input[2], output[2];
-        if (::pipe(input) != 0) return false;
-        if (::pipe(output) != 0) {
-            ::close(input[0]);
-            ::close(input[1]);
-            return false;
-        }
+        std::array<int, 2> input{}, output{};
+        if (::pipe(input.data()) != 0) return false;
+        UniqueFd input_read(input[0]), input_write(input[1]);
+        if (::pipe(output.data()) != 0) return false;
+        UniqueFd output_read(output[0]), output_write(output[1]);
         const pid_t child = ::fork();
         if (child == 0) {
             ::close(input[1]);
@@ -139,16 +138,12 @@ private:
             ::execl(path_.c_str(), path_.c_str(), "--serve", nullptr);
             ::_exit(127);
         }
-        ::close(input[0]);
-        ::close(output[1]);
-        if (child < 0) {
-            ::close(input[1]);
-            ::close(output[0]);
-            return false;
-        }
+        input_read.reset();
+        output_write.reset();
+        if (child < 0) return false;
         pid_ = child;
-        to_child_ = input[1];
-        from_child_ = output[0];
+        to_child_ = std::move(input_write);
+        from_child_ = std::move(output_read);
         std::error_code mtime_error;
         launched_mtime_ = std::filesystem::last_write_time(path_, mtime_error);
         return true;
@@ -157,8 +152,8 @@ private:
     std::filesystem::path path_;
     std::filesystem::file_time_type launched_mtime_{};
     pid_t pid_ = -1;
-    int to_child_ = -1;
-    int from_child_ = -1;
+    UniqueFd to_child_;
+    UniqueFd from_child_;
 };
 #endif
 
@@ -418,18 +413,22 @@ private:
 #endif
         for (;;) {
             Job job;
+#if defined(__linux__)
             int hint_pid = 0;
             std::uintptr_t hint_address = 0;
             std::string hint_before;
+#endif
             {
                 std::unique_lock lock(mutex_);
                 condition_.wait(lock, [this] { return stopping_ || pending_.has_value(); });
                 if (stopping_) return;
                 job = std::move(*pending_);
                 pending_.reset();
+#if defined(__linux__)
                 hint_pid = hint_pid_;
                 hint_address = hint_address_;
                 hint_before = hint_before_;
+#endif
             }
 #if defined(__linux__)
             if (job.prime) {

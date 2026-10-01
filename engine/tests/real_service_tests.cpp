@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #ifndef _WIN32
 
 #include "config/config.hpp"

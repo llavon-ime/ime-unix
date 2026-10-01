@@ -18,6 +18,10 @@ Requires:       xdg-utils
 Requires:       curl
 Requires:       tar
 Requires:       coreutils
+Requires:       qt6-qtbase-gui
+Requires:       qt6-qtwayland
+Recommends:     PackageKit
+Recommends:     polkit
 Provides:       bundled(brotli)
 Provides:       bundled(cpp-httplib)
 Provides:       bundled(ctre)

@@ -1,4 +1,5 @@
 #include "ipc/unix_socket.hpp"
+#include "util/unique_fd.hpp"
 
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -29,7 +30,7 @@ sockaddr_un make_address(const std::filesystem::path& path) {
     return address;
 }
 
-void throw_errno(const std::string& message) {
+[[noreturn]] void throw_errno(const std::string& message) {
     throw std::system_error(errno, std::generic_category(), message);
 }
 
@@ -113,17 +114,16 @@ void UnixSocketConnection::close() {
 }
 
 UnixSocketConnection UnixSocketClient::connect(const std::filesystem::path& path) const {
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) throw_errno("socket failed");
+    UniqueFd fd(::socket(AF_UNIX, SOCK_STREAM, 0));
+    if (!fd.valid()) throw_errno("socket failed");
 
     const auto address = make_address(path);
-    while (::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
+    while (::connect(fd.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
         if (errno == EINTR) continue;
         const int saved_errno = errno;
-        ::close(fd);
         throw std::system_error(saved_errno, std::generic_category(), "connect failed");
     }
-    return UnixSocketConnection(fd);
+    return UnixSocketConnection(fd.release());
 }
 
 UnixSocketServer::~UnixSocketServer() {
@@ -149,25 +149,23 @@ void UnixSocketServer::bind_listen(const std::filesystem::path& path) {
         std::filesystem::remove(path);
     }
 
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) throw_errno("socket failed");
+    UniqueFd fd(::socket(AF_UNIX, SOCK_STREAM, 0));
+    if (!fd.valid()) throw_errno("socket failed");
 
     const auto address = make_address(path);
-    if (::bind(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
+    if (::bind(fd.get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) < 0) {
         const int saved_errno = errno;
-        ::close(fd);
         throw std::system_error(saved_errno, std::generic_category(), "bind failed");
     }
 
-    if (::listen(fd, 16) < 0) {
+    if (::listen(fd.get(), 16) < 0) {
         const int saved_errno = errno;
-        ::close(fd);
         std::filesystem::remove(path);
         throw std::system_error(saved_errno, std::generic_category(), "listen failed");
     }
 
-    fd_ = fd;
     path_ = path;
+    fd_ = fd.release();
 }
 
 UnixSocketConnection UnixSocketServer::accept_one() const {

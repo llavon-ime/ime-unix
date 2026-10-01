@@ -238,14 +238,14 @@ nlohmann::json to_json(const Config& cfg) {
         const auto value = config_field_value(cfg, field);
         switch (field.kind) {
             case ConfigValueKind::Boolean:
-                json[field.key] = value.boolean;
+                json[field.key] = std::get<bool>(value);
                 break;
             case ConfigValueKind::Integer:
-                json[field.key] = value.integer;
+                json[field.key] = std::get<int>(value);
                 break;
             case ConfigValueKind::Text:
             case ConfigValueKind::Choice:
-                json[field.key] = value.text;
+                json[field.key] = std::get<std::string>(value);
                 break;
         }
     }
@@ -262,23 +262,23 @@ Config config_from_json(const nlohmann::json& json) {
         std::optional<ConfigValue> value;
         switch (field.kind) {
             case ConfigValueKind::Boolean:
-                if (entry.is_boolean()) value = ConfigValue{.boolean = entry.get<bool>()};
+                if (entry.is_boolean()) value = ConfigValue{entry.get<bool>()};
                 break;
             case ConfigValueKind::Integer:
                 if (entry.is_number_integer()) {
                     const int integer = entry.get<int>();
                     if (integer >= field.minimum && integer <= field.maximum) {
-                        value = ConfigValue{.integer = integer};
+                        value = ConfigValue{integer};
                     }
                 }
                 break;
             case ConfigValueKind::Text:
-                if (entry.is_string()) value = ConfigValue{.text = entry.get<std::string>()};
+                if (entry.is_string()) value = ConfigValue{entry.get<std::string>()};
                 break;
             case ConfigValueKind::Choice:
                 if (entry.is_string()) {
                     if (const auto canonical = canonical_choice(field, entry.get<std::string>())) {
-                        value = ConfigValue{.text = *canonical};
+                        value = ConfigValue{*canonical};
                     }
                 }
                 break;

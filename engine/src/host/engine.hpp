@@ -23,6 +23,7 @@
 namespace llavon::ime {
 
 class MemoryContextProvider;
+class PendingModelPreview;
 
 // A commit can be withdrawn by an immediate Backspace within this window; the
 // service holds staged commits for the same span before writing them.
@@ -68,6 +69,8 @@ public:
     void attach(ContextId context);
     void detach(ContextId context);
     bool has_context(ContextId context) const;
+    // Read-only readiness check across every client; never settle pending text.
+    bool has_pending_composition() const;
 
     // Routes one key, including releases: the engine decides whether the key
     // is consumed. Returns true when the host must consume the event.
@@ -108,6 +111,8 @@ public:
     // Raw session access for host diagnostics and tests. The engine keeps
     // ownership; prefer the event API for normal operation.
     InputSession* session(ContextId context) { return find(context); }
+    bool pending_model_idle(ContextId context) const;
+    std::uint64_t pending_model_requests(ContextId context) const;
 
 private:
     InputSession* find(ContextId context);
@@ -115,6 +120,7 @@ private:
     void apply_effect(ContextId context, InputSession& session, const InputEffect& effect);
 
     void request_prediction(ContextId context, InputSession& session);
+    void update_pending_model(ContextId context);
     bool should_probe_memory(ContextId context, const InputSession& session) const;
     void open_prediction_session(ContextId context, std::uint64_t generation);
     void send_prediction(ContextId context, InputSession& session, std::uint64_t generation);
@@ -162,6 +168,10 @@ private:
     };
     std::optional<RecentCommit> recent_commit_;
     std::unordered_map<ContextId, std::unique_ptr<InputSession>> sessions_;
+    std::unordered_map<ContextId, std::unique_ptr<PendingModelPreview>> pending_models_;
+    // Host handles may be reused after detach. Prediction generation numbers
+    // only distinguish edits within a lifetime, not a newly attached object.
+    std::unordered_map<ContextId, std::shared_ptr<bool>> context_lifetimes_;
     std::unique_ptr<AccessibilityContextProvider> accessibility_context_;
     std::uint64_t accessibility_base_sequence_ = 0;
     std::uint64_t accessibility_composition_base_ = 0;

@@ -1,0 +1,56 @@
+question: Which burst-performance interventions reduce real IME inference latency?
+scope: finite local benchmark session; no production changes or scheduled jobs
+status: completed
+primary_metric: per-workload synchronous prediction p50 and p95 milliseconds
+validation: reading membership, finite probabilities, top1 and rank stability, raw-key commits
+platforms:
+  macos: native Apple M3, 16 GB, 4 performance and 4 efficiency CPU cores
+  linux: aarch64 Docker VM; no native x86/GPU access; uclamp syscall unsupported
+completed:
+  - initial randomized CPU/Metal thread and QoS sweep, 60 configs, 11520 measured predictions
+  - cache ablation, 24 configs, 2304 predictions
+  - partial offload, 30 configs, 2880 predictions
+  - intermediate threads, 18 configs, 4608 predictions
+  - idle warmup, 24 configs, 240 predictions
+  - independent same-phase confirmation, 16 configs, 2560 predictions
+  - real-service raw-key previews and commits, 20 configs, 1920 measured cases
+  - serialized Linux CPU confirmation, 10 configs, 1920 predictions
+  - frozen engine regression runner, 68 suites and 0 failures; 6 optional helper checks skipped
+  - rebuilt service CTest, 2 of 2 tests passed
+totals:
+  valid_process_configurations: 202
+  measured_requests: 27952
+  excluded: failed pilots, unmeasured warmups and contended Linux sweep
+current_findings:
+  - CPU 4 or 6 threads beats Metal median on short requests
+  - CPU 8 threads produces large tail outliers; Metal tails are steadier
+  - Metal thread count and caller QoS have little effect in the initial sweep
+  - lower candidate ranks can vary; repeated top1 stable in all initial sweep requests
+  - one ambiguous long-context query changes 香 versus 鄉 across CPU thread counts
+  - Metal wins long fresh-context prefill; retaining prefix cache reduces both backends to about 12 ms
+  - partial offload did not beat CPU4 on two-syllable requests
+  - synchronous warmup increases total compute; advance CPU warmup shifts work before prediction
+  - validated raw-key preview and commit text matches across every tested configuration
+unmeasured:
+  - native x86 Linux CPU DVFS and GPU boost efficacy
+  - physical application paint latency
+  - power consumption and CPU/GPU temperature or physical clock traces
+report: docs/inference-burst-benchmarks.md
+request_scoped_burst:
+  status: completed
+  valid_configurations: 96
+  windows: 2244
+  predictions: 8976
+  actual_worker_creations: 53280
+  elevated_workers_verified_and_restored: 23040
+  qos_errors: 0
+  findings:
+    - Caller-only QoS does not propagate to the observed disposable ggml CPU workers
+    - CPU4 after 2 seconds idle first p50 is 19.776 ms baseline and 20.456 ms initiated workers
+    - Interactive workers do not improve the idle first-request median
+    - No-idle CPU4 apparent discovery gain fails independent 360-window-per-policy confirmation
+    - Metal idle caller gain shrinks to 0.5 percent in independent confirmation
+    - Do not enable this scoped QoS policy by default on the measured model and M3
+  excluded: pilots and the incomplete runtime-owned thread override run
+  limitations: native Linux unavailable; no physical clock or system-rail power traces
+  report: docs/request-scoped-burst-boost.md

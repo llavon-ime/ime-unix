@@ -24,6 +24,8 @@ public:
     bool has_tone() const noexcept;
 
     bool remove_initial();
+    bool remove_medial();
+    bool remove_final();
     bool remove_tone();
 
 private:

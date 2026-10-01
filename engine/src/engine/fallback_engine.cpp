@@ -1,42 +1,15 @@
 #include "engine/fallback_engine.hpp"
 
 #include "text/utf.hpp"
+#include "input/mixed_lexicon.hpp"
 
 #include <algorithm>
-#include <fstream>
-#include <nlohmann/json.hpp>
 #include <utility>
 
 namespace llavon::ime {
 
 FallbackEngine::FallbackEngine(std::filesystem::path table_path) : table_(table_path) {
-    std::ifstream input(table_path.parent_path() / "tokens" / "latin.json");
-    if (!input) return;
-
-    try {
-        const auto json = nlohmann::json::parse(input);
-        if (json.empty()) return;
-
-        long long minimum = json.begin().value().get<long long>();
-        long long maximum = minimum;
-        for (const auto& [word, value] : json.items()) {
-            (void)word;
-            const long long raw = value.get<long long>();
-            minimum = std::min(minimum, raw);
-            maximum = std::max(maximum, raw);
-        }
-
-        const double range = static_cast<double>(maximum - minimum);
-        for (const auto& [word, value] : json.items()) {
-            const long long raw = value.get<long long>();
-            // Lower values mean higher frequency in the training corpus.
-            const double normalized =
-                range > 0 ? static_cast<double>(maximum - raw) / range : 1.0;
-            english_frequencies_.emplace(utf8_to_u16(word), normalized);
-        }
-    } catch (...) {
-        english_frequencies_.clear();
-    }
+    (void)MixedLexicon::instance();
 }
 
 std::vector<CandidatePrediction> FallbackEngine::predict(const CompositionBuffer& buffer) const {
@@ -60,13 +33,11 @@ std::vector<char32_t> FallbackEngine::lookup(std::u16string_view bopomofo) const
 }
 
 bool FallbackEngine::is_known_english(std::u16string_view word) const {
-    return english_frequencies_.contains(std::u16string(word));
+    return latin_frequency(word) > 0;
 }
 
 double FallbackEngine::latin_frequency(std::u16string_view word) const {
-    const auto it = english_frequencies_.find(std::u16string(word));
-    if (it == english_frequencies_.end()) return 0.0;
-    return it->second;
+    return MixedLexicon::instance().english_frequency(word);
 }
 
 std::vector<char32_t> FallbackEngine::merge_model_candidates(

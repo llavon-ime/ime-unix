@@ -14,7 +14,7 @@
 - **理解上下文的選字**：依據前後文、注音序列與已選文字預測候選字，不只依靠固定詞頻。
 - **專為注音輸入訓練**：採用專用繁體中文注音模型，而非將一般聊天模型直接接到傳統輸入法。
 - **完全本機運作**：模型與推論引擎皆在本機執行，輸入內容無須傳送至雲端。
-- **熟悉的操作方式**：使用標準注音鍵盤配置，保留傳統注音輸入法熟悉的組字與選字方式。
+- **熟悉的操作方式**：支援標準、許氏、IBM、倚天、精業、倚天26鍵與大千26鍵，保留傳統注音輸入法熟悉的組字與選字方式。
 - **可自訂常用詞彙**：可指定文字及其注音，改善姓名、專有名詞或其他固定詞彙的輸入結果。
 - **本機個人化訓練**：可選擇收集自己的輸入紀錄，透過 LoRA 在本機訓練個人化模型；資料收集預設關閉。
 - **平台原生整合**：Linux 使用 Fcitx5，macOS 使用原生 InputMethodKit，兩者共用相同的輸入法引擎與預測服務。
@@ -48,6 +48,8 @@ fcitx5 -r
 
 目前 Linux 發行套件僅支援 x86_64。
 
+新版原生設定視窗提供「軟體更新」頁，透過 PackageKit 檢查與安裝系統套件更新，並在組字完成後套用新版。使用前需部署並加入對應發行版的簽章更新來源；目前已加入 repository 產生與驗證工具，線上來源尚待配置。詳見 [Linux App 更新](docs/linux-app-updates.md)。
+
 ### macOS
 
 建議使用 Homebrew 安裝：
@@ -62,7 +64,9 @@ brew install --cask llavon-ime
 
 安裝完成後，前往「系統設定 → 鍵盤 → 輸入方式」加入「拉風輸入法」。macOS 15 及更早版本通常可由安裝程式自動加入；macOS 26（Tahoe）因第三方輸入來源的啟用狀態由受保護的系統儲存管理，首次安裝時需要手動按「+」加入，或在安裝後登出再登入一次。
 
-也可以從 [GitHub Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`。目前僅提供 Apple Silicon（arm64）安裝檔；套件尚未正式簽章，若被 Gatekeeper 阻擋，可在 Finder 中右鍵選擇「打開」。
+也可以從 [GitHub Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`。目前僅提供 Apple Silicon（arm64）安裝檔。含內建更新器的新正式版發行要求 Developer ID 簽章與公證；舊版未簽章安裝包若被 Gatekeeper 阻擋，可在 Finder 中右鍵選擇「打開」。
+
+含內建更新器的正式版可從輸入來源選單選擇「檢查更新…」或「軟體更新設定…」，由 App 自動檢查與背景下載新版，不需執行 Homebrew 更新。安裝仍需要管理員授權，並會等待組字與個人化訓練工作完成；不含更新器的舊版需手動升級一次。發行設定見 [macOS App 更新](docs/macos-app-updates.md)。
 
 解除安裝：
 
@@ -79,6 +83,28 @@ sudo "/Library/Application Support/llavon-ime/uninstall.sh"
 ## 使用方式
 
 切換至拉風輸入法後，即可使用標準注音鍵盤輸入。輸入法會在需要時自動啟動 `llavon-ime-unix-service`，模型載入完成後即可開始使用 AI 選字。
+
+### 注音鍵盤與智慧型中英文
+
+可在設定中選擇「標準」、「許氏」、「IBM」、「倚天」、「精業」、「倚天26鍵」或「大千26鍵」，並另外開啟「智慧型中英文」（預設關閉）。七種配置都使用同一個混輸 decoder 與模型預覽；Linux 與 macOS 共用按鍵行為及設定清單。聲調鍵、配置範例與實測限制見 [`docs/keyboard-layouts.md`](docs/keyboard-layouts.md)。
+
+開啟智慧型中英文後，中文音節、英文單字／前綴與字面內容會共同排名，每次按鍵更新最佳預覽。判斷使用獨立的英文詞頻、未知英文的拼寫模型與中文詞組前文；不把 `ime-core` 的 token 編號當詞頻，也不以單字命中或字母長度直接決定語言。
+
+**空白保留在組字中，不會自動提交整句；Enter 才提交目前預覽。** 空白可能完成一聲、接受已完成的中文音節，或成為英文詞界。Backspace 撤銷最近一個原始按鍵（包含空白），因此可以從暫時的中文預覽改回英文。候選清單不會自動跳出；按 `Down` 時先顯示最佳預覽，其次是可取回的原文，再列出其他中英切分與同音字。明確選過的內容會固定，後續輸入不會重新解讀它。
+
+許氏鍵盤以 `d / f / j / s` 作為二聲／三聲／四聲／輕聲，空白作為一聲；這些字母在音節開頭也可能是聲母，由音節狀態決定。開啟智慧型中英文時，例如：
+
+| 按鍵 | 行為 |
+| --- | --- |
+| `ne` → `nef` | 先顯示 `ne`，三聲後預覽「你」 |
+| `nefhwfxhf` | 連續組成「你好我」，Enter 提交 |
+| `gen` + 空白 | 一聲後預覽「今」 |
+| `if`、`hd` | 優先保留英文；按 `Down` 可選「矮」、「哦」等中文解讀 |
+| `adds`、`added`、`end-to-end` + 空白 | 保留英文與尾端空白在組字中，Enter 提交 |
+
+許氏的數字鍵不是聲調鍵。關閉智慧型中英文時，字母直接按許氏注音組字，不經英文判斷。
+
+標準鍵盤的 `283` 可直接預覽「打」，`hello283` 可預覽 `hello打`；原始數字仍能從候選取回。同一串按鍵有時確實同時是英文與合法注音，最佳結果不一定就是使用者意圖，可用 `Down` 改選。資料來源及再產生方式見 [`engine/data/README.md`](engine/data/README.md)，架構調查與目前實作範圍見 [`docs/smart-mixed-input-redesign.md`](docs/smart-mixed-input-redesign.md)。
 
 ### 預測上下文
 
@@ -134,7 +160,7 @@ Linux 也可從 Fcitx5 的 Llavon IME 設定中選擇「管理強制替代詞彙
 
 模型權重另依 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/deed.zh-hant) 授權，僅限非商業用途，使用或散布時須註明來源；此授權與本專案程式碼的 BSD 2-Clause License 分開適用。
 
-開發版本可透過 Fcitx5 設定頁面或 `LLAVON_IME_MODEL_PATH` 指定模型。舊版 `IME_FCITX5_*` 環境變數名稱仍保留相容性，例如 `IME_FCITX5_MODEL_PATH`。
+開發版本可透過共用原生管理器的「輸入法設定」頁或 `LLAVON_IME_MODEL_PATH` 指定模型。舊版 `IME_FCITX5_*` 環境變數名稱仍保留相容性，例如 `IME_FCITX5_MODEL_PATH`。
 
 ## 專案組成
 
@@ -302,7 +328,7 @@ macOS preset 使用本儲存庫的 vcpkg 工具鏈並啟用 Metal backend（`lla
 本專案程式碼依 [BSD 2-Clause License](LICENSE) 授權。模型權重另依 CC BY-NC 4.0 授權；發行套件會一併收錄相關模型與第三方相依套件的授權資訊。
 
 發行套件內含 Q4 GGUF 模型（CC BY-NC 4.0，僅限非商業用途；署名與相依套件授權
-隨套件附上）。開發版本需自備模型，透過 fcitx5 設定頁面或
+隨套件附上）。開發版本需自備模型，透過共用原生設定頁面或
 `LLAVON_IME_MODEL_PATH` 指定：
 
 https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF
@@ -314,8 +340,8 @@ https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF
 注音提交資料的收集預設關閉；在個人化訓練管理介面設定密碼並啟用收集後，
 可用服務安裝的 `llavon-ime-lora` 列出、排除或刪除待訓練紀錄，並以選配的
 [`lora-trainer`](https://github.com/llavon-ime/lora-trainer) 訓練個人化模型。
-也可從輸入法選單的「管理個人化訓練…」或設定頁面的「使用我的輸入改進模型」按鈕開啟共用的本機網頁介面，
-在瀏覽器檢視紀錄、下載基礎模型與管理訓練工作。
+也可從輸入法選單的「管理個人化訓練…」或 Fcitx5 齒輪的「使用我的輸入改進模型」按鈕開啟共用的原生管理器，
+檢視紀錄、下載基礎模型、管理訓練工作，並拖曳歷程節點。詳見 [原生設定與個人化管理器](docs/native-lora-manager.md)。
 訓練需要另外下載未量化的基礎 checkpoint；套件內的 Q4 GGUF 只供推論使用。
 完整指令及模型相容性說明見 [Unix 服務文件](ime-unix-service/README.md#選用的本機-lora-訓練)。
 

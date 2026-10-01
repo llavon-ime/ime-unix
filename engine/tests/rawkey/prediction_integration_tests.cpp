@@ -82,7 +82,7 @@ RAWKEY_SUITE("prediction integration", prediction_integration) {
             connection.send_all(
                 protocol::encode(protocol::Message{protocol::CloseSessionResponse{session_id}}));
             server_stage = 3;
-        } catch (const std::exception& error) {
+        } catch (const std::exception&) {
             server_ok = false;
         } catch (...) {
             server_ok = false;

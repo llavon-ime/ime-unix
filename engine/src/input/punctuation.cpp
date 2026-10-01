@@ -16,9 +16,8 @@ std::optional<char32_t> chewing_punctuation_for_key(const InputKey& key, Bopomof
         return lookup_microsoft_ctrl_punctuation_key(raw_symbol);
     }
 
-    // On the Hsu layout a punctuation key without Shift commits the halfwidth
-    // key symbol itself instead of the fullwidth punctuation.
-    if (layout == BopomofoKeyboardLayout::Hsu && !shifted) {
+    // Compact letter-only layouts leave unshifted punctuation halfwidth.
+    if (is_compact_bopomofo_layout(layout) && !shifted) {
         if (lookup_chewing_punctuation_key(raw_symbol)) return raw_symbol;
         return std::nullopt;
     }

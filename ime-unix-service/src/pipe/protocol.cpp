@@ -55,7 +55,7 @@ void append_utf8(ByteVector& out, const std::string& value, const char* field) {
     out.insert(out.end(), value.begin(), value.end());
 }
 
-void append_utf16(ByteVector& out, const std::u16string& value, const char* field, std::uint32_t limit) {
+void append_utf16(ByteVector& out, std::u16string_view value, const char* field, std::uint32_t limit) {
     if (!valid_utf16(value)) throw ProtocolError(std::string("invalid UTF-16: ") + field);
     const auto count = checked_size(value.size(), field, limit);
     append_u32(out, count);
@@ -68,12 +68,12 @@ void append_scalar(ByteVector& out, char32_t value, const char* field) {
 }
 
 void append_padding(ByteVector& out, const PaddingEntry& entry) {
-    append_u8(out, entry.chosen ? 1U : 0U);
-    if (entry.chosen) {
-        if (entry.chosen_char == 0) throw ProtocolError("chosen padding has no character");
-        append_scalar(out, entry.chosen_char, "chosen character");
+    append_u8(out, entry.chosen() ? 1U : 0U);
+    if (entry.chosen()) {
+        if (entry.chosen_char() == 0) throw ProtocolError("chosen padding has no character");
+        append_scalar(out, entry.chosen_char(), "chosen character");
     } else {
-        append_utf16(out, entry.bopomofo, "bopomofo", kMaxBopomofoCodeUnits);
+        append_utf16(out, entry.bopomofo(), "bopomofo", kMaxBopomofoCodeUnits);
     }
 }
 
@@ -223,11 +223,10 @@ std::vector<PaddingEntry> read_padding(Reader& reader) {
         PaddingEntry entry;
         const auto kind = reader.u8();
         if (kind == 0) {
-            entry.bopomofo = reader.utf16("bopomofo", kMaxBopomofoCodeUnits);
+            entry = PaddingEntry(reader.utf16("bopomofo", kMaxBopomofoCodeUnits));
         } else if (kind == 1) {
-            entry.chosen = true;
-            entry.chosen_char = reader.scalar("chosen character");
-            if (entry.chosen_char == 0) throw ProtocolError("chosen padding has no character");
+            entry = PaddingEntry(reader.scalar("chosen character"));
+            if (entry.chosen_char() == 0) throw ProtocolError("chosen padding has no character");
         } else {
             throw ProtocolError("unknown padding entry kind");
         }
@@ -312,7 +311,7 @@ bool valid_scalar(char32_t value) noexcept {
     return raw <= 0x10ffffU && !(raw >= 0xd800U && raw <= 0xdfffU);
 }
 
-bool valid_utf16(const std::u16string& value) noexcept {
+bool valid_utf16(std::u16string_view value) noexcept {
     for (std::size_t i = 0; i < value.size(); ++i) {
         const auto unit = static_cast<std::uint16_t>(value[i]);
         if (unit >= 0xd800U && unit <= 0xdbffU) {
