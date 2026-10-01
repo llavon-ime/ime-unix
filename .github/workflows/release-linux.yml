@@ -134,6 +134,12 @@ jobs:
           test -s "models/${MODEL_FILE_NAME}"
           echo "${MODEL_SHA256}  models/${MODEL_FILE_NAME}" | sha256sum --check -
 
+      # v0.9.2's code is frozen, but its RPM file list omitted native settings
+      # resources. Use the manifest pinned to this workflow revision on retries.
+      - name: Restore complete v0.9.2 RPM file manifest
+        if: github.event_name == 'workflow_dispatch' && matrix.format == 'rpm' && env.RELEASE_TAG == 'v0.9.2'
+        run: git show "${GITHUB_SHA}:packaging/linux/rpm/llavon-ime-fcitx5.spec.in" > packaging/linux/rpm/llavon-ime-fcitx5.spec.in
+
       - name: Build native package
         env:
           CC: gcc

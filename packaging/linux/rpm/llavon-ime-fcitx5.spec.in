@@ -2,7 +2,7 @@ Name:           llavon-ime-fcitx5
 Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        Llavon IME frontend and local inference service for Fcitx5
-License:        BSD-2-Clause AND MIT AND Apache-2.0 AND BSL-1.0 AND CC-BY-NC-4.0
+License:        BSD-2-Clause AND MIT AND Apache-2.0 AND BSL-1.0 AND CC-BY-NC-4.0 AND CC-BY-SA-4.0
 URL:            https://github.com/llavon-ime/ime-unix
 BuildArch:      x86_64
 
@@ -60,6 +60,9 @@ cp -a %{_sourcedir}/pkgroot/. %{buildroot}/
 %{_datadir}/fcitx5/addon/llavon-ime.conf
 %{_datadir}/fcitx5/inputmethod/llavon-ime.conf
 %{_datadir}/llavon-ime
+%{_datadir}/applications/llavon-ime-lora.desktop
+%{_datadir}/pixmaps/llavon-ime.png
+%license %{_licensedir}/llavon-ime/mixed-lexicon-attribution.md
 %{_licensedir}/llavon-ime-fcitx5
 
 %changelog
