@@ -276,6 +276,68 @@ RAWKEY_SUITE("production leading first tone gang reaches the model before a foll
     }
 }
 
+RAWKEY_SUITE("production leading punctuation readings reach the model and respect explicit choices", production_leading_symbols) {
+    constexpr std::array keys{
+        std::array{"standard", "d; ", "w; ", "d/ ", "t. ", "y; "},
+        std::array{"hsu", "kk ", "tk ", "kl ", "vo ", "zk "},
+        std::array{"ibm", "0v ", "6v ", "0b ", "tz ", "iv "},
+        std::array{"et", "k0 ", "t0 ", "k- ", ".y ", ";0 "},
+        std::array{"ginyieh", "f; ", "e; ", "f/ ", "y. ", "u; "},
+        std::array{"et26", "kt ", "tt ", "kl ", "yp ", "qt "},
+        std::array{"dachen_cp26", "dll ", "wwll ", "dn ", "ttmm ", "yll "},
+    };
+    constexpr std::array words{"康", "湯", "坑", "抽", "髒"};
+    for (const auto& row : keys) {
+        for (size_t index = 0; index < words.size(); ++index) {
+            for (const auto route : {"model", "raw", "manual", "immediate-enter"}) {
+                ScriptService service(std::string_view(route) != "model");
+                auto value = smart_options();
+                value.config = config_from_json({{"smart_english", true}});
+                value.config.keyboard_layout = row[0];
+                value.socket_path = service.socket.string();
+                Harness harness(value);
+                const auto body = std::string(row[index + 1]).substr(0, std::string_view(row[index + 1]).size() - 1);
+                harness.type(body);
+                RAWKEY_ASSERT(harness.preedit() == body);
+                RAWKEY_ASSERT(harness.pending_model_requests() == 0);
+                harness.key("space");
+                RAWKEY_ASSERT(harness.preedit() == words[index]);
+                // ScriptService's counter changes on its worker, without a
+                // host post until the held reply is released. Drain host work
+                // in short bounded slices so each route need not wait for the
+                // entire request deadline before observing that counter.
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (service.calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+                    (void)harness.pump_until([&] { return service.calls.load() != 0; }, std::chrono::milliseconds(10));
+                }
+                RAWKEY_ASSERT(service.calls.load() != 0);
+                std::string expected = words[index];
+                if (std::string_view(route) == "model") {
+                    RAWKEY_ASSERT(harness.pump_until([&] { return harness.pending_model_idle(); }));
+                    RAWKEY_ASSERT(harness.preedit() == expected);
+                } else if (std::string_view(route) == "immediate-enter") {
+                    harness.expect_commit(expected);
+                } else {
+                    harness.key("Down");
+                    expected = std::string_view(route) == "raw" ? row[index + 1] : words[index];
+                    harness.choose_text(expected);
+                    RAWKEY_ASSERT(harness.preedit() == expected);
+                }
+                service.release();
+                RAWKEY_ASSERT(harness.pump_until([&] { return harness.pending_model_idle(); }));
+                if (std::string_view(route) == "immediate-enter") {
+                    RAWKEY_ASSERT(harness.composition_empty());
+                    RAWKEY_ASSERT(harness.last_commit() == expected);
+                } else {
+                    RAWKEY_ASSERT(harness.preedit() == expected);
+                    harness.expect_commit(expected);
+                }
+                RAWKEY_ASSERT(service.ok.load());
+            }
+        }
+    }
+}
+
 RAWKEY_SUITE("production mixed model preview", production_mixed_model_preview) {
     const auto options = [](const ScriptService& service) {
         auto value = smart_options();

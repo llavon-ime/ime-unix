@@ -28,17 +28,20 @@ constexpr double kSwitchPenalty = 3.0;
 constexpr double kFragmentPenalty = 3.0;
 
 double first_tone_symbol_evidence(std::u16string_view body) {
-    // A leading completed reading may use punctuation as a physical phonetic key.
-    // Without this evidence, cheap ASCII symbol edges plus a one-letter word
-    // can outrank the whole syllable even after its first-tone Space. Ordinary
-    // letter words get no bonus; raw remains a scored, reversible alternative.
-    // Callers limit it to the initial edge: punctuation after a literal prefix
-    // (for example a command option) is not fresh leading phonetic evidence.
-    return 0.4 * static_cast<double>(std::ranges::count_if(body, [](char16_t key) {
+    // Only an explicitly completed leading syllable gets this evidence, never
+    // an unfinished English prefix or a command option after a literal prefix.
+    // A letter plus a phonetic punctuation key is a whole reading, while its
+    // competing literal often gains a cheap dictionary score for just the one
+    // letter. Account for that fragmentation using the same cost as adjacent
+    // Latin fragments, rather than requiring preceding Chinese to rescue it.
+    // This is a scored preference, not a forced rewrite; raw stays selectable.
+    const auto symbols = std::ranges::count_if(body, [](char16_t key) {
         return key > u' ' && key <= u'~' &&
                !(key >= u'a' && key <= u'z') && !(key >= u'A' && key <= u'Z') &&
                !(key >= u'0' && key <= u'9');
-    }));
+    });
+    return 0.4 * static_cast<double>(symbols) +
+        (body.size() >= 2 && symbols != 0 ? kFragmentPenalty : 0.0);
 }
 
 bool is_explicit_tone_key(char32_t key, BopomofoKeyboardLayout layout) {
