@@ -44,7 +44,7 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
-      LLAVON_IME_ENABLE_UPDATES: "0"
+      LLAVON_IME_ENABLE_UPDATES: "1"
       LLAVON_IME_RELEASE_REPOSITORY: ${{ github.repository }}
 
     steps:
@@ -100,12 +100,18 @@ jobs:
             exit 1
           fi
 
-      - name: Select signed or manual-install release
+      - name: Require Sparkle keys and select Apple signing mode
         id: signing
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
+          for name in SPARKLE_PUBLIC_ED_KEY SPARKLE_PRIVATE_ED_KEY; do
+            if [[ -z "${!name}" ]]; then
+              echo "Set ${name} before publishing an app-managed update." >&2
+              exit 1
+            fi
+          done
           signing_names=(MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD
             DEVELOPER_ID_APPLICATION DEVELOPER_ID_INSTALLER
             APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD)
@@ -115,7 +121,7 @@ jobs:
           done
           if [[ "${configured}" == 0 ]]; then
             echo "signed=false" >> "${GITHUB_OUTPUT}"
-            echo "Publishing an ad-hoc signed, unnotarized package for manual installation."
+            echo "Publishing an ad-hoc signed, unnotarized package with Sparkle-verified updates."
             exit 0
           fi
           for name in SPARKLE_PUBLIC_ED_KEY SPARKLE_PRIVATE_ED_KEY \
@@ -221,7 +227,6 @@ jobs:
           echo "${sha}  ${pkg}"
 
       - name: Sign package and generate signed appcast
-        if: steps.signing.outputs.signed == 'true'
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
@@ -237,8 +242,10 @@ jobs:
           printf '%s' "${SPARKLE_PRIVATE_ED_KEY}" > "${key_file}"
           signature="$("${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" -p "${RELEASE_PKG}")"
           swift macos/scripts/verify-update-signature.swift "${SPARKLE_PUBLIC_ED_KEY}" "${signature}" "${RELEASE_PKG}"
-          pkgutil --check-signature "${RELEASE_PKG}"
-          xcrun stapler validate "${RELEASE_PKG}"
+          if [[ "${{ steps.signing.outputs.signed }}" == true ]]; then
+            pkgutil --check-signature "${RELEASE_PKG}"
+            xcrun stapler validate "${RELEASE_PKG}"
+          fi
 
           # Use the macOS-only feed, never GitHub's /releases/latest, which may
           # have been published by Linux while its macOS pkg is still building.
@@ -265,17 +272,16 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           assets=(
             "${{ steps.package.outputs.pkg }}"
+            "dist/macos/appcast.xml"
           )
           notes="Native macOS input method package."
-          if [[ "${{ steps.signing.outputs.signed }}" == true ]]; then
-            assets+=("dist/macos/appcast.xml")
-          else
-            notes="Native macOS input method package (Apple Silicon). This package is not Developer ID signed or notarized; its executables use ad-hoc signatures. In-app automatic updates are disabled."
+          if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
+            notes="Native macOS input method package (Apple Silicon). This package is not Developer ID signed or notarized; its executables use ad-hoc signatures. Sparkle verifies update signatures; package installation requires administrator approval."
             install_notes="${RUNNER_TEMP}/macos-install.txt"
             cat > "${install_notes}" <<'NOTES'
-          ### macOS manual installation (Apple Silicon)
+          ### macOS installation and updates (Apple Silicon)
 
-          The macOS `.pkg` is **not Developer ID signed or Apple notarized**. Executables use ad-hoc signatures. In-app automatic updates are disabled; install future versions manually.
+          The macOS `.pkg` is **not Developer ID signed or Apple notarized**. Executables use ad-hoc signatures. In-app updates use Sparkle to verify update signatures, download packages, and request administrator approval for installation. Apple notarization and Sparkle update signature verification are separate mechanisms.
 
           Download the `.pkg` from this release and open it in Finder. If macOS blocks the installer, open **System Settings → Privacy & Security**, find the blocked installer, and choose **Open Anyway**, then follow the installer prompts. After installation, add 拉風輸入法 in **System Settings → Keyboard → Text Input → Edit**. macOS may also require approval of the installed input method in Privacy & Security.
           NOTES
@@ -315,15 +321,21 @@ jobs:
           gh release view "${tag}" --json isDraft --jq '.isDraft' | grep -qx false
           if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
             gh release view "${tag}" --json body --jq '.body // ""' > "${RUNNER_TEMP}/release-notes.md"
-            if ! grep -q '^### macOS manual installation' "${RUNNER_TEMP}/release-notes.md"; then
-              printf '\n' >> "${RUNNER_TEMP}/release-notes.md"
-              cat "${install_notes}" >> "${RUNNER_TEMP}/release-notes.md"
-              gh release edit "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md"
-            fi
+            python3 - "${RUNNER_TEMP}/release-notes.md" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          text = re.sub(r'(?ms)^### macOS (?:manual installation|installation and updates)[^\n]*\n.*?(?=^###? |\Z)', '', text)
+          path.write_text(text.rstrip() + '\n')
+          PY
+            printf '\n' >> "${RUNNER_TEMP}/release-notes.md"
+            cat "${install_notes}" >> "${RUNNER_TEMP}/release-notes.md"
+            gh release edit "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md"
           fi
 
       - name: Publish macOS update feed after the package is reachable
-        if: steps.signing.outputs.signed == 'true'
         run: |
           set -euo pipefail
           pkg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.version.outputs.tag }}/llavon-ime-${{ steps.version.outputs.version }}-arm64.pkg"
@@ -363,7 +375,7 @@ jobs:
           SHA256="${{ steps.sha.outputs.sha256 }}" \
           CASK="${cask}" \
           RELEASE_REPOSITORY="${RELEASE_REPOSITORY}" \
-          AUTO_UPDATES="${{ steps.signing.outputs.signed }}" \
+          AUTO_UPDATES="true" \
           ruby <<'RUBY'
           path = ENV.fetch("CASK")
           version = ENV.fetch("VERSION")
