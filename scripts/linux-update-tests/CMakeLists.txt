@@ -7,7 +7,13 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets DBus Test)
 set(native "${CMAKE_CURRENT_SOURCE_DIR}/../../ime-unix-service/src/training/native")
 add_executable(llavon_linux_update_tests "${native}/linux_updates.cpp" "${native}/linux_updates.hpp"
+    "${native}/controls.cpp" "${native}/controls.hpp"
+    "${native}/appearance.cpp" "${native}/appearance.hpp"
     "${native}/../../../tests/linux_update_tests.cpp")
+qt_add_resources(llavon_linux_update_tests native_appearance PREFIX "/native"
+    BASE "${native}"
+    FILES "${native}/chevron-light.xpm" "${native}/chevron-dark.xpm"
+        "${native}/up-light.xpm" "${native}/up-dark.xpm")
 target_include_directories(llavon_linux_update_tests PRIVATE "${native}")
 target_link_libraries(llavon_linux_update_tests PRIVATE Qt6::Widgets Qt6::DBus Qt6::Test)
 include("${CMAKE_CURRENT_SOURCE_DIR}/../../engine/cmake/Warnings.cmake")
