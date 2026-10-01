@@ -49,7 +49,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             autoconf autoconf-archive automake libtool \
-            binutils build-essential ca-certificates cmake curl dpkg-dev fcitx5-modules \
+            binutils build-essential ca-certificates cmake curl dbus-daemon dpkg-dev fcitx5-modules \
             fcitx5-modules-dev file g++ gcc git \
             libatspi2.0-dev libfcitx5core-dev libglib2.0-dev libsqlite3-dev libvulkan1 ninja-build patchelf \
             pkg-config python3 tar unzip zip qt6-base-dev qt6-qpa-plugins qt6-wayland
@@ -60,7 +60,7 @@ jobs:
           set -euo pipefail
           dnf install -y \
             autoconf autoconf-archive automake libtool \
-            at-spi2-core-devel binutils ca-certificates cmake curl fcitx5 fcitx5-data \
+            at-spi2-core-devel binutils ca-certificates cmake curl dbus-daemon dbus-tools fcitx5 fcitx5-data \
             fcitx5-devel file gcc-c++ git glib2-devel ninja-build patchelf pkgconf-pkg-config sqlite-devel \
             python3 rpm-build tar unzip vulkan-loader zip qt6-qtbase-devel qt6-qtwayland
 
