@@ -44,16 +44,19 @@ RenderState build_render_state(InputSession& session, const Config& config, Mixe
     if (!state.composition_empty) {
         // Mirrors the historical panel assembly: the marked range underlines
         // per segment, unmarked compositions render as one segment, and the
-        // pending smart-English token always trails the composition.
+        // pending smart input is rendered at the composition caret.
         auto prefix = session.buffer.rendered_prefix_before_caret();
         const auto pending = InputProcessor::pending_rendered_text(session);
         if (const auto marked = session.buffer.marked_range()) {
             const auto& segments = session.buffer.segments();
-            for (std::size_t i = 0; i < segments.size(); ++i) {
+            for (std::size_t i = 0; i <= segments.size(); ++i) {
+                if (i == session.buffer.caret() && !session.pending_token.empty()) {
+                    state.preedit.push_back({pending, false});
+                }
+                if (i == segments.size()) break;
                 const bool underlined = i >= marked->first && i < marked->second;
                 state.preedit.push_back({segments[i].rendered_text(), underlined});
             }
-            if (!session.pending_token.empty()) state.preedit.push_back({pending, false});
         } else {
             state.preedit.push_back({InputProcessor::current_preedit(session), false});
         }

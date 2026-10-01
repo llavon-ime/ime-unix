@@ -186,6 +186,22 @@ void InputProcessor::commit_text(std::u16string text) {
 }
 
 namespace {
+// Pending smart input is inserted at the buffer caret, just like settled
+// literals and phonetic segments. Display and all commit routes share this
+// assembly so a suffix never moves in front of newly typed text.
+std::u16string composition_with_pending(const CompositionBuffer& buffer, std::u16string_view pending,
+                                       bool candidates_only = false) {
+    std::u16string text;
+    const auto& segments = buffer.segments();
+    for (size_t i = 0; i <= segments.size(); ++i) {
+        if (i == buffer.caret()) text += pending;
+        if (i < segments.size() && (!candidates_only || segments[i].visible_candidate())) {
+            text += segments[i].rendered_text();
+        }
+    }
+    return text;
+}
+
 // Everything the composition does not account for was typed literally:
 // SmartEnglish pending words and the trailing space or punctuation. Like
 // Windows, they stay in the sample as context without a reading.
@@ -268,6 +284,38 @@ std::optional<InputEffect::CommitSample> mixed_training_sample(const InputSessio
     if (!append_literal_tail(sample, committed)) return std::nullopt;
     return sample;
 }
+
+std::optional<InputEffect::CommitSample> commit_training_sample(const InputSession& session,
+                                                               std::u16string_view committed) {
+    if (!session.pending_token.empty() && !session.buffer.caret_at_end()) {
+        // The old append-only sample assembly would label an inserted reading
+        // as literal text, or associate it with a matching suffix character.
+        // Materialize a copy at the same caret before capturing the sample.
+        auto buffer = session.buffer;
+        const auto& decision = session.mixed_decision;
+        if (decision.active() && decision.source_revision == session.pending_token.revision &&
+            decision.result.raw == session.pending_token.raw && decision.preview_path > 0 &&
+            decision.preview_path < decision.result.paths.size()) {
+            for (const auto& segment : decision.result.paths[decision.preview_path].segments) {
+                if (segment.consumed_boundary) continue;
+                if (segment.kind == MixedSegmentKind::Bopomofo) {
+                    const auto inserted = buffer.add_bopomofo_keys(segment.body_keys, segment.tone_key,
+                        session.pending_token.layout, true, segment.reading);
+                    if (!inserted || !inserted->completed || segment.candidates.empty() ||
+                        !buffer.set_segment_candidates(inserted->segment_index, segment.candidates)) return std::nullopt;
+                } else {
+                    for (const char16_t ch : segment.raw) (void)buffer.add_literal(ch);
+                }
+            }
+        } else {
+            for (const char16_t ch : session.pending_token.raw) (void)buffer.add_literal(ch);
+        }
+        return training_sample(buffer, committed);
+    }
+    auto sample = training_sample(session.buffer, committed);
+    if (!sample) sample = mixed_training_sample(session, committed);
+    return sample;
+}
 }
 
 void InputProcessor::mark_prediction_dirty() {
@@ -316,10 +364,8 @@ InputEffect InputProcessor::reset(InputSession& session, const Config& config, I
                                (reason == InputResetReason::FocusOut &&
                                 (!session.pending_token.empty() || complete_composition));
     if (should_commit) {
-        auto text = session.buffer.candidate_commit_text();
-        text += pending_rendered_text(session);
-        effect_.training_sample = training_sample(session.buffer, text);
-        if (!effect_.training_sample) effect_.training_sample = mixed_training_sample(session, text);
+        auto text = composition_with_pending(session.buffer, pending_rendered_text(session), true);
+        effect_.training_sample = commit_training_sample(session, text);
         commit_text(std::move(text));
     }
 
@@ -376,11 +422,13 @@ void InputProcessor::process_impl(const InputKey& key) {
     const bool arrow_key = key.sym == keysym::Left || key.sym == keysym::Right;
     if (arrow_key && key.has(InputKeyState::Shift) &&
         !(key.has(InputKeyState::Alt) || key.has(InputKeyState::Super) || key.has(InputKeyState::Meta)) &&
-        !session_->symbol_menu.active() && !candidate_list_active(*session_) && !session_->buffer.empty() &&
-        session_->buffer.extend_selection(key.sym == keysym::Left ? -1 : 1)) {
-        redraw();
-        consume();
-        return;
+        !session_->symbol_menu.active() && !candidate_list_active(*session_) && !composition_empty(*session_)) {
+        if (config_->smart_english && !session_->pending_token.empty()) (void)settle_pending_preview();
+        if (session_->buffer.extend_selection(key.sym == keysym::Left ? -1 : 1)) {
+            redraw();
+            consume();
+            return;
+        }
     }
 
     // Shift+space commits the composition followed by a space; with an empty
@@ -599,7 +647,7 @@ void InputProcessor::process_impl(const InputKey& key) {
             return;
         }
 
-        if (session_->pending_token.empty() && is_smart_start_char(key.sym, layout)) {
+        if (session_->pending_token.empty() && !key.has_blocking_modifier() && is_smart_start_char(key.sym, layout)) {
             if (candidate_list_active(*session_)) (void)transition_to(InputStateKind::Inputting);
             append_pending_char(key.sym, layout);
             rerun_pending_decision();
@@ -837,10 +885,8 @@ CandidateKeyConfig InputProcessor::candidate_key_config() const {
 }
 
 void InputProcessor::commit_current() {
-    auto text = session_->buffer.commit_text();
-    text += pending_rendered_text(*session_);
-    effect_.training_sample = training_sample(session_->buffer, text);
-    if (!effect_.training_sample) effect_.training_sample = mixed_training_sample(*session_, text);
+    auto text = current_preedit(*session_);
+    effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
     session_->pending_token.clear();
     session_->mixed_decision.clear();
@@ -852,11 +898,9 @@ void InputProcessor::commit_current() {
 }
 
 void InputProcessor::commit_composition_with(char32_t extra) {
-    std::u16string text = session_->buffer.commit_text();
-    text += pending_rendered_text(*session_);
+    auto text = current_preedit(*session_);
     if (extra != 0) text += utf8_to_u16(char32_to_utf8(extra));
-    effect_.training_sample = training_sample(session_->buffer, text);
-    if (!effect_.training_sample) effect_.training_sample = mixed_training_sample(*session_, text);
+    effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
     session_->pending_token.clear();
     session_->mixed_decision.clear();
@@ -917,8 +961,7 @@ bool InputProcessor::commit_mixed_candidate_impl(int index) {
                                                     session_->mixed_decision.preview_path);
     if (index >= static_cast<int>(entries.size())) return false;
 
-    auto text = session_->buffer.commit_text();
-    text += entries[static_cast<size_t>(index)].text;
+    auto text = composition_with_pending(session_->buffer, entries[static_cast<size_t>(index)].text);
     session_->buffer.clear();
     session_->pending_token.clear();
     session_->mixed_decision.clear();
@@ -1107,7 +1150,7 @@ bool InputProcessor::is_smart_start_char(char32_t key, BopomofoKeyboardLayout la
 void InputProcessor::rerun_pending_decision() {
     if (session_->pending_token.empty()) return;
     auto context = session_->context_text;
-    context += session_->buffer.commit_text();
+    context += session_->buffer.rendered_prefix_before_caret();
     auto result = decoder_.decode(session_->pending_token.raw, session_->pending_token.layout,
                                   false, context);
     const size_t preview = result.best_path;
@@ -1189,6 +1232,7 @@ void InputProcessor::set_mixed_preview(MixedDecodeResult result, std::size_t pre
 }
 
 void InputProcessor::append_pending_char(char32_t key, BopomofoKeyboardLayout layout) {
+    if (session_->pending_token.empty()) (void)session_->buffer.clear_selection(false);
     session_->pending_token.push(key, layout);
     (void)transition_to(InputStateKind::Inputting);
     redraw();
@@ -1213,8 +1257,13 @@ bool InputProcessor::settle_pending_preview() {
     return true;
 }
 
-void InputProcessor::apply_fallback_candidates(InputSession& session, std::size_t segment_index) {
+void InputProcessor::apply_fallback_candidates(InputSession& session, std::size_t segment_index, bool preserve_existing) {
     if (!session.buffer.segment_complete(segment_index)) return;
+    // A service failure is not a new reading. Settling a mixed preview already
+    // supplies valid candidates; retain them instead of replacing its displayed
+    // words with a second fallback ranking. Reading edits clear candidates.
+    const auto* existing = session.buffer.segment_candidates(segment_index);
+    if (preserve_existing && existing != nullptr && !existing->empty()) return;
 
     const auto predictions = fallback_.predict(session.buffer);
     if (segment_index >= predictions.size()) return;
@@ -1386,10 +1435,7 @@ std::u16string InputProcessor::pending_rendered_text(const InputSession& session
 }
 
 std::u16string InputProcessor::current_preedit(const InputSession& session) {
-    auto rendered = session.buffer.rendered_composition();
-    const auto pending = pending_rendered_text(session);
-    if (!pending.empty()) rendered += pending;
-    return rendered;
+    return composition_with_pending(session.buffer, pending_rendered_text(session));
 }
 
 std::u16string InputProcessor::marking_hint_text(const InputSession& session) {

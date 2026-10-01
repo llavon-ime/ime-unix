@@ -5,6 +5,7 @@
 #include <QListView>
 #include <QPainter>
 #include <QProxyStyle>
+#include <QPointer>
 #include <QScreen>
 #include <QStyledItemDelegate>
 #include <QStyleOptionButton>
@@ -25,6 +26,13 @@ public:
         return QProxyStyle::styleHint(hint, option, widget, data);
     }
 };
+PopupStyle* sharedPopupStyle() {
+    // Each proxy otherwise constructs its own platform style. Share one across
+    // the controls, owned by QApplication so it outlives their popup views.
+    static QPointer<PopupStyle> style;
+    if (!style) { style = new PopupStyle; style->setParent(qApp); }
+    return style;
+}
 void checkmark(QPainter& painter, const QRectF& rect, const QColor& color) {
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -60,7 +68,7 @@ private:
 }
 
 NativeComboBox::NativeComboBox(QWidget* parent) : QComboBox(parent) {
-    auto* popupStyle = new PopupStyle; popupStyle->setParent(this); setStyle(popupStyle);
+    setStyle(sharedPopupStyle());
     auto* list = new QListView(this); list->setUniformItemSizes(true); list->setMouseTracking(true);
     list->setTextElideMode(Qt::ElideRight); list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel); list->setFrameShape(QFrame::NoFrame);
@@ -73,7 +81,7 @@ NativeComboBox::NativeComboBox(QWidget* parent) : QComboBox(parent) {
 }
 NativeComboBox::~NativeComboBox() {
     // Qt 6.4 can send FocusOut while destroying the popup view. Clear its
-    // focus and detach the owned proxy before QObject deletes style children.
+    // focus before deleting popup children, while their style is still alive.
     hidePopup(); view()->clearFocus(); setStyle(nullptr);
 }
 void NativeComboBox::showPopup() {

@@ -251,6 +251,31 @@ RAWKEY_SUITE("production mixed model across keyboard layouts", production_layout
     }
 }
 
+RAWKEY_SUITE("production leading first tone gang reaches the model before a following word", production_leading_gang) {
+    for (const auto& [layout, keys] : std::array{
+        std::pair{"standard", "e; "}, std::pair{"hsu", "gk "},
+        std::pair{"ibm", "9v "}, std::pair{"et", "v0 "},
+        std::pair{"ginyieh", "r; "}, std::pair{"et26", "vt "},
+        std::pair{"dachen_cp26", "ell "},
+    }) {
+        ScriptService service;
+        auto value = smart_options();
+        value.config.keyboard_layout = layout;
+        value.config.smart_model_preview = true;
+        value.socket_path = service.socket.string();
+        Harness harness(value);
+        harness.type(keys);
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }));
+        RAWKEY_ASSERT(service.calls.load() != 0);
+        RAWKEY_ASSERT(harness.preedit() == "剛");
+        RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(keys));
+        harness.expect_commit("剛");
+        RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
 RAWKEY_SUITE("production mixed model preview", production_mixed_model_preview) {
     const auto options = [](const ScriptService& service) {
         auto value = smart_options();
@@ -529,6 +554,117 @@ RAWKEY_SUITE("production mixed model unresolved keys remain raw and late answers
                segment.reading.empty() && segment.candidates.empty();
     }));
     harness.expect_commit(shown);
+}
+
+RAWKEY_SUITE("production smart cursor model uses only the prefix and preserves the suffix", production_cursor_models) {
+    for (const auto action : {"settle", "select", "commit", "undo"}) {
+        ScriptService service(true);
+        auto value = smart_options();
+        value.config.smart_model_preview = true;
+        value.socket_path = service.socket.string();
+        Harness harness(value);
+        harness.set_surrounding("history", 7, 7);
+        harness.type("su3cl3");
+        wait_request(harness, service);
+        harness.key("Down");
+        harness.choose_text("你好");
+        harness.key("Left");
+        harness.type("hellosu3cl3");
+        RAWKEY_ASSERT(harness.preedit() == "你hello你好好");
+        if (std::string_view(action) == "select") {
+            harness.key("Down");
+            harness.choose_text("hello你好");
+        } else if (std::string_view(action) == "commit") {
+            harness.expect_commit("你hello你好好");
+        } else if (std::string_view(action) == "undo") {
+            for (int i = 0; i < 6; ++i) harness.key("Shift+BackSpace");
+            RAWKEY_ASSERT(harness.preedit() == "你hello好");
+        }
+        service.release();
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }));
+        if (std::string_view(action) == "settle") {
+            RAWKEY_ASSERT(harness.preedit() == "你hello擬好好");
+            const auto contexts = service.contexts();
+            RAWKEY_ASSERT(std::ranges::find(contexts, u"history你hello") != contexts.end());
+            RAWKEY_ASSERT(std::ranges::find(contexts, u"history你好hello") == contexts.end());
+            harness.key("Right");
+            RAWKEY_ASSERT(harness.session()->pending_token.empty());
+            RAWKEY_ASSERT(harness.preedit() == "你hello擬好好");
+            harness.expect_commit("你hello擬好好");
+        } else if (std::string_view(action) == "select") {
+            RAWKEY_ASSERT(harness.preedit() == "你hello你好好");
+            harness.expect_commit("你hello你好好");
+        } else if (std::string_view(action) == "commit") {
+            RAWKEY_ASSERT(harness.composition_empty());
+            RAWKEY_ASSERT(harness.last_commit() == "你hello你好好");
+        } else {
+            RAWKEY_ASSERT(harness.preedit() == "你hello好");
+            harness.expect_commit("你hello好");
+        }
+        RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
+RAWKEY_SUITE("production smart cursor service errors preserve settled word choices", production_cursor_service_failure) {
+    ScriptService service(false, 3);
+    auto value = smart_options();
+    value.config.smart_model_preview = true;
+    value.socket_path = service.socket.string();
+    Harness harness(value);
+    const auto settled = [&] {
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }));
+    };
+    harness.type("xu/4j94vu04y94appao6u.3wj61ul ");
+    settled();
+    RAWKEY_ASSERT(harness.preedit() == "另外現在app沒有圖標");
+    harness.key("Left");
+    settled();
+    RAWKEY_ASSERT(harness.preedit() == "另外現在app沒有圖標");
+    harness.key("Left");
+    harness.type("hellosu3cl3");
+    settled();
+    RAWKEY_ASSERT(harness.preedit() == "另外現在app沒有hello你好圖標");
+    harness.key("Right");
+    settled();
+    RAWKEY_ASSERT(harness.preedit() == "另外現在app沒有hello你好圖標");
+    harness.expect_commit("另外現在app沒有hello你好圖標");
+    RAWKEY_ASSERT(service.ok.load());
+}
+
+RAWKEY_SUITE("production smart cursor late replies cannot cross a focus boundary", production_cursor_focus_boundary) {
+    ScriptService service(true);
+    auto value = smart_options();
+    value.config.smart_model_preview = true;
+    value.socket_path = service.socket.string();
+    Harness harness(value);
+    harness.set_surrounding("你🙂", 3, 3);
+    harness.type("su3cl3");
+    wait_request(harness, service);
+    harness.key("Left");
+    harness.type("hellosu3cl3");
+    harness.expect_focus_out_commit("你hello你好好");
+    const auto original = harness.host().commits();
+    RAWKEY_ASSERT(original.size() == 1 && original.front().first == 1);
+    harness.use_context(2);
+    harness.set_surrounding("", 0, 0);
+    harness.type("world");
+    service.release();
+    RAWKEY_ASSERT(harness.pump_until([&] {
+        const auto* old = harness.engine().session(1);
+        return harness.pending_model_idle() && harness.engine().pending_model_idle(1) &&
+               old != nullptr && !old->prediction.pending;
+    }));
+    RAWKEY_ASSERT(harness.preedit() == "world");
+    RAWKEY_ASSERT(harness.context_text().empty());
+    RAWKEY_ASSERT(harness.host().commits() == original);
+    harness.expect_commit("world");
+    const auto commits = harness.host().commits();
+    RAWKEY_ASSERT(commits.size() == 2 && commits.back().first == 2);
+    RAWKEY_ASSERT(service.ok.load());
 }
 
 RAWKEY_SUITE("production isolated tones remain raw and do not request phantom readings", production_orphan_tones) {

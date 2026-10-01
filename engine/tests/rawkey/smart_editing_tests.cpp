@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 using namespace llavon::ime;
 using namespace llavon::ime::rawkey;
@@ -107,6 +108,193 @@ RAWKEY_SUITE("smart editing settled middle deletion and manual choices", smart_e
         RAWKEY_ASSERT(harness.preedit() == literal);
         harness.expect_commit(literal);
     }
+}
+
+RAWKEY_SUITE("smart cursor insertion preview and commit stay at the caret", smart_cursor_insert) {
+    for (const auto& [layout, keys] : layouts) {
+        for (const int moves : {1, 2}) {
+            Harness harness(smart(layout));
+            harness.type(keys);
+            for (int i = 0; i < moves; ++i) harness.key("Left");
+            const std::string before = moves == 1 ? "你" : "";
+            const std::string after = moves == 1 ? "好" : "你好";
+            harness.type(std::string_view(keys).substr(0, 1));
+            const auto unfinished = before + std::string(keys).substr(0, 1) + after;
+            if (harness.preedit() != unfinished) {
+                throw Failure{std::string(layout) + ": middle raw preview expected " + unfinished + ", got " + harness.preedit()};
+            }
+            RAWKEY_ASSERT(harness.engine().render_state(1).caret == static_cast<size_t>(3 - moves));
+            harness.type(std::string_view(keys).substr(1));
+            const auto expected = before + "你好" + after;
+            RAWKEY_ASSERT(harness.preedit() == expected);
+            RAWKEY_ASSERT(harness.engine().render_state(1).caret == static_cast<size_t>(4 - moves));
+            RAWKEY_ASSERT(harness.commits().empty());
+            harness.expect_commit(expected);
+        }
+    }
+}
+
+RAWKEY_SUITE("smart cursor insertion settles before continued navigation", smart_cursor_settle) {
+    for (const auto& [layout, keys] : layouts) {
+        Harness harness(smart(layout));
+        harness.type(keys);
+        harness.key("Left");
+        harness.type(keys);
+        harness.key("Right");
+        RAWKEY_ASSERT(harness.session()->pending_token.empty());
+        RAWKEY_ASSERT(harness.preedit() == "你你好好");
+        RAWKEY_ASSERT(harness.engine().render_state(1).caret == 4);
+        harness.key("Left");
+        harness.key("BackSpace");
+        RAWKEY_ASSERT(harness.preedit() == "你你好");
+        harness.expect_commit("你你好");
+    }
+}
+
+RAWKEY_SUITE("smart cursor insertion keeps literal islands and raw undo", smart_cursor_mixed) {
+    for (const auto& [layout, keys] : layouts) {
+        Harness harness(smart(layout));
+        harness.type(keys);
+        harness.key("Left");
+        harness.type("hello");
+        RAWKEY_ASSERT(harness.preedit() == "你hello好");
+        RAWKEY_ASSERT(harness.engine().render_state(1).caret == 6);
+        harness.type(keys);
+        RAWKEY_ASSERT(harness.preedit() == "你hello你好好");
+        for (size_t i = 0; i < std::string_view(keys).size(); ++i) harness.key("Shift+BackSpace");
+        RAWKEY_ASSERT(harness.preedit() == "你hello好");
+        harness.key("BackSpace");
+        RAWKEY_ASSERT(harness.preedit() == "你hell好");
+        harness.type("o");
+        harness.key("Right");
+        RAWKEY_ASSERT(harness.preedit() == "你hello好");
+        RAWKEY_ASSERT(harness.session()->pending_token.empty());
+        harness.expect_commit("你hello好");
+    }
+}
+
+RAWKEY_SUITE("smart cursor insertion candidates and lifecycle keep the suffix", smart_cursor_commit_routes) {
+    for (const auto& [layout, keys] : layouts) {
+        for (const auto route : {"select", "raw", "candidate-return", "focus-out", "deactivate", "shift-space"}) {
+            Harness harness(smart(layout));
+            harness.type(keys);
+            harness.key("Down");
+            harness.choose_text("你好");
+            harness.key("Left");
+            harness.type(keys);
+            const auto expected = std::string("你你好好");
+            if (std::string_view(route) == "focus-out") {
+                harness.expect_focus_out_commit(expected);
+            } else if (std::string_view(route) == "deactivate") {
+                harness.engine().deactivate(1);
+                RAWKEY_ASSERT(harness.last_commit() == expected);
+                RAWKEY_ASSERT(harness.composition_empty());
+            } else if (std::string_view(route) == "shift-space") {
+                harness.expect_direct_commit(expected + " ", Key("Shift+space"));
+            } else {
+                harness.key("Down");
+                if (std::string_view(route) == "raw") {
+                    harness.choose_text(keys);
+                    RAWKEY_ASSERT(harness.preedit() == "你" + std::string(keys) + "好");
+                    harness.expect_commit("你" + std::string(keys) + "好");
+                } else if (std::string_view(route) == "select") {
+                    harness.choose_text("你好");
+                    RAWKEY_ASSERT(harness.preedit() == expected);
+                    RAWKEY_ASSERT(harness.session()->pending_token.empty());
+                    RAWKEY_ASSERT(harness.session()->buffer.caret() == 3);
+                    harness.expect_commit(expected);
+                } else {
+                    harness.expect_commit(expected);
+                }
+            }
+        }
+    }
+}
+
+RAWKEY_SUITE("smart cursor shifted navigation settles the inserted reading before marking", smart_cursor_marking) {
+    Harness harness(smart("standard"));
+    harness.type("su3cl3");
+    harness.key("Left");
+    harness.type("su3cl3");
+    harness.key("Shift+Left");
+    RAWKEY_ASSERT(harness.session()->pending_token.empty());
+    RAWKEY_ASSERT(harness.preedit() == "你你好好");
+    RAWKEY_ASSERT(harness.session()->buffer.marked_text() == u"好");
+    harness.key("Escape");
+    RAWKEY_ASSERT(harness.session()->buffer.caret() == 3);
+    harness.expect_commit("你你好好");
+}
+
+RAWKEY_SUITE("smart cursor insertion commit samples follow the inserted positions", smart_cursor_training) {
+    for (const auto text : {"su3cl3", "hellosu3cl3", "hello"}) {
+        std::vector<InputEffect::CommitSample> samples;
+        auto value = smart("standard");
+        value.on_training_commit = [&](const auto& sample, std::u16string_view) { samples.push_back(sample); };
+        Harness harness(value);
+        harness.type("su3cl3");
+        harness.key("Down");
+        harness.choose_text("你好");
+        harness.key("Left");
+        harness.type(text);
+        const auto expected = harness.preedit();
+        harness.expect_commit(expected);
+        RAWKEY_ASSERT(samples.size() == 1);
+        const auto& sample = samples.front();
+        RAWKEY_ASSERT(sample.answer == utf8_to_u16(expected));
+        RAWKEY_ASSERT(sample.entries.front().reading == u"ㄋㄧˇ" && sample.entries.front().manually_selected);
+        RAWKEY_ASSERT(sample.entries.back().reading == u"ㄏㄠˇ" && sample.entries.back().manually_selected);
+        const bool literal = std::string_view(text).starts_with("hello");
+        const size_t start = literal ? 6 : 1;
+        if (literal) {
+            for (size_t i = 1; i < 6; ++i) RAWKEY_ASSERT(sample.entries[i].literal);
+        }
+        if (std::string_view(text) != "hello") {
+            RAWKEY_ASSERT(sample.entries[start].reading == u"ㄋㄧˇ");
+            RAWKEY_ASSERT(sample.entries[start + 1].reading == u"ㄏㄠˇ");
+            RAWKEY_ASSERT(!sample.entries[start].literal && !sample.entries[start].manually_selected);
+        }
+    }
+}
+
+RAWKEY_SUITE("smart cursor insertion in a mixed sentence preserves text on both sides", smart_cursor_sentence) {
+    Harness harness(smart("standard"));
+    harness.type("xu/4j94vu04y94appao6u.3wj61ul ");
+    RAWKEY_ASSERT(harness.preedit() == "另外現在app沒有圖標");
+    harness.key("Left");
+    harness.key("Left");
+    harness.type("hellosu3cl3");
+    if (harness.preedit() != "另外現在app沒有hello你好圖標") {
+        throw Failure{"mixed sentence middle insertion: " + harness.preedit()};
+    }
+    RAWKEY_ASSERT(harness.engine().render_state(1).caret == 16);
+    harness.key("Delete");
+    RAWKEY_ASSERT(harness.preedit() == "另外現在app沒有hello你好標");
+    harness.expect_commit("另外現在app沒有hello你好標");
+}
+
+RAWKEY_SUITE("smart cursor insertion can settle for explicit English and repair wrong keys", smart_cursor_explicit_english) {
+    for (const auto& [layout, keys] : layouts) {
+        Harness harness(smart(layout));
+        harness.set_config("ShiftLetterKeys", "directly_put_to_buffer");
+        harness.type(keys);
+        harness.key("Left");
+        harness.type(keys);
+        harness.key("A");
+        RAWKEY_ASSERT(harness.session()->pending_token.empty());
+        RAWKEY_ASSERT(harness.preedit() == "你你好a好");
+        harness.type("hello");
+        harness.key("Left");
+        RAWKEY_ASSERT(harness.preedit() == "你你好ahello好");
+        harness.expect_commit("你你好ahello好");
+    }
+    Harness harness(smart("standard"));
+    harness.type("su3cl3");
+    harness.key("Left");
+    harness.type("su3cl3sss");
+    RAWKEY_ASSERT(harness.preedit() == "你你好sss好");
+    for (int i = 0; i < 3; ++i) harness.key("BackSpace");
+    RAWKEY_ASSERT(harness.preedit() == "你你好好");
+    harness.expect_commit("你你好好");
 }
 
 RAWKEY_SUITE("smart editing order independent phonetics", smart_order_independent) {
@@ -477,5 +665,126 @@ RAWKEY_SUITE("smart lexical spans recover stranded singleton readings across lay
         harness.type(raw);
         RAWKEY_ASSERT(harness.preedit() == raw);
         harness.expect_commit(raw);
+    }
+}
+
+RAWKEY_SUITE("smart leading first tone gang is Chinese before any following word", smart_leading_gang) {
+    constexpr std::array keys{
+        std::pair{"standard", "e; "}, std::pair{"hsu", "gk "},
+        std::pair{"ibm", "9v "}, std::pair{"et", "v0 "},
+        std::pair{"ginyieh", "r; "}, std::pair{"et26", "vt "},
+        std::pair{"dachen_cp26", "ell "},
+    };
+    for (const auto& [layout, raw] : keys) {
+        Harness harness(smart(layout));
+        const std::string body = std::string(raw).substr(0, std::string_view(raw).size() - 1);
+        harness.type(body);
+        RAWKEY_ASSERT(harness.commits().empty());
+        harness.key("space");
+        if (harness.preedit() != "剛") throw Failure{std::string(layout) + ": leading 剛 became " + harness.preedit()};
+        RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(raw));
+        harness.key("Shift+BackSpace");
+        RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(body));
+        harness.key("space");
+        RAWKEY_ASSERT(harness.preedit() == "剛");
+        harness.key("BackSpace");
+        RAWKEY_ASSERT(harness.composition_empty());
+        harness.type(raw);
+        harness.expect_commit("剛");
+        harness.type(raw);
+        harness.key("Down");
+        harness.choose_text(raw);
+        harness.expect_commit(raw);
+    }
+}
+
+RAWKEY_SUITE("smart first tone punctuation keys do not depend on a preceding Chinese anchor", smart_first_tone_symbols) {
+    // Independent physical keys for distinct initials/finals. This checks the
+    // phonetic path, without pinning unrelated same-reading character choices.
+    for (const auto& [raw, reading] : std::array{
+        std::pair{"e; ", u"ㄍㄤ "},
+        std::pair{"e/ ", u"ㄍㄥ "}, std::pair{"ej/ ", u"ㄍㄨㄥ "},
+        std::pair{"fu. ", u"ㄑㄧㄡ "}, std::pair{"vu/ ", u"ㄒㄧㄥ "},
+    }) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        const auto& decision = harness.session()->mixed_decision;
+        const auto& path = decision.result.paths.at(decision.preview_path);
+        if (path.segments.size() != 1) throw Failure{std::string(raw) + ": expected one phonetic segment, got " + harness.preedit()};
+        RAWKEY_ASSERT(path.segments.front().kind == MixedSegmentKind::Bopomofo);
+        RAWKEY_ASSERT(path.segments.front().reading == reading);
+        RAWKEY_ASSERT(harness.preedit() != raw);
+        harness.expect_commit(harness.preedit());
+    }
+    // The evidence is a ranking signal, not a rule forcing every punctuation
+    // spelling into Chinese. A stronger literal interpretation stays usable,
+    // and its valid first-tone alternative can still be explicitly selected.
+    {
+        Harness harness(smart("standard"));
+        harness.type("d; ");
+        RAWKEY_ASSERT(harness.preedit() == "d; ");
+        harness.key("Down");
+        harness.choose_text("康");
+        harness.expect_commit("康");
+    }
+    for (const auto& [layout, raw, following] : std::array{
+        std::tuple{"standard", "e; ", "h96"}, std::tuple{"ginyieh", "r; ", "j9q"},
+    }) {
+        Harness harness(smart(layout));
+        harness.type(raw);
+        RAWKEY_ASSERT(harness.preedit() == "剛");
+        harness.type(following);
+        RAWKEY_ASSERT(harness.preedit() == "剛才");
+        harness.key("BackSpace");
+        RAWKEY_ASSERT(harness.preedit() == "剛");
+        harness.expect_commit("剛");
+    }
+    for (const auto& [layout, prefix] : layouts) {
+        (void)prefix;
+        for (const auto raw : {"hello; ", "world. ", "config.json ", "readme.md ", "foo_bar; ",
+                               "https://example.org ", "git status; "}) {
+            Harness harness(smart(layout));
+            harness.type(raw);
+            if (harness.preedit() != raw) throw Failure{std::string(layout) + ": punctuation literal " + raw + " became " + harness.preedit()};
+            harness.expect_commit(raw);
+        }
+    }
+    // A phonetic-looking suffix after a literal command is not a leading
+    // syllable. Do not give command options the new initial-reading evidence.
+    for (const auto layout : {"standard", "ginyieh"}) {
+        Harness harness(smart(layout));
+        harness.type("gcc -g ");
+        RAWKEY_ASSERT(harness.preedit() == "gcc -g ");
+        harness.expect_commit("gcc -g ");
+    }
+}
+
+RAWKEY_SUITE("smart leading reading audit preserves Chinese and exact raw recovery", smart_leading_audit_recovery) {
+    // These common readings can lose to a literal at the beginning. Do not
+    // pin that deficient default ranking: require their explicit Chinese and
+    // exact raw alternatives, so a future automatic improvement remains free.
+    constexpr std::array keys{
+        std::array{"standard", "d; ", "w; ", "d/ ", "t. ", "y; "},
+        std::array{"hsu", "kk ", "tk ", "kl ", "vo ", "zk "},
+        std::array{"ibm", "0v ", "6v ", "0b ", "tz ", "iv "},
+        std::array{"et", "k0 ", "t0 ", "k- ", ".y ", ";0 "},
+        std::array{"ginyieh", "f; ", "e; ", "f/ ", "y. ", "u; "},
+        std::array{"et26", "kt ", "tt ", "kl ", "yp ", "qt "},
+        std::array{"dachen_cp26", "dll ", "wwll ", "dn ", "ttmm ", "yll "},
+    };
+    constexpr std::array words{"康", "湯", "坑", "抽", "髒"};
+    for (const auto& row : keys) {
+        for (size_t index = 0; index < words.size(); ++index) {
+            Harness chinese(smart(row[0]));
+            chinese.type(row[index + 1]);
+            chinese.key("Down");
+            chinese.choose_text(words[index]);
+            chinese.expect_commit(words[index]);
+            Harness literal(smart(row[0]));
+            literal.type(row[index + 1]);
+            literal.key("Down");
+            literal.choose_text(row[index + 1]);
+            literal.expect_commit(row[index + 1]);
+        }
     }
 }

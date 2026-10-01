@@ -65,7 +65,8 @@ public:
     // where the marking started, so the range between them can be stored as a
     // phrase override. Any text edit or plain cursor move cancels the mark.
     bool extend_selection(int delta);
-    bool clear_selection();
+    // Escape restores the marking anchor; a new edit cancels only the mark.
+    bool clear_selection(bool restore_caret = true);
     std::optional<std::pair<size_t, size_t>> marked_range() const;
     std::u16string marked_text() const;
     std::vector<std::u16string> marked_readings() const;

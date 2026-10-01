@@ -67,6 +67,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/hsu_layout_tests.cpp
     rawkey/keyboard_layout_tests.cpp
     rawkey/smart_editing_tests.cpp
+    rawkey/smart_cursor_boundary_tests.cpp
     rawkey/lifecycle_tests.cpp
     rawkey/memory_format_tests.cpp
     rawkey/phrase_override_tests.cpp

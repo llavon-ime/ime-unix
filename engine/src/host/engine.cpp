@@ -545,7 +545,7 @@ void Engine::open_prediction_session(ContextId context, std::uint64_t generation
             const auto fallback_indices = session->prediction.segment_indices;
             const bool dirty = session->prediction.finish();
             for (const auto index : fallback_indices) {
-                processor_.apply_fallback_candidates(*session, index);
+                processor_.apply_fallback_candidates(*session, index, true);
             }
             processor_.apply_phrase_override(*session);
             if (dirty) request_prediction(context, *session);
@@ -601,7 +601,7 @@ void Engine::handle_prediction_response(ContextId context, std::uint64_t generat
                 session->prediction.session_id = {};
             }
             for (const auto index : session->prediction.segment_indices) {
-                processor_.apply_fallback_candidates(*session, index);
+                processor_.apply_fallback_candidates(*session, index, true);
             }
         }
     }

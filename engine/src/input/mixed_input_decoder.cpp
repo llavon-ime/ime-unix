@@ -27,6 +27,20 @@ constexpr double kKnownWordBoost = 4.0;
 constexpr double kSwitchPenalty = 3.0;
 constexpr double kFragmentPenalty = 3.0;
 
+double first_tone_symbol_evidence(std::u16string_view body) {
+    // A leading completed reading may use punctuation as a physical phonetic key.
+    // Without this evidence, cheap ASCII symbol edges plus a one-letter word
+    // can outrank the whole syllable even after its first-tone Space. Ordinary
+    // letter words get no bonus; raw remains a scored, reversible alternative.
+    // Callers limit it to the initial edge: punctuation after a literal prefix
+    // (for example a command option) is not fresh leading phonetic evidence.
+    return 0.4 * static_cast<double>(std::ranges::count_if(body, [](char16_t key) {
+        return key > u' ' && key <= u'~' &&
+               !(key >= u'a' && key <= u'z') && !(key >= u'A' && key <= u'Z') &&
+               !(key >= u'0' && key <= u'9');
+    }));
+}
+
 bool is_explicit_tone_key(char32_t key, BopomofoKeyboardLayout layout) {
     return is_bopomofo_tone_key(key, layout);
 }
@@ -227,7 +241,8 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                 const bool letter_tone = tone_key >= U'a' && tone_key <= U'z';
                 segment.score = (tone_key == U' ' ? (is_compact_bopomofo_layout(layout) ? 3.5 : 3.4) :
                                  letter_tone ? 0.0 : 3.4) +
-                                0.4 * static_cast<double>(body.size());
+                                0.4 * static_cast<double>(body.size()) +
+                                (tone_key == U' ' && i == 0 ? first_tone_symbol_evidence(body) : 0.0);
                 add_edge(i, j, std::move(segment));
             }
         }
@@ -330,7 +345,8 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                 segment.reading = std::move(reading);
                 segment.candidates = std::move(candidates);
                 segment.score = (is_compact_bopomofo_layout(layout) ? 3.5 : 3.4) +
-                                0.4 * static_cast<double>(body_len);
+                                0.4 * static_cast<double>(body_len) +
+                                (i == 0 ? first_tone_symbol_evidence(raw.substr(i)) : 0.0);
                 add_edge(i, n, std::move(segment));
             }
         }

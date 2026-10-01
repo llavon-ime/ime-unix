@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QMap>
 #include <QWidget>
 
 class QLabel;
+class QVBoxLayout;
 
 namespace llavon::lora {
 
@@ -36,6 +38,7 @@ public:
     bool reload();
 private:
     void fill(const QJsonObject& values);
+    void buildGroup(const QString& group);
     QJsonObject values() const;
     void save();
     void changed();
@@ -44,6 +47,8 @@ private:
     SettingsStore store_;
     bool phrases_, dirty_ = false, loading_ = false;
     QMap<QString, QWidget*> fields_;
+    QMap<QString, QJsonArray> groupFields_;
+    QMap<QString, QVBoxLayout*> groupLayouts_;
     PhraseList* phraseList_ = nullptr;
     QLabel* checkStatus_ = nullptr;
     QLabel* status_;

@@ -111,7 +111,7 @@ QString timeLabel(const QString& value) {
 }
 }
 
-Manager::Manager(Backend* backend, const QString& hostHelper) : backend_(backend) {
+Manager::Manager(Backend* backend, const QString& hostHelper, const QString& initialPage) : backend_(backend) {
     setWindowTitle(QStringLiteral("拉風 · 設定與個人化"));
     resize(1080, 760);
     setMinimumSize(800, 620);
@@ -143,7 +143,7 @@ Manager::Manager(Backend* backend, const QString& hostHelper) : backend_(backend
     navigation->setMinimumHeight(374);
     side->addWidget(navigation);
     side->addStretch();
-    message_ = label(QStringLiteral("正在連接…"));
+    message_ = label(QStringLiteral("設定已就緒"));
     message_->setObjectName("notice");
     side->addWidget(message_);
     side->addWidget(label(QStringLiteral("個人資料儲存於此裝置"), "eyebrow"));
@@ -165,11 +165,9 @@ Manager::Manager(Backend* backend, const QString& hostHelper) : backend_(backend
     layout->addLayout(titleRow);
     pages_ = new QStackedWidget;
     layout->addWidget(pages_, 1);
-    pages_->addWidget(recordsPage());
-    pages_->addWidget(trainingPage());
-    pages_->addWidget(historyPage());
-    settings_ = new SettingsPage(false); phrases_ = new SettingsPage(true, nullptr, backend_->phraseTablePath());
-    pages_->addWidget(settings_); pages_->addWidget(phrases_);
+    for (int index = 0; index < 3; ++index) pages_->addWidget(new QWidget);
+    settings_ = new SettingsPage(false);
+    pages_->addWidget(settings_); pages_->addWidget(new QWidget);
 #ifdef Q_OS_LINUX
     updates_ = new LinuxUpdatesPage([this] { return running_ || actionPending_ || state_.isEmpty(); });
     pages_->addWidget(updates_);
@@ -184,6 +182,15 @@ Manager::Manager(Backend* backend, const QString& hostHelper) : backend_(backend
     connect(navigation, &QListWidget::currentRowChanged, this, [this, navigation](int row) {
         if (row < 0) return;
         const int index = navigation->item(row)->data(Qt::UserRole).toInt();
+        if (index < 3) ensurePersonalizationPages();
+        const bool firstPhraseVisit = index == 4 && !phrases_;
+        if (firstPhraseVisit) {
+            // Reading tables and building every phrase row are unrelated to
+            // opening Settings. Keep that work on the first visit to Phrases.
+            phrases_ = new SettingsPage(true, nullptr, backend_->phraseTablePath());
+            auto* placeholder = pages_->widget(4); pages_->removeWidget(placeholder);
+            pages_->insertWidget(4, phrases_); delete placeholder;
+        }
         pages_->setCurrentIndex(index);
         const QStringList headings{QStringLiteral("訓練資料"), QStringLiteral("模型與訓練"), QStringLiteral("訓練歷程"), QStringLiteral("輸入法設定"), QStringLiteral("替代詞彙"), QStringLiteral("軟體更新"), QStringLiteral("版本與狀態")};
         const QStringList subtitles{QStringLiteral("留下值得學習的句子，讓選字更懂你。"),
@@ -192,10 +199,9 @@ Manager::Manager(Backend* backend, const QString& hostHelper) : backend_(backend
         heading_->setText(headings.value(index));
         subtitle_->setText(subtitles.value(index));
         if (index == 3 && !settings_->isDirty()) settings_->reload();
-        if (index == 4 && !phrases_->isDirty()) phrases_->reload();
+        if (index == 4 && !firstPhraseVisit && !phrases_->isDirty()) phrases_->reload();
         if (auto* host = qobject_cast<HostSettingsPage*>(pages_->currentWidget())) host->refresh();
     });
-    navigation->setCurrentRow(2);
     connect(refreshButton, &QPushButton::clicked, this, &Manager::refresh);
     connect(backend_, &Backend::ready, this, &Manager::refresh);
     connect(backend_, &Backend::error, this, [this](const QString& error) { notice(error, true); });
@@ -204,15 +210,29 @@ Manager::Manager(Backend* backend, const QString& hostHelper) : backend_(backend
     timer_ = new QTimer(this);
     timer_->setInterval(3000);
     connect(timer_, &QTimer::timeout, this, &Manager::refresh);
-    timer_->start();
     applyAppearance(this);
     qApp->installEventFilter(this);
+    showPage(initialPage);
+}
+
+void Manager::ensurePersonalizationPages() {
+    if (personalizationReady_) return;
+    const QList<QWidget*> content{recordsPage(), trainingPage(), historyPage()};
+    for (int index = 0; index < content.size(); ++index) {
+        auto* placeholder = pages_->widget(index); pages_->removeWidget(placeholder);
+        pages_->insertWidget(index, content[index]); delete placeholder;
+    }
+    personalizationReady_ = true;
+    notice(QStringLiteral("正在連接…"));
+    for (auto* action : jobButtons_) action->setEnabled(false);
+    timer_->start();
+    QTimer::singleShot(0, backend_, &Backend::start);
 }
 
 bool Manager::eventFilter(QObject* watched, QEvent* event) {
     if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
         applyAppearance(this);
-        history_->viewport()->update();
+        if (history_) history_->viewport()->update();
     }
     return QMainWindow::eventFilter(watched, event);
 }
@@ -514,6 +534,12 @@ void Manager::notice(const QString& message, bool error) {
 }
 
 void Manager::refresh() {
+    if (!personalizationReady_) {
+        if (auto* host = qobject_cast<HostSettingsPage*>(pages_->currentWidget())) host->refresh();
+        else if (pages_->currentWidget() == settings_ && !settings_->isDirty()) settings_->reload();
+        else if (phrases_ && pages_->currentWidget() == phrases_ && !phrases_->isDirty()) phrases_->reload();
+        return;
+    }
     if (refreshPending_ || actionPending_) return;
     refreshPending_ = 5;
     const auto done = [this] { if (--refreshPending_ == 0) emit refreshed(); };
@@ -743,7 +769,7 @@ void Manager::closeEvent(QCloseEvent* event) {
         event->ignore(); return;
     }
 #endif
-    if ((settings_->isDirty() || phrases_->isDirty()) && QMessageBox::question(this, QStringLiteral("尚未儲存"),
+    if ((settings_->isDirty() || (phrases_ && phrases_->isDirty())) && QMessageBox::question(this, QStringLiteral("尚未儲存"),
         QStringLiteral("設定或替代詞彙有未儲存的修改。捨棄修改並關閉？"), QMessageBox::Yes | QMessageBox::Cancel,
         QMessageBox::Cancel) != QMessageBox::Yes) { event->ignore(); return; }
     if (running_ && QMessageBox::question(this, QStringLiteral("工作仍在執行"), QStringLiteral("關閉會取消目前工作。取消工作並關閉？"),

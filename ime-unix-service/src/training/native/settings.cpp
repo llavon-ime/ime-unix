@@ -175,7 +175,7 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
         tableLocation->setToolTip(phraseList_->tablePath()); tableLocation->setProperty("role", "muted"); layout->addWidget(tableLocation);
     } else {
         auto* tabs = new QTabWidget; tabs->setObjectName("settingsGroups"); layout->addWidget(tabs, 1);
-        QMap<QString, QVBoxLayout*> groups;
+        auto& groups = groupLayouts_;
         for (const auto item : SettingsStore::schema().value("fields").toArray()) {
             const auto field = item.toObject(); const auto group = field.value("group").toString();
             if (!groups.contains(group)) {
@@ -185,44 +185,12 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
                 auto* area = new QScrollArea; area->setFrameShape(QFrame::NoFrame); area->setWidgetResizable(true); area->setWidget(content);
                 tabs->addTab(area, group); groups.insert(group, form);
             }
-            const auto key = field.value("key").toString(), kind = field.value("kind").toString();
-            QWidget* input = nullptr;
-            if (kind == "boolean" || kind == "choice") {
-                auto* combo = new NativeComboBox;
-                if (kind == "boolean") { combo->addItem(QStringLiteral("啟用"), true); combo->addItem(QStringLiteral("關閉"), false); }
-                else for (const auto option : field.value("choices").toArray()) {
-                    const auto choice = option.toObject(); combo->addItem(choice.value("label").toString(), choice.value("value").toString());
-                }
-                connect(combo, &QComboBox::currentIndexChanged, this, &SettingsPage::changed); input = combo;
-            } else if (kind == "integer") {
-                auto* spin = new QSpinBox; spin->setRange(field.value("minimum").toInt(), field.value("maximum").toInt());
-                connect(spin, &QSpinBox::valueChanged, this, &SettingsPage::changed); input = spin;
-            } else {
-                auto* line = new QLineEdit; line->setPlaceholderText(QStringLiteral("留空使用預設模型"));
-                connect(line, &QLineEdit::textChanged, this, &SettingsPage::changed); input = line;
-            }
-            input->setObjectName("setting_" + key); input->setMinimumHeight(34);
-            input->setAccessibleName(field.value("label").toString()); fields_.insert(key, input);
-            auto* settingRow = new QFrame; settingRow->setObjectName("settingRow");
-            auto* rowLayout = new QVBoxLayout(settingRow); rowLayout->setContentsMargins(16, 10, 16, 10);
-            auto* title = new QLabel(field.value("label").toString()); title->setWordWrap(true); title->setBuddy(input);
-            if (key == "model_path") {
-                auto* row = new QWidget; auto* horizontal = new QHBoxLayout(row); horizontal->setContentsMargins(0, 0, 0, 0);
-                auto* browse = new QPushButton(QStringLiteral("選擇檔案…")); browse->setMinimumHeight(34);
-                horizontal->addWidget(input, 1); horizontal->addWidget(browse);
-                connect(browse, &QPushButton::clicked, this, [this, input] {
-                    const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("選擇推論模型"), {}, "GGUF (*.gguf);;All files (*)");
-                    if (!path.isEmpty()) qobject_cast<QLineEdit*>(input)->setText(path);
-                });
-                rowLayout->addWidget(title); rowLayout->addWidget(row);
-            } else {
-                auto* horizontal = new QHBoxLayout; horizontal->setSpacing(16);
-                input->setFixedWidth(200);
-                horizontal->addWidget(title, 1); horizontal->addWidget(input);
-                rowLayout->addLayout(horizontal);
-            }
-            groups[group]->insertWidget(groups[group]->count() - 1, settingRow);
+            groupFields_[group].append(field);
         }
+        connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](int index) {
+            if (index >= 0) buildGroup(tabs->tabText(index));
+        });
+        buildGroup(tabs->tabText(0));
     }
     auto* location = new QLabel(phrases ? QStringLiteral("phrase_overrides.txt") : QStringLiteral("設定儲存於此裝置"));
     location->setToolTip(phrases ? SettingsStore::phrasesPath() : SettingsStore::configPath());
@@ -247,6 +215,63 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
     reload();
 }
 
+void SettingsPage::buildGroup(const QString& group) {
+    if (!groupFields_.contains(group)) return;
+    const bool wasLoading = loading_; loading_ = true;
+    const auto items = groupFields_.take(group);
+    for (const auto item : items) {
+        const auto field = item.toObject();
+        const auto key = field.value("key").toString(), kind = field.value("kind").toString();
+        QWidget* input = nullptr;
+        if (kind == "boolean" || kind == "choice") {
+            auto* combo = new NativeComboBox;
+            if (kind == "boolean") { combo->addItem(QStringLiteral("啟用"), true); combo->addItem(QStringLiteral("關閉"), false); }
+            else for (const auto option : field.value("choices").toArray()) {
+                const auto choice = option.toObject(); combo->addItem(choice.value("label").toString(), choice.value("value").toString());
+            }
+            connect(combo, &QComboBox::currentIndexChanged, this, &SettingsPage::changed); input = combo;
+        } else if (kind == "integer") {
+            auto* spin = new QSpinBox; spin->setRange(field.value("minimum").toInt(), field.value("maximum").toInt());
+            connect(spin, &QSpinBox::valueChanged, this, &SettingsPage::changed); input = spin;
+        } else {
+            auto* line = new QLineEdit; line->setPlaceholderText(QStringLiteral("留空使用預設模型"));
+            connect(line, &QLineEdit::textChanged, this, &SettingsPage::changed); input = line;
+        }
+        input->setObjectName("setting_" + key); input->setMinimumHeight(34);
+        input->setAccessibleName(field.value("label").toString()); fields_.insert(key, input);
+        auto* settingRow = new QFrame; settingRow->setObjectName("settingRow");
+        auto* rowLayout = new QVBoxLayout(settingRow); rowLayout->setContentsMargins(16, 10, 16, 10);
+        auto* title = new QLabel(field.value("label").toString()); title->setWordWrap(true); title->setBuddy(input);
+        if (key == "model_path") {
+            auto* row = new QWidget; auto* horizontal = new QHBoxLayout(row); horizontal->setContentsMargins(0, 0, 0, 0);
+            auto* browse = new QPushButton(QStringLiteral("選擇檔案…")); browse->setMinimumHeight(34);
+            horizontal->addWidget(input, 1); horizontal->addWidget(browse);
+            connect(browse, &QPushButton::clicked, this, [this, input] {
+                const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("選擇推論模型"), {}, "GGUF (*.gguf);;All files (*)");
+                if (!path.isEmpty()) qobject_cast<QLineEdit*>(input)->setText(path);
+            });
+            rowLayout->addWidget(title); rowLayout->addWidget(row);
+        } else {
+            auto* horizontal = new QHBoxLayout; horizontal->setSpacing(16);
+            input->setFixedWidth(200);
+            horizontal->addWidget(title, 1); horizontal->addWidget(input);
+            rowLayout->addLayout(horizontal);
+        }
+        auto* form = groupLayouts_.value(group);
+        form->insertWidget(form->count() - 1, settingRow);
+    }
+    // Initialize newly built fields without replacing edits in earlier groups.
+    for (const auto item : items) {
+        const auto field = item.toObject();
+        auto* input = fields_.value(field.value("key").toString());
+        const auto value = original_.value(field.value("key").toString());
+        if (auto* spin = qobject_cast<QSpinBox*>(input)) spin->setValue(value.toInt());
+        else if (auto* combo = qobject_cast<QComboBox*>(input)) combo->setCurrentIndex(combo->findData(value.toVariant()));
+        else if (auto* line = qobject_cast<QLineEdit*>(input)) line->setText(value.toString());
+    }
+    loading_ = wasLoading;
+}
+
 bool SettingsPage::checkPhrases() {
     const auto errors = phraseList_->errors();
     checkStatus_->setProperty("validation", errors.isEmpty() ? "valid" : "invalid");
@@ -267,7 +292,7 @@ void SettingsPage::fill(const QJsonObject& values) {
     }
 }
 QJsonObject SettingsPage::values() const {
-    QJsonObject result;
+    QJsonObject result = original_;
     for (auto it = fields_.cbegin(); it != fields_.cend(); ++it) {
         if (auto* spin = qobject_cast<QSpinBox*>(it.value())) result[it.key()] = spin->value();
         else if (auto* combo = qobject_cast<QComboBox*>(it.value())) result[it.key()] = QJsonValue::fromVariant(combo->currentData());

@@ -59,7 +59,9 @@ Backend::~Backend() {
     }
 }
 
-void Backend::start() { process_.start(program_, arguments_); }
+void Backend::start() {
+    if (process_.state() == QProcess::NotRunning) process_.start(program_, arguments_);
+}
 
 void Backend::request(const QString& path, QJsonObject body, Reply reply, bool post) {
     if (process_.state() != QProcess::Running) {

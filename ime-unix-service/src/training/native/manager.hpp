@@ -48,7 +48,7 @@ private:
 class Manager final : public QMainWindow {
     Q_OBJECT
 public:
-    explicit Manager(Backend* backend, const QString& hostHelper = {});
+    explicit Manager(Backend* backend, const QString& hostHelper = {}, const QString& initialPage = "records");
     void refresh();
     void showPage(const QString& page);
 signals:
@@ -60,6 +60,7 @@ private:
     QWidget* recordsPage();
     QWidget* trainingPage();
     QWidget* historyPage();
+    void ensurePersonalizationPages();
     void act(const QString& path, const QJsonObject& body = {}, Backend::Reply reply = {});
     void renderRecords(const QJsonObject& data);
     void renderProtection(const QJsonObject& data);
@@ -75,7 +76,8 @@ private:
     Backend* backend_;
     QTimer* timer_;
     QStackedWidget* pages_;
-    SettingsPage *settings_, *phrases_;
+    SettingsPage* settings_;
+    SettingsPage* phrases_ = nullptr;
     QLabel *heading_, *subtitle_, *message_, *collection_, *counts_, *pageInfo_, *model_, *trainer_, *device_, *job_, *historyDetail_, *emptyRecords_;
     QLineEdit *password_, *confirmation_, *trainPassword_;
     QLabel* trainPasswordLabel_ = nullptr;
@@ -83,7 +85,7 @@ private:
     QCheckBox *manualView_, *manualTrain_, *stabilize_;
     QPushButton *unlock_, *setup_, *lock_, *recording_, *forget_, *previous_, *next_, *exclude_, *delete_, *start_, *cancel_, *ancestor_;
     QTableWidget* records_;
-    HistoryGraph* history_;
+    HistoryGraph* history_ = nullptr;
     QMap<QString, QJsonObject> historyRuns_;
     QProgressBar* progress_;
     QPlainTextEdit* log_;
@@ -95,6 +97,7 @@ private:
     int refreshPending_ = 0;
     bool running_ = false;
     bool actionPending_ = false;
+    bool personalizationReady_ = false;
 #ifdef Q_OS_LINUX
     LinuxUpdatesPage* updates_ = nullptr;
 #endif

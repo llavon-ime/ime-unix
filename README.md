@@ -48,7 +48,7 @@ fcitx5 -r
 
 目前 Linux 發行套件僅支援 x86_64。
 
-新版原生設定視窗提供「軟體更新」頁，透過 PackageKit 檢查與安裝系統套件更新，並在組字完成後套用新版。使用前需部署並加入對應發行版的簽章更新來源；目前已加入 repository 產生與驗證工具，線上來源尚待配置。詳見 Linux App 更新。
+新版原生設定視窗提供「軟體更新」頁，透過 PackageKit 檢查與安裝系統套件更新，並在組字完成後套用新版。使用前需部署並加入對應發行版的簽章更新來源；目前已加入 repository 產生與驗證工具，線上來源尚待配置。
 
 ### macOS
 
@@ -66,7 +66,7 @@ brew install --cask llavon-ime
 
 也可以從 [GitHub Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`。目前僅提供 Apple Silicon（arm64）安裝檔。含內建更新器的新正式版發行要求 Developer ID 簽章與公證；舊版未簽章安裝包若被 Gatekeeper 阻擋，可在 Finder 中右鍵選擇「打開」。
 
-含內建更新器的正式版可從輸入來源選單選擇「檢查更新…」或「軟體更新設定…」，由 App 自動檢查與背景下載新版，不需執行 Homebrew 更新。安裝仍需要管理員授權，並會等待組字與個人化訓練工作完成；不含更新器的舊版需手動升級一次。發行設定見 macOS App 更新。
+含內建更新器的正式版可從輸入來源選單選擇「檢查更新…」或「軟體更新設定…」，由 App 自動檢查與背景下載新版，不需執行 Homebrew 更新。安裝仍需要管理員授權，並會等待組字與個人化訓練工作完成；不含更新器的舊版需手動升級一次。
 
 解除安裝：
 
@@ -86,7 +86,7 @@ sudo "/Library/Application Support/llavon-ime/uninstall.sh"
 
 ### 注音鍵盤與智慧型中英文
 
-可在設定中選擇「標準」、「許氏」、「IBM」、「倚天」、「精業」、「倚天26鍵」或「大千26鍵」，並另外開啟「智慧型中英文」（預設關閉）。七種配置都使用同一個混輸 decoder 與模型預覽；Linux 與 macOS 共用按鍵行為及設定清單。聲調鍵、配置範例與實測限制見 `docs/keyboard-layouts.md`。
+可在設定中選擇「標準」、「許氏」、「IBM」、「倚天」、「精業」、「倚天26鍵」或「大千26鍵」，並另外開啟「智慧型中英文」（預設關閉）。七種配置都使用同一個混輸 decoder 與模型預覽；Linux 與 macOS 共用按鍵行為及設定清單。
 
 開啟智慧型中英文後，中文音節、英文單字／前綴與字面內容會共同排名，每次按鍵更新最佳預覽。判斷使用獨立的英文詞頻、未知英文的拼寫模型與中文詞組前文；不把 `ime-core` 的 token 編號當詞頻，也不以單字命中或字母長度直接決定語言。
 
@@ -104,7 +104,7 @@ sudo "/Library/Application Support/llavon-ime/uninstall.sh"
 
 許氏的數字鍵不是聲調鍵。關閉智慧型中英文時，字母直接按許氏注音組字，不經英文判斷。
 
-標準鍵盤的 `283` 可直接預覽「打」，`hello283` 可預覽 `hello打`；原始數字仍能從候選取回。同一串按鍵有時確實同時是英文與合法注音，最佳結果不一定就是使用者意圖，可用 `Down` 改選。資料來源及再產生方式見 [`engine/data/README.md`](engine/data/README.md)，架構調查與目前實作範圍見 `docs/smart-mixed-input-redesign.md`。
+標準鍵盤的 `283` 可直接預覽「打」，`hello283` 可預覽 `hello打`；原始數字仍能從候選取回。同一串按鍵有時確實同時是英文與合法注音，最佳結果不一定就是使用者意圖，可用 `Down` 改選。資料來源及再產生方式見 [`engine/data/README.md`](engine/data/README.md)。
 
 ### 預測上下文
 
@@ -341,7 +341,7 @@ https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF
 可用服務安裝的 `llavon-ime-lora` 列出、排除或刪除待訓練紀錄，並以選配的
 [`lora-trainer`](https://github.com/llavon-ime/lora-trainer) 訓練個人化模型。
 也可從輸入法選單的「管理個人化訓練…」或 Fcitx5 齒輪的「使用我的輸入改進模型」按鈕開啟共用的原生管理器，
-檢視紀錄、下載基礎模型、管理訓練工作，並拖曳歷程節點。詳見 原生設定與個人化管理器。
+檢視紀錄、下載基礎模型、管理訓練工作，並拖曳歷程節點。
 訓練需要另外下載未量化的基礎 checkpoint；套件內的 Q4 GGUF 只供推論使用。
 完整指令及模型相容性說明見 [Unix 服務文件](ime-unix-service/README.md#選用的本機-lora-訓練)。
 

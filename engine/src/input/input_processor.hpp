@@ -142,7 +142,7 @@ public:
 
     // Prediction support: fallback candidates, model candidates, and phrase
     // overrides.
-    void apply_fallback_candidates(InputSession& session, std::size_t segment_index);
+    void apply_fallback_candidates(InputSession& session, std::size_t segment_index, bool preserve_existing = false);
     void apply_prediction(InputSession& session, const protocol::Prediction& prediction);
     void apply_phrase_override(InputSession& session);
 

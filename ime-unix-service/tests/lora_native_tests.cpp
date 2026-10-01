@@ -63,6 +63,9 @@ private slots:
     void historyGraphInteractions();
     void unifiedSettings();
     void pageLaunchRouting();
+    void deferredPhrasePage();
+    void settingsWithoutTrainingBackend();
+    void deferredSettingGroups();
     void phraseLookup();
     void appearanceChanges();
     void hostSettingsMigration();
@@ -475,6 +478,8 @@ void NativeTests::unifiedSettings() {
     Manager window(&backend); window.show(); backend.start();
     window.showPage("settings");
     QCOMPARE(widget<QListWidget>(window, "navigation")->currentRow(), 0);
+    auto* groups = widget<QTabWidget>(window, "settingsGroups");
+    for (int index = 0; index < groups->count(); ++index) groups->setCurrentIndex(index);
     for (const auto item : SettingsStore::schema().value("fields").toArray()) {
         const auto field = item.toObject();
         QVERIFY2(window.findChild<QWidget*>("setting_" + field.value("key").toString()), qPrintable(field.value("key").toString()));
@@ -483,7 +488,6 @@ void NativeTests::unifiedSettings() {
     count->setValue(9);
     window.showPage("history"); window.showPage("settings"); QCOMPARE(count->value(), 9);
     click(window, "saveSettings"); QCOMPARE(store.load().value("candidate_page_size").toInt(), 9);
-    auto* groups = widget<QTabWidget>(window, "settingsGroups");
     groups->setCurrentIndex(1); capture(window, "12-unified-settings");
     groups->setCurrentIndex(0); capture(window, "13-runtime-settings");
     window.showPage("phrases");
@@ -606,7 +610,12 @@ void NativeTests::pageLaunchRouting() {
     const auto name = "llavon-lora-" + QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256).toHex().left(24));
     QLocalServer server; QVERIFY(server.listen(name));
     for (const auto* page : {"settings", "phrases", "records", "training", "history", "updates", "about"}) {
-        QProcess app; app.start(LLAVON_TEST_GUI, {"--state-dir", directory.path(), "--page", page});
+        QProcess app;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        // Warm routing must work without loading any GUI platform plugin.
+        environment.insert("QT_QPA_PLATFORM", "llavon-intentionally-unavailable");
+        app.setProcessEnvironment(environment);
+        app.start(LLAVON_TEST_GUI, {"--state-dir", directory.path(), "--page", page});
         QVERIFY(server.waitForNewConnection(5000));
         auto* socket = server.nextPendingConnection(); QVERIFY(socket);
         if (!socket->canReadLine()) QVERIFY(socket->waitForReadyRead(3000));
@@ -614,6 +623,89 @@ void NativeTests::pageLaunchRouting() {
         QVERIFY(app.waitForFinished(5000)); QCOMPARE(app.exitCode(), 0);
         delete socket;
     }
+}
+
+void NativeTests::deferredPhrasePage() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    llavon::lora::SettingsStore store; store.loadPhrases(); store.savePhrases(QStringLiteral("拉風 ㄌㄚ-ㄈㄥ\n"));
+    Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
+    Manager window(&backend, {}, "settings"); window.show();
+    QCOMPARE(widget<QLabel>(window, "notice")->text(), QStringLiteral("設定已就緒"));
+    QVERIFY(!window.findChild<llavon::lora::PhraseList*>("phraseList"));
+    // An external edit made after launch is loaded on the first visit.
+    store.savePhrases(QStringLiteral("銀行 ㄧㄣˊ-ㄏㄤˊ\n"));
+    window.showPage("phrases");
+    auto* list = widget<llavon::lora::PhraseList>(window, "phraseList");
+    auto* word = phraseRow(window, 0)->findChild<QLineEdit*>("phraseWord");
+    QCOMPARE(word->text(), QStringLiteral("銀行"));
+    word->setText(QStringLiteral("銀河"));
+    window.showPage("settings"); window.showPage("phrases");
+    QCOMPARE(window.findChild<llavon::lora::PhraseList*>("phraseList"), list);
+    QCOMPARE(word->text(), QStringLiteral("銀河"));
+    QTimer::singleShot(100, [] {
+        auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (!dialog) qFatal("Deferred phrase edits lost their close confirmation");
+        dialog->button(QMessageBox::Cancel)->click();
+    });
+    QVERIFY(!window.close()); QVERIFY(window.isVisible());
+    QCOMPARE(store.loadPhrases(), QStringLiteral("銀行 ㄧㄣˊ-ㄏㄤˊ\n"));
+    QTimer::singleShot(100, [] {
+        auto* dialog = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (!dialog) qFatal("Expected discard confirmation");
+        dialog->button(QMessageBox::Yes)->click();
+    });
+    QVERIFY(window.close());
+}
+
+void NativeTests::settingsWithoutTrainingBackend() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    Backend backend(directory.path() + "/missing-training-backend", {});
+    QSignalSpy errors(&backend, &Backend::error), ready(&backend, &Backend::ready);
+    Manager window(&backend, {}, "settings"); window.show();
+    QVERIFY(window.findChild<QSpinBox*>("setting_context_length"));
+    QVERIFY(!window.findChild<QTableWidget*>("records"));
+    QVERIFY(!window.findChild<QPushButton*>("startTraining"));
+    QVERIFY(!window.findChild<llavon::lora::HistoryGraph*>("history"));
+    QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
+    widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+    auto* count = widget<QSpinBox>(window, "setting_candidate_page_size");
+    count->setValue(7); click(window, "saveSettings");
+    llavon::lora::SettingsStore store; QCOMPARE(store.load().value("candidate_page_size").toInt(), 7);
+    window.showPage("training");
+    QVERIFY(window.findChild<QTableWidget*>("records"));
+    QVERIFY(window.findChild<QPushButton*>("startTraining"));
+    QVERIFY(window.findChild<llavon::lora::HistoryGraph*>("history"));
+    QTRY_COMPARE(errors.count(), 1);
+    window.showPage("settings"); QCOMPARE(count->value(), 7);
+    QVERIFY(window.close());
+}
+
+void NativeTests::deferredSettingGroups() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    llavon::lora::SettingsStore store;
+    auto values = store.load(); values["candidate_page_size"] = 9; values["keyboard_layout"] = "ibm"; store.save(values);
+    llavon::lora::SettingsPage page(false); page.show();
+    auto* tabs = page.findChild<QTabWidget*>("settingsGroups"); QVERIFY(tabs);
+    QVERIFY(!page.findChild<QSpinBox*>("setting_candidate_page_size"));
+    auto* context = page.findChild<QSpinBox*>("setting_context_length"); QVERIFY(context);
+    context->setValue(256);
+    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    auto saved = store.load(); QCOMPARE(saved.value("context_length").toInt(), 256);
+    QCOMPARE(saved.value("candidate_page_size").toInt(), 9); QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
+    QVERIFY(!page.isDirty()); tabs->setCurrentIndex(1); QVERIFY(!page.isDirty());
+    auto* count = page.findChild<QSpinBox*>("setting_candidate_page_size"); QVERIFY(count); QCOMPARE(count->value(), 9);
+    count->setValue(7); QVERIFY(page.isDirty());
+    tabs->setCurrentIndex(2); QVERIFY(page.isDirty()); tabs->setCurrentIndex(1);
+    QCOMPARE(count->value(), 7); QCOMPARE(context->value(), 256);
+    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    saved = store.load(); QCOMPARE(saved.value("candidate_page_size").toInt(), 7);
+    QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
+    QVERIFY(!page.isDirty());
 }
 
 void NativeTests::appearanceChanges() {
@@ -627,6 +719,7 @@ void NativeTests::appearanceChanges() {
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
     Manager window(&backend); window.show(); backend.start();
     window.showPage("settings");
+    widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
     auto* count = widget<QSpinBox>(window, "setting_candidate_page_size");
     count->setValue(8); // An appearance change must not reconstruct/lose edits.
     for (const bool dark : {false, true}) {

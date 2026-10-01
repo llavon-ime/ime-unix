@@ -155,6 +155,7 @@ struct CoreTests {
         Self.testEngineConfig()
         Self.testKeyboardLayouts(tablePath: tablePath)
         Self.testSmartEditing(tablePath: tablePath)
+        Self.testSmartCursorInsertion(tablePath: tablePath)
         Self.testSmartLocalErrors(tablePath: tablePath)
         Self.testSmartReportedBoundaries(tablePath: tablePath)
         Self.testCandidatePageWindow()
@@ -245,6 +246,58 @@ struct CoreTests {
         core.detach(context)
         core.stop()
         queue.pumpUntilIdle()
+    }
+
+    private static func testSmartCursorInsertion(tablePath: String) {
+        let layouts = [("standard", "su3cl3"), ("hsu", "nefhwf"), ("ibm", "7a,-;,"),
+                       ("et", "ne3hz3"), ("ginyieh", "d-avla"), ("et26", "nejhzj"),
+                       ("dachen_cp26", "surclr")]
+        for (layout, keys) in layouts {
+            let queue = PumpQueue()
+            let core = EngineCore()
+            core.setPostToMain { queue.post($0) }
+            core.start(options: EngineStartOptions(tablePath: tablePath,
+                configJson: #"{"keyboard_layout":"\#(layout)","smart_english":true}"#,
+                autoStartService: false, enableAccessibility: false))
+            let host = RecordingHost()
+            let context = core.allocateContext()
+            core.attach(context, host: host)
+            type(core, context, keys)
+            _ = core.sendKey(context, keyCode: 0x7b, charactersIgnoringModifiers: nil,
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            type(core, context, "hello" + keys)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你hello你好好",
+                         "\(layout): insertion must precede the settled suffix")
+            precondition(core.snapshot(context)?.caret == 8)
+            precondition(host.commits.isEmpty)
+            _ = core.sendKey(context, keyCode: 0x7c, charactersIgnoringModifiers: nil,
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你hello你好好")
+            precondition(core.snapshot(context)?.caret == 9)
+            _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(host.commits.last == "你hello你好好")
+            type(core, context, keys)
+            var shift = KeyModifiers()
+            shift.shift = true
+            _ = core.sendKey(context, keyCode: 0x7b, charactersIgnoringModifiers: nil,
+                             modifiers: shift, capsLock: false, isRelease: false)
+            type(core, context, keys)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你你好好")
+            precondition(core.snapshot(context)?.preedit.allSatisfy { !$0.underlined } == true,
+                         "\(layout): typing cancels the mark without returning to its anchor")
+            var control = KeyModifiers()
+            control.control = true
+            _ = core.sendKey(context, keyCode: 0x2b, charactersIgnoringModifiers: ",",
+                             modifiers: control, capsLock: false, isRelease: false)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你你好，好")
+            _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(host.commits.last == "你你好，好")
+            core.detach(context)
+            core.stop()
+            queue.pumpUntilIdle()
+        }
     }
 
     private static func testSmartLocalErrors(tablePath: String) {

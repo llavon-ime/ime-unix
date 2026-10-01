@@ -131,7 +131,6 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_keys(
     BopomofoKeyboardLayout layout,
     bool strict,
     std::u16string_view expected_reading) {
-    if (caret_ != segments_.size()) return std::nullopt;
     if (caret_ > 0) {
         const auto& previous = segments_[caret_ - 1];
         if (!previous.visible_candidate() && !previous.reading_finalized) return std::nullopt;
@@ -148,15 +147,17 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_keys(
         Segment next;
         next.syllable = *found;
         next.reading_finalized = true;
-        segments_.push_back(std::move(next));
+        selection_anchor_.reset();
+        segments_.insert(segments_.begin() + static_cast<std::ptrdiff_t>(caret_), std::move(next));
         last_edited_segment_ = caret_++;
         touch();
-        return BopomofoInputResult{original_size, true, true};
+        return BopomofoInputResult{original_caret, true, true};
     }
     for (const char32_t key : keys) {
         const auto result = add_bopomofo_key(key, layout, true);
         if (!result || (strict && !result->natural_extension)) {
-            while (segments_.size() > original_size) segments_.pop_back();
+            segments_.erase(segments_.begin() + static_cast<std::ptrdiff_t>(original_caret),
+                            segments_.begin() + static_cast<std::ptrdiff_t>(original_caret + segments_.size() - original_size));
             caret_ = original_caret;
             last_edited_segment_.reset();
             touch();
@@ -166,7 +167,8 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_keys(
 
     const auto result = add_bopomofo_key(tone_key, layout, true);
     if (!result || !result->completed) {
-        while (segments_.size() > original_size) segments_.pop_back();
+        segments_.erase(segments_.begin() + static_cast<std::ptrdiff_t>(original_caret),
+                        segments_.begin() + static_cast<std::ptrdiff_t>(original_caret + segments_.size() - original_size));
         caret_ = original_caret;
         last_edited_segment_.reset();
         touch();
@@ -259,9 +261,9 @@ bool CompositionBuffer::extend_selection(int delta) {
     return true;
 }
 
-bool CompositionBuffer::clear_selection() {
+bool CompositionBuffer::clear_selection(bool restore_caret) {
     if (!selection_anchor_) return false;
-    caret_ = *selection_anchor_;
+    if (restore_caret) caret_ = *selection_anchor_;
     selection_anchor_.reset();
     touch();
     return true;
