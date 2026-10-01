@@ -274,6 +274,20 @@ struct CoreTests {
             _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                              modifiers: KeyModifiers(), capsLock: false, isRelease: false)
             precondition(host.commits.last == "你好")
+            if layout != "dachen_cp26" {
+                let longError = String(repeating: String(broken.first!), count: 24)
+                type(core, context, keys + longError)
+                precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好" + longError,
+                             "\(layout): long local error must not erase Chinese")
+                for _ in longError {
+                    _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                                     modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                }
+                precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好")
+                _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                                 modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                precondition(host.commits.last == "你好")
+            }
             core.detach(context)
             core.stop()
             queue.pumpUntilIdle()
@@ -312,6 +326,23 @@ struct CoreTests {
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
         precondition(host.commits.last == "j g ")
+        precondition(core.reloadConfigJson(#"{"keyboard_layout":"ibm","smart_english":true,"shift_letter_keys":"directly_put_to_buffer"}"#))
+        type(core, context, ".")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == ".")
+        _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(core.snapshot(context)?.compositionEmpty == true)
+        // Shift/direct-to-buffer retains its existing lowercase contract.
+        type(core, context, "README.md")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "readme.md")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "readme.md")
+        type(core, context, "7a,")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "你")
         core.detach(context)
         core.stop()
         queue.pumpUntilIdle()

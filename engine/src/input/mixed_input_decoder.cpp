@@ -74,6 +74,7 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         size_t end;
         MixedSegment segment;
         bool lexical_word;
+        bool recovery_piece = false;
     };
     std::vector<std::vector<Edge>> edges(n + 1);
 
@@ -230,6 +231,65 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                 add_edge(i, j, std::move(segment));
             }
         }
+        // A malformed prefix may be longer than one bounded graph piece.
+        // Expose only prefixes that already failed natural phonetic editing,
+        // so legal unfinished readings cannot become cheap raw error edges.
+        CompositionBuffer continuation;
+        bool malformed = false;
+        for (size_t len = 1; len <= kMaxSyllableKeys && i + len <= n; ++len) {
+            const auto step = continuation.add_bopomofo_key(raw[i + len - 1], layout);
+            if (step && step->completed) break;
+            if (!step || !step->natural_extension || continuation.segments().size() != 1) malformed = true;
+            if (continuation.segments().size() != 1) break;
+            const auto& syllable = continuation.segments().front().syllable;
+            const auto occupied = static_cast<unsigned>(syllable.has_initial()) +
+                static_cast<unsigned>(syllable.has_medial()) + static_cast<unsigned>(syllable.has_final());
+            // Only a contradiction confined to one phonetic slot can be
+            // split without a completion boundary. Mixed-slot spans could
+            // hide an English word followed by a legal Chinese syllable.
+            if (occupied != 1 || syllable.has_tone()) break;
+            // Only expose a full-sized nonterminal piece. Short error tails
+            // already have terminal edges; extra internal cuts can hide a
+            // dictionary-word / legal-reading boundary.
+            if (malformed && len == kMaxSyllableKeys && i + len < n) {
+                const auto keys = raw.substr(i, len);
+                bool lexical_boundary = false;
+                if (frequency_) {
+                    for (size_t split = 1; split < len; ++split) {
+                        if (frequency_(keys.substr(0, split)) <= 0) continue;
+                        CompositionBuffer suffix;
+                        bool natural = true;
+                        for (const auto key : keys.substr(split)) {
+                            const auto added = suffix.add_bopomofo_key(key, layout);
+                            if (!added || added->completed || !added->natural_extension || suffix.segments().size() != 1) {
+                                natural = false;
+                                break;
+                            }
+                        }
+                        if (natural) { lexical_boundary = true; break; }
+                    }
+                }
+                if (lexical_boundary) break;
+                // Do not cut through the onset of a valid completed syllable
+                // just beyond this piece (e.g. wrong initials + su3). Keeping
+                // that onset literal would make its vowel decode separately.
+                bool reading_boundary = false;
+                for (size_t begin = i + 1; begin < i + len && !reading_boundary; ++begin) {
+                    for (size_t end = i + len + 1; end <= std::min(n, begin + kMaxSyllableKeys); ++end) {
+                        const auto tone = raw[end - 1];
+                        if (tone != u' ' && !is_explicit_tone_key(tone, layout)) continue;
+                        if (!replay(raw.substr(begin, end - begin - 1), tone).empty()) {
+                            reading_boundary = true;
+                            break;
+                        }
+                    }
+                }
+                if (reading_boundary) break;
+                const auto count = edges[i].size();
+                unresolved(i, i + len);
+                if (edges[i].size() != count) edges[i].back().recovery_piece = true;
+            }
+        }
         // Unfinished syllables are real search states, not a rule that pins
         // yesterday's preview. They preserve consecutive Chinese while the
         // next body is typed, and still compete with complete English paths.
@@ -288,6 +348,7 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         std::u16string rendered;
         size_t latin_count = 0;
         bool lexical_island = false;
+        bool recovery_piece = false;
     };
     struct Entry {
         double score = 0;
@@ -309,7 +370,8 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             if (existing.path->rendered == entry.path->rendered &&
                 existing.path->segment.kind == entry.path->segment.kind &&
                 existing.path->latin_count == entry.path->latin_count &&
-                existing.path->lexical_island == entry.path->lexical_island) {
+                existing.path->lexical_island == entry.path->lexical_island &&
+                existing.path->recovery_piece == entry.path->recovery_piece) {
                 if (entry.score > existing.score) existing = std::move(entry);
                 return;
             }
@@ -334,8 +396,14 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
     };
 
     const auto extend = [&](const Entry& entry, MixedSegment segment, size_t candidate,
-                            bool lexical_word, bool ordinal_prior) {
+                            bool lexical_word, bool ordinal_prior, bool recovery_piece = false) {
         double score = entry.score + segment.score;
+        // Six-key pieces bound parsing work, not the number of independent
+        // errors. A contiguous unresolved run pays its cost once; repeatedly
+        // charging that cost makes a long local typo erase earlier Chinese.
+        // Legal completed readings remain separate edges and end the run.
+        if (segment.kind == MixedSegmentKind::BopomofoUnresolved && entry.path &&
+            entry.path->recovery_piece) score -= segment.score;
         if (segment.raw == u" " && entry.path && entry.path->segment.kind == MixedSegmentKind::Bopomofo) {
             segment.consumed_boundary = true;
             score += 0.01;
@@ -374,7 +442,7 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         const size_t latin_count = prev_latin + (segment.kind == MixedSegmentKind::Latin ? 1 : 0);
         const bool lexical_island = lexical_word && entry.path && entry.path->segment.kind == MixedSegmentKind::Bopomofo;
         auto link = std::make_shared<PathLink>(
-            PathLink{entry.path, std::move(segment), score, std::move(rendered), latin_count, lexical_island});
+            PathLink{entry.path, std::move(segment), score, std::move(rendered), latin_count, lexical_island, recovery_piece});
         return Entry{score, std::move(link)};
     };
 
@@ -397,7 +465,8 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                     const size_t alternatives = edge.segment.kind == MixedSegmentKind::Bopomofo ?
                                                 std::min<size_t>(4, edge.segment.candidates.size()) : 1;
                     for (size_t candidate = 0; candidate < alternatives; ++candidate) {
-                        insert_entry(buckets[edge.end], extend(entry, edge.segment, candidate, edge.lexical_word, true));
+                        insert_entry(buckets[edge.end], extend(entry, edge.segment, candidate, edge.lexical_word, true,
+                                                               edge.recovery_piece));
                     }
                 }
             }

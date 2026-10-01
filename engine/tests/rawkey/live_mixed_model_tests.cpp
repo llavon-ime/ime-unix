@@ -531,6 +531,77 @@ RAWKEY_SUITE("production mixed model unresolved keys remain raw and late answers
     harness.expect_commit(shown);
 }
 
+RAWKEY_SUITE("production isolated tones remain raw and do not request phantom readings", production_orphan_tones) {
+    ScriptService service;
+    auto value = smart_options();
+    value.config.smart_model_preview = true;
+    value.config.keyboard_layout = "ibm";
+    value.socket_path = service.socket.string();
+    Harness harness(value);
+    harness.type(".");
+    RAWKEY_ASSERT(harness.preedit() == ".");
+    RAWKEY_ASSERT(harness.pending_model_requests() == 0);
+    RAWKEY_ASSERT(!harness.session()->buffer.has_unfinished_reading());
+    harness.key("BackSpace");
+    RAWKEY_ASSERT(harness.composition_empty());
+    harness.type("7a,");
+    RAWKEY_ASSERT(harness.pump_until([&] { return harness.pending_model_idle(); }));
+    RAWKEY_ASSERT(harness.preedit() == "擬");
+    RAWKEY_ASSERT(harness.pending_model_requests() != 0);
+    harness.expect_commit("擬");
+}
+
+RAWKEY_SUITE("internal preview comparison survives keyboard layout changes", production_preview_comparison_control) {
+    for (const auto& [layout, keys] : std::array{
+        std::pair{"standard", "su3cl3"}, std::pair{"hsu", "nefhwf"}}) {
+        for (const bool enabled : {false, true}) {
+            ScriptService service;
+            auto value = smart_options();
+            value.config.smart_model_preview = enabled;
+            value.socket_path = service.socket.string();
+            Harness harness(value);
+            harness.set_config("BopomofoKeyboardLayout", layout);
+            RAWKEY_ASSERT(harness.config().smart_model_preview == enabled);
+            harness.type(keys);
+            RAWKEY_ASSERT(harness.pump_until([&] { return harness.pending_model_idle(); }));
+            RAWKEY_ASSERT(harness.preedit() == (enabled ? "擬好" : "你好"));
+            RAWKEY_ASSERT((harness.pending_model_requests() != 0) == enabled);
+        }
+    }
+}
+
+RAWKEY_SUITE("production mixed model long errors preserve prefix and reject late replacement", production_long_error_models) {
+    for (const bool choose_raw : {false, true}) {
+        ScriptService service(true);
+        auto value = smart_options();
+        value.config.smart_model_preview = true;
+        value.socket_path = service.socket.string();
+        Harness harness(value);
+        harness.type("su3cl3");
+        wait_request(harness, service);
+        const auto wrong = std::string(24, 's');
+        harness.type(wrong);
+        RAWKEY_ASSERT(harness.preedit() == "你好" + wrong);
+        if (choose_raw) {
+            harness.key("Down");
+            harness.choose_text("su3cl3" + wrong);
+        }
+        service.release();
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }));
+        if (choose_raw) {
+            harness.expect_commit("su3cl3" + wrong);
+        } else {
+            RAWKEY_ASSERT(harness.preedit() == "擬好" + wrong);
+            for (size_t i = 0; i < wrong.size(); ++i) harness.key("BackSpace");
+            RAWKEY_ASSERT(harness.preedit() == "擬好");
+            harness.expect_commit("擬好");
+        }
+        RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
 RAWKEY_SUITE("production mixed model keeps lexical islands and valid interjections", production_lexical_island_models) {
     ScriptService service(true);
     auto value = smart_options();

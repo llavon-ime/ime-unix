@@ -1,10 +1,12 @@
 #include "raw_key_harness.hpp"
+#include "bopomofo/keymap.hpp"
 #include "text/utf.hpp"
 
 #include <algorithm>
 #include <array>
 #include <string>
 #include <string_view>
+#include <tuple>
 
 using namespace llavon::ime;
 using namespace llavon::ime::rawkey;
@@ -176,6 +178,48 @@ RAWKEY_SUITE("smart editing English negative controls", smart_edit_english) {
     }
 }
 
+RAWKEY_SUITE("smart isolated tone keys stay literal without a syllable", smart_isolated_tone_literals) {
+    for (const auto& [layout, prefix] : layouts) {
+        const auto keyboard = bopomofo_keyboard_layout(layout);
+        for (char32_t key = U'!'; key <= U'~'; ++key) {
+            if ((key >= U'a' && key <= U'z') || (key >= U'A' && key <= U'Z') ||
+                !is_bopomofo_tone_key(key, keyboard)) continue;
+            const auto text = std::string(1, static_cast<char>(key));
+            Harness harness(smart(layout));
+            harness.type(text);
+            RAWKEY_ASSERT(harness.preedit() == text);
+            RAWKEY_ASSERT(!harness.session()->buffer.has_unfinished_reading());
+            harness.key("BackSpace");
+            RAWKEY_ASSERT(harness.composition_empty());
+            harness.type(text);
+            harness.expect_commit(text);
+        }
+        // A body still completes normally; an isolated tone repair must not
+        // take over the actual tone of a pending phonetic syllable.
+        Harness harness(smart(layout));
+        harness.type(prefix);
+        harness.expect_commit("你好");
+    }
+    // Explicit English intent is valid inside Chinese as well as at the
+    // beginning. The filename separator must not become an orphan IBM tone.
+    for (const auto& [layout, prefix] : layouts) {
+        Harness harness(smart(layout));
+        harness.set_config("ShiftLetterKeys", "directly_put_to_buffer");
+        harness.type(prefix);
+        harness.key("Down");
+        harness.choose_text("你好");
+        for (const char key : std::string_view("readme")) harness.key(Key(key).with(kCapsLock));
+        harness.type(".md");
+        if (harness.preedit() != "你好README.md") {
+            throw Failure{std::string(layout) + ": expected 你好README.md, got " + harness.preedit()};
+        }
+        harness.key("BackSpace");
+        RAWKEY_ASSERT(harness.preedit() == "你好README.m");
+        harness.type("d");
+        harness.expect_commit("你好README.md");
+    }
+}
+
 RAWKEY_SUITE("smart editing malformed syllables stay local", smart_local_phonetic_errors) {
     constexpr std::array initials{
         std::pair{"standard", "s3"}, std::pair{"hsu", "nf"},
@@ -217,6 +261,52 @@ RAWKEY_SUITE("smart editing malformed syllables stay local", smart_local_phoneti
         // Enter preserves unresolved raw keys; there is no silent typo fix.
         harness.type(std::string(prefix) + closed + prefix);
         harness.expect_commit("你好" + closed + "你好");
+    }
+}
+
+RAWKEY_SUITE("smart editing long malformed runs preserve Chinese and exact raw", smart_long_error_runs) {
+    constexpr std::array cases{
+        std::pair{"standard", 's'}, std::pair{"hsu", 'n'},
+        std::pair{"ibm", '7'}, std::pair{"et", 'n'},
+        std::pair{"ginyieh", 'd'}, std::pair{"et26", 'n'},
+    };
+    for (size_t index = 0; index < cases.size(); ++index) {
+        const auto& [layout, key] = cases[index];
+        const auto prefix = std::string(layouts[index].second);
+        for (const size_t count : {7U, 12U, 24U}) {
+            const auto wrong = std::string(count, key);
+            Harness harness(smart(layout));
+            harness.type(prefix);
+            harness.type(wrong);
+            RAWKEY_ASSERT(harness.preedit() == "你好" + wrong);
+            RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(prefix + wrong));
+            for (size_t i = 0; i < count; ++i) harness.key("BackSpace");
+            RAWKEY_ASSERT(harness.preedit() == "你好");
+            harness.type(wrong);
+            for (size_t i = 0; i < count; ++i) harness.key("Shift+BackSpace");
+            RAWKEY_ASSERT(harness.preedit() == "你好");
+            harness.type(wrong);
+            harness.expect_commit("你好" + wrong);
+            harness.type(prefix + wrong);
+            harness.key("Down");
+            harness.choose_text(prefix + wrong);
+            harness.expect_commit(prefix + wrong);
+        }
+    }
+    // Check the observed abrupt transition on each keystroke, and ensure a
+    // later completion boundary still admits the next valid Chinese reading.
+    for (const auto& [layout, prefix, key, tone] : std::array{
+        std::tuple{"standard", "su3cl3", 's', '3'},
+        std::tuple{"et", "ne3hz3", 'n', '3'}}) {
+        Harness harness(smart(layout));
+        harness.type(prefix);
+        for (size_t count = 1; count <= 24; ++count) {
+            harness.type(std::string(1, key));
+            RAWKEY_ASSERT(harness.preedit() == "你好" + std::string(count, key));
+        }
+        harness.type(std::string(1, tone));
+        harness.type(prefix);
+        harness.expect_commit("你好" + std::string(24, key) + tone + "你好");
     }
 }
 

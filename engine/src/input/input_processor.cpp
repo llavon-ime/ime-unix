@@ -587,6 +587,18 @@ void InputProcessor::process_impl(const InputKey& key) {
             return;
         }
 
+        // A tone cannot complete a nonexistent syllable. Keep its exact key
+        // reversible instead of leaving an orphan phonetic mark (for example
+        // an IBM '.' after explicitly typed uppercase filename letters).
+        if (session_->pending_token.empty() && !session_->buffer.has_unfinished_reading() &&
+            raw_symbol >= 0x21 && raw_symbol <= 0x7e && !key.has_blocking_modifier() &&
+            is_bopomofo_tone_key(raw_symbol, layout)) {
+            append_pending_char(raw_symbol, layout);
+            rerun_pending_decision();
+            consume();
+            return;
+        }
+
         if (session_->pending_token.empty() && is_smart_start_char(key.sym, layout)) {
             if (candidate_list_active(*session_)) (void)transition_to(InputStateKind::Inputting);
             append_pending_char(key.sym, layout);

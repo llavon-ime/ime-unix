@@ -373,9 +373,13 @@ void Harness::set_config(std::string_view path, std::string_view value) {
     } else if (path == "SmartModelPreview") {
         updated.smart_model_preview = on;
     } else if (path == "BopomofoKeyboardLayout") {
+        const bool test_preview = updated.smart_model_preview;
         auto json = to_json(updated);
         json["keyboard_layout"] = std::string(value);
         updated = config_from_json(json);
+        // This is an internal test/probe control, absent from persisted JSON.
+        // Changing layouts must not silently enable the offline comparison.
+        updated.smart_model_preview = test_preview;
     } else if (path == "ShiftLetterKeys") {
         updated.shift_letter_keys = (value == "直接放入組字區" || value == "directly_put_to_buffer")
                                         ? "directly_put_to_buffer"
