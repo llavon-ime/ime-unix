@@ -141,7 +141,7 @@ jobs:
           LLAVON_IME_VERSION: ${{ steps.version.outputs.version }}
           LLAVON_IME_PACKAGE_MODEL_PATH: models/${{ env.MODEL_FILE_NAME }}
           VCPKG_BINARY_SOURCES: clear;files,/root/.cache/vcpkg/archives,readwrite
-        run: bash scripts/package-linux.sh "${{ matrix.format }}"
+        run: dbus-run-session -- bash scripts/package-linux.sh "${{ matrix.format }}"
 
       - name: Inspect package dependencies
         run: |
