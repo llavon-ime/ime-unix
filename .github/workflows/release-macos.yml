@@ -274,16 +274,28 @@ jobs:
             "${{ steps.package.outputs.pkg }}"
             "dist/macos/appcast.xml"
           )
-          notes="Native macOS input method package."
+          notes="拉風輸入法 macOS 安裝套件。"
           if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
-            notes="Native macOS input method package (Apple Silicon). This package is not Developer ID signed or notarized; its executables use ad-hoc signatures. Sparkle verifies update signatures; package installation requires administrator approval."
+            notes="拉風輸入法 macOS 安裝套件（Apple Silicon）。"
             install_notes="${RUNNER_TEMP}/macos-install.txt"
             cat > "${install_notes}" <<'NOTES'
-          ### macOS installation and updates (Apple Silicon)
+          ### macOS 安裝與自動更新（Apple Silicon）
 
-          The macOS `.pkg` is **not Developer ID signed or Apple notarized**. Executables use ad-hoc signatures. In-app updates use Sparkle to verify update signatures, download packages, and request administrator approval for installation. Apple notarization and Sparkle update signature verification are separate mechanisms.
+          下載本頁的 `.pkg` 安裝包，開啟後依提示完成安裝。
 
-          Download the `.pkg` from this release and open it in Finder. If macOS blocks the installer, open **System Settings → Privacy & Security**, find the blocked installer, and choose **Open Anyway**, then follow the installer prompts. After installation, add 拉風輸入法 in **System Settings → Keyboard → Text Input → Edit**. macOS may also require approval of the installed input method in Privacy & Security.
+          此安裝包未使用 Apple Developer ID 簽章，也未經 Apple 公證；程式使用 ad-hoc 簽章。
+
+          若 macOS 阻擋安裝：
+
+          1. 前往「系統設定 → 隱私權與安全性」。
+          2. 找到被阻擋的安裝程式，按「仍要打開」，依提示完成安裝。
+          3. 安裝完成後，前往「系統設定 → 鍵盤 → 文字輸入 → 編輯」，加入「拉風輸入法」。
+
+          macOS 也可能要求你在「隱私權與安全性」中允許已安裝的輸入法執行。
+
+          #### 自動更新
+
+          輸入法使用 Sparkle 檢查及下載更新，並驗證更新來源與安裝包的簽章。安裝更新時需要管理員授權。
           NOTES
             assets+=("${install_notes}#macos-install.txt")
           fi
@@ -327,7 +339,7 @@ jobs:
           from pathlib import Path
           path = Path(sys.argv[1])
           text = path.read_text()
-          text = re.sub(r'(?ms)^### macOS (?:manual installation|installation and updates)[^\n]*\n.*?(?=^###? |\Z)', '', text)
+          text = re.sub(r'(?ms)^### macOS (?:manual installation|installation and updates|安裝與自動更新)[^\n]*\n.*?(?=^###? |\Z)', '', text)
           path.write_text(text.rstrip() + '\n')
           PY
             printf '\n' >> "${RUNNER_TEMP}/release-notes.md"
