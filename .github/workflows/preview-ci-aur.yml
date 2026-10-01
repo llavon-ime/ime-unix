@@ -45,6 +45,7 @@ jobs:
             curl \
             ninja-build \
             libsqlite3-dev \
+            qt6-base-dev qt6-base-dev-tools \
             pkg-config \
             tar \
             unzip \

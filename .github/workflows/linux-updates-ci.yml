@@ -29,15 +29,15 @@ jobs:
     runs-on: ubuntu-24.04
     container: debian:13
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Install verification dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends cmake ninja-build g++ qt6-base-dev \
+          apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build g++ qt6-base-dev \
             qt6-base-dev-tools nlohmann-json3-dev libfcitx5core-dev fcitx5-modules-dev \
             libxcb1-dev pkg-config dbus gnupg dpkg-dev apt-utils rpm createrepo-c dnf python3
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Verify PackageKit D-Bus transactions
         run: |
           cmake -S scripts/linux-update-tests -B build/linux-update-tests -G Ninja
