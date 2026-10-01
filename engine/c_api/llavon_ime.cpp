@@ -61,16 +61,17 @@ private:
     lv_host callbacks_;
 };
 
-extern "C" void lv_engine_run_posted_body(void* body) {
-    auto* function = static_cast<std::function<void()>*>(body);
+extern "C" {
+static void lv_engine_run_posted_body(void* body) {
+    const std::unique_ptr<std::function<void()>> function(static_cast<std::function<void()>*>(body));
     (*function)();
-    delete function;
+}
 }
 
 }  // namespace
 
 struct lv_engine {
-    explicit lv_engine(const lv_host& callbacks) : bridge(this, callbacks) {}
+    explicit lv_engine(const lv_host& host_callbacks) : bridge(this, host_callbacks) {}
 
     lv_host callbacks = {};
     HostBridge bridge;

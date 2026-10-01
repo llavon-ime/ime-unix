@@ -11,13 +11,13 @@ std::vector<llavon::ime::core::PaddingEntry> to_core_padding(const protocol::Pre
     std::vector<llavon::ime::core::PaddingEntry> padding;
     padding.reserve(request.padding.size());
     for (const auto& entry : request.padding) {
-        if (entry.chosen && (entry.chosen_char == 0 || !protocol::valid_scalar(entry.chosen_char))) {
+        if (entry.chosen() && (entry.chosen_char() == 0 || !protocol::valid_scalar(entry.chosen_char()))) {
             throw std::invalid_argument("chosen padding contains an invalid character");
         }
         padding.push_back(llavon::ime::core::PaddingEntry{
-            .chosen = entry.chosen,
-            .chosen_char = entry.chosen_char,
-            .bopomofo = entry.bopomofo,
+            .chosen = entry.chosen(),
+            .chosen_char = entry.chosen_char(),
+            .bopomofo = std::u16string(entry.bopomofo()),
         });
     }
 
@@ -35,8 +35,8 @@ std::vector<std::vector<char32_t>> to_protocol_candidates(
     result.reserve(predictions.size());
     for (std::size_t i = 0; i < predictions.size(); ++i) {
         const auto& entry = request.padding[i];
-        if (entry.chosen) {
-            result.push_back({entry.chosen_char});
+        if (entry.chosen()) {
+            result.push_back({entry.chosen_char()});
             continue;
         }
 

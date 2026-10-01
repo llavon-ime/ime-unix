@@ -60,15 +60,25 @@ RAWKEY_SUITE("smart hsu", engine_test_smart_hsu) {
         harness.key(Key(" "));
         RAWKEY_ASSERT(harness.preedit() == "今");
 }
-    // 5. Hsu English via space: word plus a trailing space. (Note: "hi" maps
-    //    to the natural Hsu reading ㄏㄞ (嗨), so English words here must not
-    //    form natural Hsu readings.)
+    // 5. Known English wins even when the keys also form a Hsu reading;
+    //    Down exposes the Chinese alternative before Space commits English.
+    {
+        Harness harness;
+        harness.set_configs({{"BopomofoKeyboardLayout", "許氏"}, {"SmartEnglish", "True"}});
+        harness.type("hi");
+        RAWKEY_ASSERT(harness.preedit() == "hi");
+        harness.key("space");
+        RAWKEY_ASSERT(harness.preedit() == "hi ");
+        RAWKEY_ASSERT(harness.commits().empty());
+        harness.expect_commit("hi ");
+        RAWKEY_ASSERT(harness.preedit().empty());
+    }
     {
         Harness harness;
         harness.set_config("BopomofoKeyboardLayout", "許氏");
         harness.set_config("SmartEnglish", "True");
         harness.type("hello");
-        harness.expect_direct_commit("hello ", Key(" "));
+        harness.expect_space_then_commit("hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     {
@@ -76,7 +86,7 @@ RAWKEY_SUITE("smart hsu", engine_test_smart_hsu) {
         harness.set_config("BopomofoKeyboardLayout", "許氏");
         harness.set_config("SmartEnglish", "True");
         harness.type("thank");
-        harness.expect_direct_commit("thank ", Key(" "));
+        harness.expect_space_then_commit("thank ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     // 6. Hsu mixed: 你 via nef, then English hello + space commits 你hello .
@@ -87,7 +97,7 @@ RAWKEY_SUITE("smart hsu", engine_test_smart_hsu) {
         harness.type("nef");
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("hello");
-        harness.expect_direct_commit("你hello ", Key(" "));
+        harness.expect_space_then_commit("你hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     // 7. A Hsu tone-looking letter remains part of the English token when the
@@ -99,7 +109,7 @@ RAWKEY_SUITE("smart hsu", engine_test_smart_hsu) {
         harness.type("hello");
         harness.key(Key('d'));
         RAWKEY_ASSERT(harness.preedit() == "hellod");
-        harness.expect_direct_commit("hellod ", Key(" "));
+        harness.expect_space_then_commit("hellod ");
 }
     // 8. Backspace pops one pending char at a time.
     {
@@ -131,7 +141,41 @@ RAWKEY_SUITE("smart hsu", engine_test_smart_hsu) {
         harness.key(Key("2"));
         RAWKEY_ASSERT(harness.preedit() == "哦");
         harness.type("hello");
-        harness.expect_direct_commit("哦hello ", Key(" "));
+        harness.expect_space_then_commit("哦hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
+    // Consecutive letter-tone syllables stay Chinese, and an English
+    // inflection can follow without a mode switch or lost Chinese prefix.
+    {
+        Harness harness;
+        harness.set_configs({{"BopomofoKeyboardLayout", "許氏"}, {"SmartEnglish", "True"}});
+        harness.type("nef");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        harness.type("hwf");
+        RAWKEY_ASSERT(harness.preedit() == "你好");
+        harness.type("xhf");
+        RAWKEY_ASSERT(harness.preedit() == "你好我");
+        harness.expect_commit("你好我");
+        harness.type("nef");
+        harness.key("space");
+        harness.type("adds");
+        RAWKEY_ASSERT(harness.preedit() == "你adds");
+        harness.expect_space_then_commit("你adds ");
+    }
+    // A recognized inflection still has reversible Chinese alternatives.
+    {
+        Harness harness;
+        harness.set_configs({{"BopomofoKeyboardLayout", "許氏"}, {"SmartEnglish", "True"}});
+        harness.type("added");
+        RAWKEY_ASSERT(harness.preedit() == "added");
+        harness.key("Down");
+        RAWKEY_ASSERT(harness.candidate(0) == "added");
+        RAWKEY_ASSERT(harness.candidate_count() > 1);
+        harness.key("Escape");
+        harness.key("BackSpace");
+        RAWKEY_ASSERT(harness.preedit() == "adde");
+        harness.type("d");
+        RAWKEY_ASSERT(harness.preedit() == "added");
+        harness.expect_commit("added");
+    }
 }

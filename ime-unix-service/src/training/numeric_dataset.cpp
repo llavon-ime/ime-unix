@@ -1,4 +1,5 @@
 #include "numeric_dataset.hpp"
+#include "sqlite.hpp"
 
 #include <nlohmann/json.hpp>
 #include <utf8/cpp20.h>
@@ -217,11 +218,10 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         throw std::invalid_argument("training sequence length exceeds checkpoint configuration");
     const auto tables = load_tables(tables_dir, result.vocab_size, model_config.parent_path() / "ime_vocab.json");
     result.pad_token_id = tables.special.at("<PAD>");
-    sqlite3_stmt* query = nullptr;
-    if (sqlite3_prepare_v2(db, "SELECT c.id,c.context,c.answer,r.reading,r.position,r.character,r.manually_selected,"
-                               "c.schema_version FROM commits c JOIN readings r ON r.commit_id=c.id "
-                               "WHERE c.state='pending' ORDER BY c.id,r.position",
-                           -1, &query, nullptr) != SQLITE_OK) throw std::runtime_error(sqlite3_errmsg(db));
+    auto owned_query = sqlite::prepare(db, "SELECT c.id,c.context,c.answer,r.reading,r.position,r.character,r.manually_selected,"
+                                "c.schema_version FROM commits c JOIN readings r ON r.commit_id=c.id "
+                                "WHERE c.state='pending' ORDER BY c.id,r.position");
+    auto* query = owned_query.get();
     // Only rows sealed after the password was configured are trainable; a
     // password-verified caller must never see a plaintext row slip through.
     const bool decrypt = decryption != nullptr && decryption->configured;
@@ -286,10 +286,10 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         // wants to report the skipped records or refuse the run.
         if (!file) throw std::runtime_error("cannot write numeric dataset");
         file.close();
-        sqlite3_finalize(query); query = nullptr;
+        owned_query.reset();
         std::filesystem::rename(partial, output);
     } catch (...) {
-        sqlite3_finalize(query);
+        owned_query.reset();
         std::filesystem::remove(partial);
         throw;
     }

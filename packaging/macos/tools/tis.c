@@ -1,4 +1,5 @@
 #include <Carbon/Carbon.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,8 +17,10 @@ static int os_major_version(void) {
 }
 
 static int register_app(const char *app_path) {
+    const size_t path_length = strlen(app_path);
+    if (path_length > (size_t)LONG_MAX) return 1;
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(
-        NULL, (const UInt8 *)app_path, strlen(app_path), false);
+        NULL, (const UInt8 *)app_path, (CFIndex)path_length, false);
     if (url == NULL) {
         fprintf(stderr, "invalid path: %s\n", app_path);
         return 1;
@@ -155,6 +158,35 @@ static int select_input_source(const char *source_id) {
     return 0;
 }
 
+static int print_current_source(void) {
+    TISInputSourceRef source = TISCopyCurrentKeyboardInputSource();
+    if (source == NULL) return 1;
+    CFStringRef source_id = (CFStringRef)TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
+    char id[512] = {0};
+    const bool valid = source_id != NULL &&
+        CFStringGetCString(source_id, id, sizeof(id), kCFStringEncodingUTF8);
+    if (valid) puts(id);
+    CFRelease(source);
+    return valid ? 0 : 1;
+}
+
+// Keep a live system keyboard selected while an active third-party bundle is
+// replaced. Use the user's ASCII layout rather than hardcoding ABC or US.
+static int select_ascii_layout(void) {
+    TISInputSourceRef source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource();
+    if (source == NULL) {
+        fprintf(stderr, "no ASCII-capable keyboard layout is available\n");
+        return 1;
+    }
+    const OSStatus status = TISSelectInputSource(source);
+    CFRelease(source);
+    if (status != noErr) {
+        fprintf(stderr, "could not select ASCII keyboard layout: %d\n", (int)status);
+        return 1;
+    }
+    return 0;
+}
+
 // Prints the state of every input source of the bundle: whether the text input
 // system knows it, has it enabled, and has it selected.
 static int print_status(const char *bundle_id) {
@@ -253,6 +285,8 @@ static int list_input_sources(const char *bundle_id) {    CFStringRef bundle = C
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "current") == 0) return print_current_source();
+    if (argc == 2 && strcmp(argv[1], "select-ascii") == 0) return select_ascii_layout();
     if (argc == 3 && strcmp(argv[1], "register") == 0) {
         return register_app(argv[2]);
     }
@@ -268,7 +302,7 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "list") == 0) {
         return list_input_sources(argv[2]);
     }
-    fprintf(stderr, "usage: %s register <app-path> | enable <bundle-id> | select <input-source-id> | status <bundle-id> | list <bundle-id>\n",
+    fprintf(stderr, "usage: %s current | select-ascii | register <app-path> | enable <bundle-id> | select <input-source-id> | status <bundle-id> | list <bundle-id>\n",
             argv[0]);
     return 2;
 }

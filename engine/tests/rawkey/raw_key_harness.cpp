@@ -338,6 +338,26 @@ void Harness::expect_direct_commit(std::string_view text, const Key& key) {
     RAWKEY_ASSERT(after.size() > before && after.back() == text);
 }
 
+void Harness::expect_space_then_commit(std::string_view text) {
+    const auto before = commits().size();
+    key("space");
+    RAWKEY_ASSERT(commits().size() == before);
+    if (preedit() != text) throw Failure{"Space preview: expected [" + std::string(text) + "] got [" + preedit() + "]"};
+    expect_direct_commit(text, Key("Return"));
+}
+
+void Harness::choose_text(std::string_view text) {
+    for (size_t i = 0; i < candidate_count(); ++i) {
+        if (candidate(i) != text) continue;
+        RAWKEY_ASSERT(i < 9);
+        key(Key(static_cast<char>('1' + i)));
+        return;
+    }
+    std::string message = "candidate missing: " + std::string(text) + "; available:";
+    for (const auto& item : candidates()) message += " [" + item + "]";
+    throw Failure{std::move(message)};
+}
+
 void Harness::expect_focus_out_commit(std::string_view text) {
     const auto before = host_.commits().size();
     focus_out();
@@ -350,8 +370,16 @@ void Harness::set_config(std::string_view path, std::string_view value) {
     const bool on = value == "True" || value == "true" || value == "1";
     if (path == "SmartEnglish") {
         updated.smart_english = on;
+    } else if (path == "SmartModelPreview") {
+        updated.smart_model_preview = on;
     } else if (path == "BopomofoKeyboardLayout") {
-        updated.keyboard_layout = (value == "許氏" || value == "hsu") ? "hsu" : "standard";
+        const bool test_preview = updated.smart_model_preview;
+        auto json = to_json(updated);
+        json["keyboard_layout"] = std::string(value);
+        updated = config_from_json(json);
+        // This is an internal test/probe control, absent from persisted JSON.
+        // Changing layouts must not silently enable the offline comparison.
+        updated.smart_model_preview = test_preview;
     } else if (path == "ShiftLetterKeys") {
         updated.shift_letter_keys = (value == "直接放入組字區" || value == "directly_put_to_buffer")
                                         ? "directly_put_to_buffer"
@@ -421,6 +449,12 @@ void Harness::activate() {
     engine_->activate(context_);
 }
 
+void Harness::use_context(ContextId context) {
+    context_ = context;
+    engine_->attach(context_);
+    engine_->activate(context_);
+}
+
 void Harness::focus_out() {
     engine_->deactivate(context_);
 }
@@ -435,6 +469,14 @@ InputSession* Harness::session() const {
 
 void Harness::settle_prediction() {
     if (auto* state = session()) state->prediction.invalidate();
+}
+
+bool Harness::pending_model_idle() const {
+    return engine_->pending_model_idle(context_);
+}
+
+std::uint64_t Harness::pending_model_requests() const {
+    return engine_->pending_model_requests(context_);
 }
 
 bool Harness::pump_until(const std::function<bool()>& predicate, std::chrono::milliseconds timeout) {

@@ -50,6 +50,16 @@ app 優先讀取的路徑），`--user` 時裝到 `~/Library/fcitx5`。位於
 舊 copy，因為同 bundle ID 的使用者層 copy 會蓋掉系統層的，也會讓套件安裝時把
 bundle relocate 到家目錄。沒有 sudo 的機器可用 `--install --user` 裝到家目錄。
 
+重新安裝時，如果拉風正被選取，腳本會先記住輸入來源並切到使用者的系統英文
+鍵盤，等待舊 app 完全結束後才替換 bundle；重新註冊完成再恢復原選取。這讓
+輸入選單收到完整的來源切換通知，避免選單仍引用已刪除的舊 bundle。若原本
+選的是別的輸入法，腳本會保留它；切換失敗則停止替換。安裝流程不再強制終止
+`TextInputSwitcher`。生命週期回歸檢查可執行：
+
+```sh
+bash macos/scripts/verify-input-source-lifecycle.sh
+```
+
 搬動 bundle 會讓文字輸入系統丟掉輸入來源，這就是安裝後輸入選單裡沒有
 「拉風輸入法」的原因。因此這個步驟會用套件建置的同一個 helper
 （`packaging/macos/tools/tis.c`）重新註冊輸入來源，並在 macOS 15 及更早的版本
@@ -66,6 +76,12 @@ postinstall 也做一樣的事，並在 payload 安裝後啟動 app 一次，因
 上都能不必登出就繼續運作。macOS 只會註冊 bundle ID 含 `.inputmethod.` 的輸入法
 （預設 bundle ID 是 `com.llavon.inputmethod.LlavonIME`）。
 
+## 軟體更新
+
+正式版提供 App 管理的軟體更新：輸入來源選單中的「檢查更新…」與「軟體更新設定…」。
+Homebrew 與直接下載 `.pkg` 的安裝使用相同流程。開發建置預設不啟用正式更新。
+發行時需要配置更新 feed 與簽章金鑰，並通過更新驗證。
+
 ## Caps Lock 切換
 
 要用 Caps Lock 在「拉風輸入法」與英文之間切換，請在「系統設定 › 鍵盤 › 輸入方式」
@@ -78,18 +94,21 @@ postinstall 也做一樣的事，並在 payload 安裝後啟動 app 一次，因
 
 輸入選單在「拉風輸入法」下會列出「設定…」。設定會存到
 `~/.config/llavon-ime/config.json`（支援 XDG），強制替代詞彙則位於
-`~/.config/llavon-ime/phrase_overrides.txt`，與 fcitx5 附加元件共用；設定視窗中的
-「編輯替代詞彙…」會用預設編輯器開啟該檔案。在第一次儲存設定之前，fcitx5 前端
-留下的 `~/Library/Application Support/fcitx5/conf/llavon-ime.conf` 仍會繼續生效。
+`~/.config/llavon-ime/phrase_overrides.txt`，與 fcitx5 附加元件共用。兩平台使用同一個
+Qt Widgets 原生管理器；「替代詞彙」頁直接編輯詞彙與逐字讀音，不需要開啟文字編輯器。
+「版本與狀態」頁顯示運作中的輸入法版本與 InputMethodKit 上下文來源；
+「軟體更新」頁管理每日檢查、背景下載及檢查更新，沿用輸入法原有的 Sparkle 偏好。
+開發建置帶有 `r<commit 數>.g<hash>` 後綴（與
+`scripts/build-linux.sh` 提供給 fcitx5 的資訊一致），發行套件只有版本號。
 
 設定視窗是從引擎的設定 schema（`engine/src/config/config_schema.cpp`）產生的，
-該 schema 同時驅動 fcitx5 附加元件的設定：只要在 schema 新增選項就夠了，因為
-JSON/INI 的（反）序列化、C ABI 的 schema 匯出與兩邊的設定介面都由此衍生。新增
-選項不需要改任何 Swift 或附加元件程式碼。
+該 schema 是共用引擎與原生管理器的單一欄位來源。原本 Swift 的 schema/value 抽象層、
+AppKit 設定／更新視窗及 Fcitx 的欄位轉換／詞彙編輯器已移除。Swift 只接收執行期 JSON，
+Fcitx 齒輪保留啟動管理器的按鈕；設定檔由共用管理器原子寫入。
 
 **使用我的輸入改進模型**設定按鈕（也可從輸入選單的**管理個人化訓練…**開啟）會
 啟動已安裝服務 payload 中獨立的 `llavon-ime-lora-gui` 執行檔。它會開啟與 Linux
-相同的臨時本機瀏覽器介面；原生設定視窗仍負責靜態設定欄位。套件會把固定版本的
+相同的原生設定與個人化管理器，包含設定、詞彙、訓練資料、模型及可拖曳歷程節點。套件會把固定版本的
 LoRA Trainer 發行版放在 `/Library/Application Support/llavon-ime/tools/lora` 下；
 如果該目錄不存在（例如手動清理過），postinstall 腳本會下載它，下載失敗不會中斷
 安裝，因為設定頁面之後仍可安裝。開發安裝（`scripts/build-macos.sh` 或
@@ -128,8 +147,9 @@ app 依以下順序尋找資源：
   都在這裡。
 - `engine/tests/`（`llavon_ime_tests`）— 引擎內部、無法用按鍵表達的單元測試：
   協定框架、設定解析、UTF 處理、服務傳輸與 C ABI 契約。
-- `macos/scripts/verify-core.sh` — 純函式 Swift 核心：按鍵轉換、設定 schema/值
-  模型與候選翻頁計算。
+- `macos/scripts/verify-core.sh` — Swift 核心：按鍵轉換、執行期設定 JSON 與候選翻頁計算。
+- `macos/scripts/verify-settings-entry.sh` — 真實選單 target 與原生管理器入口。
+- `macos/scripts/verify-settings-host.sh` — 更新偏好、版本／狀態的跨行程通訊。
 
 ```sh
 scripts/verify-engine-tests.sh   # 單元 + raw-key 套件（Linux 與 macOS）
@@ -175,8 +195,6 @@ LLAVON_IME_TABLE_PATH=ime-core/table/bopomofo_char.json \
 
 ## 備註／已知缺口
 
-- 套件仍打包 fcitx5-macos 設定；等原生 app 在 macOS 驗證完成後，才會把
-  `scripts/package-macos.sh`、Homebrew tap 與 release workflow 遷移過來。
 - app 未簽章（ad-hoc）；要發佈需要 Developer ID 與 notarization。
 - 候選視窗以 `attributes(forCharacterIndex:lineHeightRectangle:)` 定位；可能需要
   依各客戶端 app 調整座標。

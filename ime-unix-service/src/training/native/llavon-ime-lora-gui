@@ -1,0 +1,4 @@
+#!/bin/sh
+# Execute the real bundle path so Cocoa and Qt can locate bundled resources.
+directory="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "${directory}/llavon-ime-lora-gui.app/Contents/MacOS/llavon-ime-lora-gui" "$@"

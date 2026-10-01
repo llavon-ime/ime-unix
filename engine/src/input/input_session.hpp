@@ -23,8 +23,6 @@ struct MixedDecisionState {
     size_t preview_path = 0;
     size_t preview_character = 0;
     uint64_t source_revision = 0;
-    bool english_boundary = false;
-    bool raw_forced = false;
 
     bool active() const noexcept { return !result.raw.empty(); }
     void clear() {
@@ -32,8 +30,6 @@ struct MixedDecisionState {
         preview_path = 0;
         preview_character = 0;
         source_revision = 0;
-        english_boundary = false;
-        raw_forced = false;
     }
 };
 

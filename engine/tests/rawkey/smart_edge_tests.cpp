@@ -68,7 +68,7 @@ RAWKEY_SUITE("smart edge", engine_test_smart_edge) {
         harness.type("hello");
         harness.key(Key('@'));
         RAWKEY_ASSERT(harness.preedit() == "hello@");
-        harness.expect_direct_commit("hello@ ", Key(" "));
+        harness.expect_space_then_commit("hello@ ");
 }
     // Arrow keys settle the pending token inside the editable composition.
     {

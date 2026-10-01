@@ -11,10 +11,11 @@
 using namespace llavon::ime::rawkey;
 
 namespace {
+#ifndef __APPLE__
 
 // The accessibility context source is backed by a file in tests, so writing
 // the file publishes a sample instead of needing the desktop bus.
-std::filesystem::path write_sample(const Harness& harness, std::string_view text) {
+std::filesystem::path write_sample(std::string_view text) {
     const auto path = std::filesystem::temp_directory_path() /
                       ("llavon-ime-rawkey-sample-" + std::to_string(::getpid()) + ".txt");
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
@@ -31,6 +32,7 @@ HarnessOptions sample_options() {
     return options;
 }
 
+#endif
 }  // namespace
 
 RAWKEY_SUITE("context source", context_source) {
@@ -38,7 +40,7 @@ RAWKEY_SUITE("context source", context_source) {
     // Text this IME never committed becomes the prediction context.
     {
         const auto options = sample_options();
-        const auto path = write_sample({}, "早安，今天天氣很好。");
+        const auto path = write_sample("早安，今天天氣很好。");
         Harness harness(options);
         harness.set_configs({{"SmartEnglish", "False"}});
         harness.type("su3");
@@ -65,7 +67,7 @@ RAWKEY_SUITE("context source", context_source) {
     // must not shadow the accessibility sample.
     {
         const auto options = sample_options();
-        const auto path = write_sample({}, "空字串不吃樣本");
+        const auto path = write_sample("空字串不吃樣本");
         Harness harness(options);
         harness.set_configs({{"SmartEnglish", "False"}});
         harness.set_surrounding("", 0, 0);
@@ -78,7 +80,7 @@ RAWKEY_SUITE("context source", context_source) {
     // replaced by the accessibility sample.
     {
         const auto options = sample_options();
-        const auto path = write_sample({}, "樣本不應使用");
+        const auto path = write_sample("樣本不應使用");
         Harness harness(options);
         harness.set_configs({{"SmartEnglish", "False"}});
         harness.set_surrounding("客戶端文字", 5, 5);
@@ -91,7 +93,7 @@ RAWKEY_SUITE("context source", context_source) {
     // available it is adopted automatically.
     {
         const auto options = sample_options();
-        const auto path = write_sample({}, "自動採用");
+        const auto path = write_sample("自動採用");
         Harness harness(options);
         harness.set_configs({{"SmartEnglish", "False"}});
         harness.type("su3");
@@ -149,6 +151,13 @@ RAWKEY_SUITE("memory probe leaves preedit and commit untouched", natural_memory_
             [&] { return harness.context_text() == "document prefix "; }));
         harness.expect_commit("你");
         RAWKEY_ASSERT(harness.commits().back() == "你");
+        // Cancelling a subsequent preedit must not turn a pending probe or
+        // any frontend-only probe metadata into another committed string.
+        harness.key("c");
+        RAWKEY_ASSERT(harness.preedit() == "ㄏ");
+        harness.key("Escape");
+        RAWKEY_ASSERT(harness.composition_empty());
+        RAWKEY_ASSERT(harness.commits().size() == 1);
     }
     std::filesystem::remove(log_path);
     {

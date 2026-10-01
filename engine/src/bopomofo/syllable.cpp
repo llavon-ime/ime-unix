@@ -43,13 +43,16 @@ bool Syllable::accept(char32_t symbol) {
     if (complete()) return false;
 
     if (is_bopomofo_initial(symbol)) {
-        if (initial_ != 0 || medial_ != 0 || final_ != 0) return false;
+        // Slots are unique, not chronological: ㄧ followed by ㄋ is ㄋㄧ.
+        // An already occupied slot still rejects a second initial so strict
+        // mixed decoding cannot turn accidental overwrites into Chinese.
+        if (initial_ != 0) return false;
         initial_ = symbol;
         return true;
     }
 
     if (is_bopomofo_medial(symbol)) {
-        if (medial_ != 0 || final_ != 0) return false;
+        if (medial_ != 0) return false;
         medial_ = symbol;
         return true;
     }
@@ -157,6 +160,18 @@ bool Syllable::has_tone() const noexcept {
 bool Syllable::remove_initial() {
     if (initial_ == 0) return false;
     initial_ = 0;
+    return true;
+}
+
+bool Syllable::remove_medial() {
+    if (medial_ == 0) return false;
+    medial_ = 0;
+    return true;
+}
+
+bool Syllable::remove_final() {
+    if (final_ == 0) return false;
+    final_ = 0;
     return true;
 }
 

@@ -154,6 +154,10 @@ if [[ -z "${LLAVON_IME_SKIP_LORA_GUI_RESTART:-}" ]]; then
             continue  # already the reinstalled build
         fi
         state_dir="${LLAVON_IME_LORA_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/llavon-ime/training}"
+        if [[ -f "${state_dir}/native-gui.lock" ]]; then
+            echo "Native LoRA manager (PID ${pid}) keeps running; reopen it when its work is finished to load the update." >&2
+            continue
+        fi
         url="$(head -n 1 "${state_dir}/gui.lock" 2>/dev/null || true)"
         if [[ "${url}" == http://127.0.0.1:* ]]; then
             token="${url#*#}"

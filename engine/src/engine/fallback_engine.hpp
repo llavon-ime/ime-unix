@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -25,7 +24,7 @@ public:
     std::vector<CandidatePrediction> predict(const CompositionBuffer& buffer) const;
     std::vector<char32_t> lookup(std::u16string_view bopomofo) const;
     bool is_known_english(std::u16string_view word) const;
-    // Normalized Latin confidence in [0, 1]; 0.0 for words outside the lexicon.
+    // Actual Zipf frequency / 8 in [0, 1]; zero outside the lexical data.
     double latin_frequency(std::u16string_view word) const;
     // Merges table candidates with model-proposed candidates; model choices
     // that exist in the table keep their relative order ahead of the rest.
@@ -38,7 +37,6 @@ public:
 
 private:
     TableEngine table_;
-    std::unordered_map<std::u16string, double> english_frequencies_;
 };
 
 }  // namespace llavon::ime

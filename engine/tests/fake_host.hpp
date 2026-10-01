@@ -19,6 +19,7 @@ namespace llavon::ime::test {
 // owns the engine (mirroring a real host's main loop).
 class FakeHost final : public Host {
 public:
+    ~FakeHost() override;
     void post(std::function<void()> body) override {
         std::lock_guard lock(mutex_);
         queue_.push(std::move(body));

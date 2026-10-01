@@ -20,13 +20,17 @@ struct HostContext {
     std::u16string text;
     std::size_t cursor = 0;
     std::size_t anchor = 0;
+    // Native input-object hosts whose document excludes IME composition can
+    // explicitly opt out of preedit suffix removal. This is text-model
+    // metadata, not evidence of focus ownership, freshness or completeness.
+    bool may_include_preedit = true;
 };
 
 // The frontend integration: one implementation per host (the fcitx5 adapter,
 // the macOS InputMethodKit controller) plus test fakes.
 class Host {
 public:
-    virtual ~Host() = default;
+    virtual ~Host();
 
     // Marshals `body` onto the host's main thread. May be called from any
     // thread. `body` must tolerate its context having been detached.

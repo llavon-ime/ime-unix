@@ -71,12 +71,12 @@ if(Fcitx5_FOUND AND NOT WIN32)
         set(LLAVON_IME_FCITX_PKGDATADIR "${CMAKE_INSTALL_DATADIR}/fcitx5")
     endif()
 
-    add_library(llavon-ime-addon MODULE
-        fcitx5/ime_engine.cpp
-        fcitx5/ime_config.cpp)
+    add_library(llavon-ime-addon MODULE fcitx5/ime_engine.cpp)
     target_include_directories(llavon-ime-addon PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(llavon-ime-addon PRIVATE Fcitx5::Core llavon_ime_engine)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(Fcitx5ModuleDBus REQUIRED)
+        target_link_libraries(llavon-ime-addon PRIVATE Fcitx5::Module::DBus)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
         target_link_libraries(llavon-ime-addon PRIVATE PkgConfig::XCB)
@@ -86,6 +86,8 @@ if(Fcitx5_FOUND AND NOT WIN32)
         LLAVON_IME_INSTALLED_TABLE_PATH="${LLAVON_IME_INSTALLED_TABLE_PATH}"
         LLAVON_IME_DISPLAY_VERSION="${LLAVON_IME_DISPLAY_VERSION}"
         LLAVON_IME_INSTALLED_LORA_GUI_PATH="${CMAKE_INSTALL_FULL_BINDIR}/llavon-ime-lora-gui"
+        LLAVON_IME_INSTALLED_SETTINGS_PATH="${CMAKE_INSTALL_FULL_BINDIR}/llavon-ime-settings"
+        LLAVON_IME_INSTALLED_PHRASES_PATH="${CMAKE_INSTALL_FULL_BINDIR}/llavon-ime-phrases"
     )
     if(LLAVON_IME_DEBUG)
         target_compile_definitions(llavon-ime-addon PRIVATE LLAVON_IME_DEBUG=1)
@@ -93,7 +95,7 @@ if(Fcitx5_FOUND AND NOT WIN32)
     if(APPLE)
         target_compile_definitions(llavon-ime-addon PRIVATE LLAVON_IME_NATIVE_SURROUNDING=1)
     endif()
-    target_compile_options(llavon-ime-addon PRIVATE -Wall -Wextra -Wpedantic)
+    llavon_ime_enable_warnings(llavon-ime-addon)
     set_target_properties(llavon-ime-addon PROPERTIES PREFIX "")
     configure_file(fcitx5/addon.conf.in "${CMAKE_BINARY_DIR}/fcitx5/addon/llavon-ime.conf" @ONLY)
     configure_file(fcitx5/inputmethod.conf.in "${CMAKE_BINARY_DIR}/fcitx5/inputmethod/llavon-ime.conf" @ONLY)

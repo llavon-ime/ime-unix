@@ -7,6 +7,22 @@ using namespace llavon::ime::rawkey;
 // decides; it can be toggled at any time. The config is GLOBAL across
 // scenarios, so every scenario sets the config it needs explicitly.
 RAWKEY_SUITE("smart config", engine_test_smart_config) {
+    // Modernized schema/parser must retain legacy decimal spellings and the
+    // same rendered candidates, selected character, and submitted text.
+    {
+        Harness harness;
+        harness.set_config("SmartEnglish", "False");
+        harness.set_config("CandidatePageSize", " +2");
+        harness.type("su3");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        harness.key(Key(" "));
+        RAWKEY_ASSERT(harness.has_candidates());
+        RAWKEY_ASSERT(harness.render_page_size() == 2);
+        RAWKEY_ASSERT(harness.candidate(0) == "你");
+        harness.key(Key("1"));
+        harness.expect_commit("你");
+        RAWKEY_ASSERT(harness.preedit().empty());
+    }
     // 1. Default OFF: letters are 注音 immediately. "su" renders as ㄋㄧ (not
     //    raw "su"), then the tone key 3 (ˇ) gives 你.
     {
@@ -42,7 +58,7 @@ RAWKEY_SUITE("smart config", engine_test_smart_config) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("hello");
-        harness.expect_direct_commit("hello ", Key(" "));
+        harness.expect_space_then_commit("hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     {

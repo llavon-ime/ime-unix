@@ -99,6 +99,19 @@ final class LlavonInputController: IMKInputController, EngineHost {
                                     action: #selector(openLoraManager),
                                     keyEquivalent: "")
         training.target = self
+        let update = menu.addItem(withTitle: "檢查更新…",
+                                  action: #selector(UpdateController.checkForUpdates(_:)),
+                                  keyEquivalent: "")
+        let updateSettings = menu.addItem(withTitle: "軟體更新設定…",
+                                          action: #selector(UpdateController.showSettings(_:)),
+                                          keyEquivalent: "")
+        // InputMethodKit's legacy declaration lacks main-actor annotations;
+        // macOS invokes menu construction on the main thread.
+        MainActor.assumeIsolated {
+            update.title = UpdateController.shared.checkMenuTitle
+            update.target = UpdateController.shared
+            updateSettings.target = UpdateController.shared
+        }
         let restart = menu.addItem(withTitle: "重新啟動",
                                    action: #selector(restartPredictionService),
                                    keyEquivalent: "")
@@ -107,7 +120,12 @@ final class LlavonInputController: IMKInputController, EngineHost {
     }
 
     @objc private func openSettings() {
-        SettingsWindowController.shared.show()
+        if !EngineBridge.shared.openSettingsApp() {
+            let alert = NSAlert()
+            alert.messageText = "找不到拉風設定與個人化程式"
+            alert.informativeText = "請重新安裝包含設定程式的完整套件。"
+            alert.runModal()
+        }
     }
 
     @objc private func openLoraManager() {

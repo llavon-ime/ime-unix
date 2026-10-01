@@ -185,8 +185,8 @@ PredictionResult SessionManager::predict(std::uint64_t owner_uid, const protocol
                          request.buffer_revision, "prediction segment count does not match padding");
         }
         for (std::size_t i = 0; i < candidates.size(); ++i) {
-            if (request.padding[i].chosen &&
-                (candidates[i].size() != 1 || candidates[i].front() != request.padding[i].chosen_char)) {
+            if (request.padding[i].chosen() &&
+                (candidates[i].size() != 1 || candidates[i].front() != request.padding[i].chosen_char())) {
                 return error(protocol::ErrorCode::ProtocolError, request.session_id, request.request_id,
                              request.buffer_revision, "chosen prediction is not a singleton");
             }

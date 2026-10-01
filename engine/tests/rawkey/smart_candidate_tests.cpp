@@ -106,7 +106,7 @@ RAWKEY_SUITE("smart candidate", engine_test_smart_candidate) {
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("ok");
         RAWKEY_ASSERT(harness.preedit() == "ok");
-        harness.expect_direct_commit("ok ", Key(" "));
+        harness.expect_space_then_commit("ok ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -146,7 +146,7 @@ RAWKEY_SUITE("smart candidate", engine_test_smart_candidate) {
         harness.set_config("SmartEnglish", "True");
         harness.type("hello");
         RAWKEY_ASSERT(harness.preedit() == "hello");
-        harness.expect_direct_commit("hello ", Key(" "));
+        harness.expect_space_then_commit("hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
         RAWKEY_ASSERT(!harness.has_candidates());
 }

@@ -129,20 +129,20 @@ public:
     void set_state_observer(StateObserver observer);
 
     // Routes one key press.
-    InputEffect process(const InputKey& key, InputSession& session, const Config& config);
+    [[nodiscard]] InputEffect process(const InputKey& key, InputSession& session, const Config& config);
 
     // Candidate activation from the input panel (mouse or selection key).
-    InputEffect select_candidate(InputSession& session, const Config& config, int index);
-    InputEffect select_symbol(InputSession& session, const Config& config, int index, std::uint64_t epoch);
+    [[nodiscard]] InputEffect select_candidate(InputSession& session, const Config& config, int index);
+    [[nodiscard]] InputEffect select_symbol(InputSession& session, const Config& config, int index, std::uint64_t epoch);
 
     // Lifecycle operations initiated by the frontend adapter.
-    InputEffect reset(InputSession& session, const Config& config, InputResetReason reason,
+    [[nodiscard]] InputEffect reset(InputSession& session, const Config& config, InputResetReason reason,
                       bool clear_context);
     void prepare_for_config_change(InputSession& session);
 
     // Prediction support: fallback candidates, model candidates, and phrase
     // overrides.
-    void apply_fallback_candidates(InputSession& session, std::size_t segment_index);
+    void apply_fallback_candidates(InputSession& session, std::size_t segment_index, bool preserve_existing = false);
     void apply_prediction(InputSession& session, const protocol::Prediction& prediction);
     void apply_phrase_override(InputSession& session);
 
@@ -170,6 +170,7 @@ private:
     InputEffect effect_;
 
     void process_impl(const InputKey& key);
+    void backspace_pending(bool undo_raw_key);
 
     void consume();
     void redraw();
@@ -191,20 +192,18 @@ private:
     bool commit_mixed_candidate_impl(int index);
     bool select_mixed_candidate_impl(int index);
     bool show_mixed_candidates();
-    bool apply_mixed_path(const MixedPath& path, std::size_t char_index);
+    bool apply_mixed_path(const MixedPath& path, std::size_t char_index, bool manual = true);
     bool handle_english_letter(char32_t letter, bool caps_on);
     void handle_escape();
     void open_symbol_menu();
     void close_symbol_menu();
 
-    bool is_smart_tone_key(char32_t key, BopomofoKeyboardLayout layout) const;
     bool is_smart_start_char(char32_t key, BopomofoKeyboardLayout layout) const;
-    void rerun_pending_decision(bool space_triggered);
-    void set_mixed_preview(MixedDecodeResult result, std::size_t preview_path, bool english_boundary);
+    void rerun_pending_decision();
+    void set_mixed_preview(MixedDecodeResult result, std::size_t preview_path);
     void append_pending_char(char32_t key, BopomofoKeyboardLayout layout);
     void settle_pending_as_literals();
     bool settle_pending_preview();
-    bool pending_prefers_raw() const;
 
     bool save_marked_phrase_override();
 

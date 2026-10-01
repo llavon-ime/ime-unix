@@ -22,6 +22,8 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
+	<key>LlavonIMEDisplayVersion</key>
+	<string>@DISPLAY_VERSION@</string>
 	<key>CFBundleSignature</key>
 	<string>MACV</string>
 	<key>CFBundleSupportedPlatforms</key>
@@ -29,7 +31,7 @@
 		<string>MacOSX</string>
 	</array>
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>13.0</string>
 	<key>LSHasLocalizedDisplayName</key>
 	<true/>
 	<key>LSUIElement</key>

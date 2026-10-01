@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "input/mixed_input_decoder.hpp"
 
 #include <chrono>
@@ -47,6 +48,7 @@ public:
         ok &= test_qwerty_283();
         ok &= test_lossless_cover();
         ok &= test_raw_fallback_always_first();
+        ok &= test_literal_tie_guard();
         ok &= test_no_gap_paths();
         ok &= test_dedup();
         ok &= test_long_input_performance();
@@ -60,6 +62,26 @@ public:
     }
 
 private:
+    bool test_literal_tie_guard() {
+        const MixedInputDecoder tied([](std::u16string_view reading) -> std::vector<char32_t> {
+                if (reading == u"ㄨ ") return {U'屋', U'巫'};
+                if (reading == u"ㄕ ") return {U'失', U'師'};
+                if (reading == u"ㄙㄢ ") return {U'三'};
+                return {};
+            },
+            [this](auto word) { return fallback_.latin_frequency(word); },
+            [](std::u16string_view, bool) { return 0.0; },
+            [](std::u16string_view, char32_t ch) {
+                return ch == U'三' ? -2.0 * (3.4 + 0.8) : -(3.4 + 0.4);
+            });
+        // Identical literal/reading costs must preserve the raw tie winner,
+        // independent of equal-score beam ordering and lexical-span proposals.
+        const auto result = tied.decode(u"j g n0 ", BopomofoKeyboardLayout::Standard, false);
+        if (result.best_path == 0) return true;
+        std::printf("[FAIL] literal tie was reclassified\n");
+        return false;
+    }
+
     bool find_path(const MixedDecodeResult& result, const std::u16string& rendered) const {
         for (const auto& path : result.paths) {
             if (path.rendered == rendered) return true;
@@ -244,8 +266,14 @@ private:
     bool test_expand_candidates() {
         const auto result = decoder_.decode(utf16("gmail.com283"), BopomofoKeyboardLayout::Standard, false);
         const auto entries = decoder_.expand_candidates(result, 10);
-        bool ok = !entries.empty() && entries.front().text == utf16("gmail.com283");
-        if (entries.size() >= 2) ok &= entries[1].text == utf16("gmail.com打");
+        bool ok = !entries.empty() && entries.front().text == result.paths[result.best_path].rendered;
+        bool found_raw = false;
+        bool found_chinese = false;
+        for (const auto& entry : entries) {
+            found_raw |= entry.text == utf16("gmail.com283");
+            found_chinese |= entry.text == utf16("gmail.com打");
+        }
+        ok &= found_raw && found_chinese;
 
         const auto hsu = decoder_.decode(utf16("gmail.comjxl"), BopomofoKeyboardLayout::Hsu, true);
         const auto hsu_entries = decoder_.expand_candidates(hsu, 10, 0);

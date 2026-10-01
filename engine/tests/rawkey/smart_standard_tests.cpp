@@ -45,7 +45,7 @@ RAWKEY_SUITE("smart standard", engine_test_smart_standard) {
         harness.type("su");
         harness.key(Key("7"));
         RAWKEY_ASSERT(harness.preedit() == "su7");
-        harness.expect_direct_commit("su7 ", Key(" "));
+        harness.expect_space_then_commit("su7 ");
 }
     // Second tone: ru (ㄐㄧ) + 6 -> 及 (ㄐㄧˊ top candidate).
     {
@@ -70,7 +70,7 @@ RAWKEY_SUITE("smart standard", engine_test_smart_standard) {
         harness.type("hello");
         harness.key(Key("6"));
         RAWKEY_ASSERT(harness.preedit() == "hello6");
-        harness.expect_direct_commit("hello6 ", Key(" "));
+        harness.expect_space_then_commit("hello6 ");
 }
     // Multi-syllable: consecutive tone-key conversions append.
     {
@@ -113,7 +113,7 @@ RAWKEY_SUITE("smart standard", engine_test_smart_standard) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("hi");
-        harness.expect_direct_commit("hi ", Key(" "));
+        harness.expect_space_then_commit("hi ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("su3");
         RAWKEY_ASSERT(harness.preedit() == "你");

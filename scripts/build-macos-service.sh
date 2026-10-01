@@ -175,8 +175,12 @@ restart_stale_lora_manager() {
                 continue  # already the reinstalled build
             fi
         fi
-        # A training job must not be interrupted; it keeps running and is
-        # replaced afterwards.
+        # A native manager owns a separate activation lock, and may be training.
+        # It has no HTTP status endpoint; leave it open until the user closes it.
+        if [[ -f "${state_dir}/native-gui.lock" ]]; then
+            echo "Native LoRA manager (PID ${pid}) keeps running; reopen it after its work finishes to load the update." >&2
+            continue
+        fi
         url="$(head -n 1 "${state_dir}/gui.lock" 2>/dev/null || true)"
         if [[ "${url}" == http://127.0.0.1:* ]]; then
             token="${url#*#}"

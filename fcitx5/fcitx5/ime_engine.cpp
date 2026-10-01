@@ -1,6 +1,11 @@
 #include "fcitx5/ime_engine.hpp"
+#include "util/parse_number.hpp"
+#include <memory>
+#ifdef __linux__
+#include "fcitx5/update_bridge.hpp"
+#include <dbus_public.h>
+#endif
 
-#include <fcitx-config/iniparser.h>
 #include <fcitx-utils/eventdispatcher.h>
 #include <fcitx-utils/key.h>
 #include <fcitx/addonfactory.h>
@@ -53,48 +58,45 @@ namespace {
 // evidence; the scanner still considers other same-program processes.
 int focused_x11_pid() {
     int screen = 0;
-    xcb_connection_t* connection = xcb_connect(nullptr, &screen);
+    const std::unique_ptr<xcb_connection_t, decltype(&xcb_disconnect)> owned_connection(
+        xcb_connect(nullptr, &screen), &xcb_disconnect);
+    auto* connection = owned_connection.get();
     if (!connection || xcb_connection_has_error(connection)) {
-        if (connection) xcb_disconnect(connection);
         return 0;
     }
-    const auto disconnect = [&] { xcb_disconnect(connection); };
-    auto* focus_reply = xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr);
+    const std::unique_ptr<xcb_get_input_focus_reply_t, decltype(&std::free)> focus_reply(
+        xcb_get_input_focus_reply(connection, xcb_get_input_focus(connection), nullptr), &std::free);
     if (!focus_reply) {
-        disconnect();
         return 0;
     }
     xcb_window_t window = focus_reply->focus;
-    free(focus_reply);
     const char property_name[] = "_NET_WM_PID";
-    auto* atom_reply = xcb_intern_atom_reply(
-        connection, xcb_intern_atom(connection, 0, sizeof(property_name) - 1, property_name), nullptr);
+    const std::unique_ptr<xcb_intern_atom_reply_t, decltype(&std::free)> atom_reply(
+        xcb_intern_atom_reply(connection, xcb_intern_atom(connection, 0, sizeof(property_name) - 1, property_name), nullptr),
+        &std::free);
     if (!atom_reply) {
-        disconnect();
         return 0;
     }
     const xcb_atom_t atom = atom_reply->atom;
-    free(atom_reply);
     int pid = 0;
     for (int depth = 0; depth < 32 && window != XCB_WINDOW_NONE &&
                         window != XCB_INPUT_FOCUS_POINTER_ROOT; ++depth) {
-        auto* property = xcb_get_property_reply(
-            connection, xcb_get_property(connection, 0, window, atom, XCB_ATOM_CARDINAL, 0, 1), nullptr);
+        const std::unique_ptr<xcb_get_property_reply_t, decltype(&std::free)> property(
+            xcb_get_property_reply(connection, xcb_get_property(connection, 0, window, atom, XCB_ATOM_CARDINAL, 0, 1), nullptr),
+            &std::free);
         if (property && property->type == XCB_ATOM_CARDINAL && property->format == 32 &&
-            xcb_get_property_value_length(property) == sizeof(std::uint32_t)) {
-            const auto value = *static_cast<const std::uint32_t*>(xcb_get_property_value(property));
+            xcb_get_property_value_length(property.get()) == sizeof(std::uint32_t)) {
+            const auto value = *static_cast<const std::uint32_t*>(xcb_get_property_value(property.get()));
             if (value > 1 && value <= static_cast<std::uint32_t>(INT_MAX)) pid = static_cast<int>(value);
         }
-        free(property);
         if (pid) break;
-        auto* parent = xcb_query_tree_reply(connection, xcb_query_tree(connection, window), nullptr);
+        const std::unique_ptr<xcb_query_tree_reply_t, decltype(&std::free)> parent(
+            xcb_query_tree_reply(connection, xcb_query_tree(connection, window), nullptr), &std::free);
         if (!parent) break;
         const xcb_window_t next = parent->parent;
-        free(parent);
         if (next == window) break;
         window = next;
     }
-    disconnect();
     return pid;
 }
 #endif
@@ -214,7 +216,11 @@ private:
 }  // namespace
 
 ImeEngine::ImeEngine(fcitx::Instance* instance)
-    : instance_(instance), event_dispatcher_(instance ? &instance->eventDispatcher() : nullptr) {
+    : instance_(instance) {
+    if (instance_) {
+        event_dispatcher_ = std::make_unique<fcitx::EventDispatcher>();
+        event_dispatcher_->attach(&instance_->eventLoop());
+    }
     EngineOptions options;
     options.table_path = default_table_path();
     options.phrase_overrides_path = phrase_overrides_path();
@@ -233,8 +239,8 @@ ImeEngine::ImeEngine(fcitx::Instance* instance)
     engine_ = std::make_unique<Engine>(std::move(options), *this);
 
     if (instance_ != nullptr) {
-        lora_manager_action_.setShortText("管理個人化訓練…");
-        lora_manager_action_.setLongText("在瀏覽器開啟本機個人化訓練管理介面");
+        lora_manager_action_.setShortText("拉風設定與個人化…");
+        lora_manager_action_.setLongText("開啟原生輸入法設定、替代詞彙與訓練管理程式");
         lora_manager_action_.registerAction("llavon-ime-lora-manager", &instance_->userInterfaceManager());
         lora_manager_connection_ = lora_manager_action_.connect<fcitx::SimpleAction::Activated>(
             [](fcitx::InputContext*) {
@@ -261,9 +267,34 @@ ImeEngine::ImeEngine(fcitx::Instance* instance)
             });
     }
     reload_config();
+#ifdef __linux__
+    if (instance_) {
+        if (auto* dbus = instance_->addonManager().addon("dbus", true)) {
+            if (auto* bus = dbus->call<fcitx::IDBusModule::bus>()) {
+                update_bridge_ = std::make_unique<UpdateBridge>([this] {
+                    if (engine_->has_pending_composition() || !instance_->canRestart()) return false;
+                    bool otherPreedit = false;
+                    instance_->inputContextManager().foreach([&otherPreedit](fcitx::InputContext* context) {
+                        const auto& panel = context->inputPanel();
+                        otherPreedit = otherPreedit || !panel.preedit().empty() || !panel.clientPreedit().empty();
+                        return !otherPreedit;
+                    });
+                    if (otherPreedit) return false;
+                    instance_->restart();
+                    return true;
+                }, LLAVON_IME_DISPLAY_VERSION, [this] { return settings_status(); });
+                if (!bus->addObjectVTable("/llavon/update", "org.llavon.IME.Update1", *update_bridge_))
+                    update_bridge_.reset();
+            }
+        }
+    }
+#endif
 }
 
 ImeEngine::~ImeEngine() {
+#ifdef __linux__
+    update_bridge_.reset();
+#endif
     // Property destructors may still run after this point during fcitx
     // teardown; the lifetime token makes their detach hooks no-ops.
     alive_.reset();
@@ -351,17 +382,7 @@ void ImeEngine::reloadConfig() {
 }
 
 void ImeEngine::reload_config() {
-    fcitx_config_ = ImeFcitxConfig();
-    try {
-        fcitx::readAsIni(fcitx_config_, kFcitxConfigFile);
-    } catch (...) {
-        fcitx_config_ = ImeFcitxConfig();
-    }
-
-    std::error_code ec;
-    const bool has_fcitx_config = std::filesystem::exists(config_path(), ec) && !ec;
-    apply_shared_config(fcitx_config_, load_config());
-    if (!has_fcitx_config) save();
+    const auto config = load_config();
     const auto transport = default_transport_options();
     if (transport.model_path != active_service_model_path_) {
         // Restart the prediction service with the newly selected model. The
@@ -370,73 +391,32 @@ void ImeEngine::reload_config() {
         engine_->set_transport_options(transport);
         active_service_model_path_ = transport.model_path;
     }
-    engine_->set_config(to_shared_config(fcitx_config_), false);
+    engine_->set_config(config, false);
     engine_->reload_phrase_overrides();
-    update_accessibility_status();
 }
 
 void ImeEngine::save() {
-    // The default INI location is PkgConfig, matching config_path().
-    // The accessibility status is informational and must not be persisted.
-    const std::string status = *fcitx_config_.accessibilityStatus;
-    (void)fcitx_config_.accessibilityStatus.setValue(std::string());
-    fcitx::safeSaveAsIni(fcitx_config_, kFcitxConfigFile);
-    (void)fcitx_config_.accessibilityStatus.setValue(status);
+    // Fcitx may save this launcher dialog during shutdown. It must never
+    // replace the app-owned INI with an empty/obsolete platform form.
 }
 
 const fcitx::Configuration* ImeEngine::getConfig() const {
-    return &fcitx_config_;
-}
-
-void ImeEngine::refresh_phrase_override_editor() const {
-    auto* entries = phrase_override_editor_.entries.mutableValue();
-    entries->clear();
-    for (const auto& record : engine_->phrase_overrides().entries()) {
-        PunctuationMapEntryConfig entry;
-        (void)entry.phrase.setValue(u16_to_utf8(record.phrase));
-        (void)entry.readings.setValue(PhraseOverrideStore::format_readings(record.readings));
-        entries->emplace_back(std::move(entry));
-    }
+    return &settings_launcher_;
 }
 
 const fcitx::Configuration* ImeEngine::getSubConfig(const std::string& path) const {
-    if (path != "phraseoverrides") return nullptr;
-
-    refresh_phrase_override_editor();
-    return &phrase_override_editor_;
+    return path == "phraseoverrides" ? &settings_launcher_ : nullptr;
 }
 
-void ImeEngine::setSubConfig(const std::string& path, const fcitx::RawConfig& config) {
-    if (path != "phraseoverrides") return;
-    // An absent Entries list is not authoritative: frontends also send empty
-    // configs as action triggers, and silently wiping every saved phrase would
-    // be unrecoverable. Removing all entries is done by editing the file.
-    if (!config.get("Entries")) return;
-
-    PhraseOverrideEditorConfig editor;
-    editor.load(config, true);
-    std::vector<PhraseOverrideRecord> records;
-    records.reserve(editor.entries->size());
-    for (const auto& entry : *editor.entries) {
-        // The dialog has no error channel, so one malformed row must not
-        // discard the edits the user made to every other row. Reusing the file
-        // parser keeps the accepted readings identical to the on-disk format.
-        const auto record = PhraseOverrideStore::parse_line(*entry.phrase + " " + *entry.readings);
-        if (!record || !PhraseOverrideStore::valid_entry(record->phrase, record->readings.size())) continue;
-        records.push_back(*record);
-    }
-    (void)engine_->phrase_overrides().replace(records);
+void ImeEngine::setSubConfig(const std::string&, const fcitx::RawConfig&) {
+    // Old frontend submissions cannot overwrite the app-owned phrase file.
 }
 
-void ImeEngine::setConfig(const fcitx::RawConfig& config) {
-    fcitx_config_.load(config, true);
-    (void)fcitx_config_.version.setValue(DisplayVersion::Current);
-    engine_->set_config(to_shared_config(fcitx_config_));
-    update_accessibility_status();
-    save();
+void ImeEngine::setConfig(const fcitx::RawConfig&) {
+    reload_config();
 }
 
-void ImeEngine::update_accessibility_status() {
+std::string ImeEngine::settings_status() const {
 #ifdef LLAVON_IME_NATIVE_SURROUNDING
     const std::string status = "InputMethodKit: 可取得（不需輔助使用權限）";
 #else
@@ -446,8 +426,8 @@ void ImeEngine::update_accessibility_status() {
         status += "；記憶體取樣: " + memory_status_text(memory);
     }
 #endif
-    if (*fcitx_config_.accessibilityStatus == status) return;
-    (void)fcitx_config_.accessibilityStatus.setValue(status);
+    return nlohmann::json{{"version", LLAVON_IME_DISPLAY_VERSION}, {"context", status},
+        {"status", "設定由拉風原生管理器維護"}, {"config", to_json(engine_->config())}}.dump();
 }
 
 void ImeEngine::post(std::function<void()> body) {
@@ -523,7 +503,7 @@ void ImeEngine::update_ui(ContextId context) {
         ++index;
     }
     candidates->setPage(state.page);
-    if (state.cursor_visible) candidates->setCursorIndex(state.cursor);
+    if (state.cursor_visible) candidates->setGlobalCursorIndex(state.cursor);
     panel.setCandidateList(std::move(candidates));
     input_context_ptr->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
 }
@@ -637,7 +617,7 @@ std::vector<int> ImeEngine::probe_processes(ContextId context) {
         if (error) break;
         const std::string name = entry.path().filename().string();
         if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])) == 0) continue;
-        const int pid = std::atoi(name.c_str());
+        const int pid = parse_decimal<int>(name, false).value_or(0);
         if (pid <= 1 || pid == static_cast<int>(::getpid())) continue;
         struct stat info {};
         if (::stat(entry.path().c_str(), &info) != 0 || info.st_uid != ::getuid()) continue;

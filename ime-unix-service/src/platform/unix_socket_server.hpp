@@ -65,7 +65,7 @@ private:
 
     std::mutex connections_mutex_;
     std::vector<std::shared_ptr<Connection>> connections_;
-    std::vector<std::thread> connection_threads_;
+    std::vector<std::jthread> connection_threads_;
 };
 
 }  // namespace ime::unix_service

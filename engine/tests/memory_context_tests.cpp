@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "context/memory_context.hpp"
 
 #include <atomic>

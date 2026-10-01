@@ -14,6 +14,10 @@ namespace llavon::ime {
 enum class MixedSegmentKind {
     Latin,
     Bopomofo,
+    BopomofoIncomplete,
+    // A bounded malformed continuation of a real syllable. It displays exact
+    // raw keys and has no guessed reading/candidates; it cannot start a path.
+    BopomofoUnresolved,
     Number,
     Symbol,
 };
@@ -28,6 +32,7 @@ struct MixedSegment {
     std::u16string reading;
     std::vector<char32_t> candidates;
     double score = 0;
+    bool consumed_boundary = false;
 };
 
 struct MixedPath {
@@ -39,6 +44,8 @@ struct MixedPath {
 struct MixedDecodeResult {
     std::u16string raw;
     std::vector<MixedPath> paths;
+    // Path zero is the reversible raw alternative, not a ranking override.
+    size_t best_path = 0;
 };
 
 // One displayed candidate entry: which path it came from, which character
@@ -50,8 +57,8 @@ struct MixedCandidateEntry {
 };
 
 // Decodes the complete pending input into complete output paths. The decoder
-// has no fcitx runtime dependency: all data (reading lookup and Latin
-// frequency) is supplied by callbacks.
+// has no fcitx runtime dependency: reading lookup is supplied by a callback;
+// scoring defaults to the embedded offline lexicon and accepts overrides.
 //
 // Invariants every returned path satisfies:
 //   - every path covers the raw input exactly once, without gaps or rewrites;
@@ -62,26 +69,31 @@ class MixedInputDecoder {
 public:
     using LookupFn = std::function<std::vector<char32_t>(std::u16string_view)>;
     using FrequencyFn = std::function<double(std::u16string_view)>;
+    using LatinScoreFn = std::function<double(std::u16string_view, bool)>;
+    using ChineseScoreFn = std::function<double(std::u16string_view, char32_t)>;
 
-    MixedInputDecoder(LookupFn lookup, FrequencyFn frequency);
+    MixedInputDecoder(LookupFn lookup, FrequencyFn frequency,
+                      LatinScoreFn latin_score = {}, ChineseScoreFn chinese_score = {});
 
-    MixedDecodeResult decode(std::u16string_view raw, BopomofoKeyboardLayout layout, bool space_tone) const;
+    MixedDecodeResult decode(std::u16string_view raw, BopomofoKeyboardLayout layout, bool space_tone,
+                             std::u16string_view context = {}) const;
 
-    // Expands `result.paths` into displayable candidate entries. The raw path
-    // stays first; the best Chinese-closing path (the one ending with the
-    // longest suffix) then renders once per character candidate of its final
-    // Bopomofo segment, up to `page_size` entries in total.
+    // Best/preferred path first, then the raw choice and ranked alternatives.
+    // Earlier-character choices and alternative boundaries are lattice paths;
+    // remaining rows are filled with final-character homophones.
     std::vector<MixedCandidateEntry> expand_candidates(
         const MixedDecodeResult& result,
         size_t page_size,
         std::optional<size_t> preferred_path = std::nullopt) const;
 
-    static constexpr size_t kTopK = 8;
+    static constexpr size_t kTopK = 16;
     static constexpr size_t kMaxSyllableKeys = 6;
 
 private:
     LookupFn lookup_;
     FrequencyFn frequency_;
+    LatinScoreFn latin_score_;
+    ChineseScoreFn chinese_score_;
 };
 
 }  // namespace llavon::ime

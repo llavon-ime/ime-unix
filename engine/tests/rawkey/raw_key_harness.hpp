@@ -75,7 +75,13 @@ inline constexpr std::uint32_t kAlt = input_key_state(InputKeyState::Alt);
 inline constexpr std::uint32_t kSuper = input_key_state(InputKeyState::Super);
 
 struct HarnessOptions {
-    Config config = default_config();
+    // Offline suites keep their deterministic baseline. Service-backed live
+    // preview suites explicitly enable SmartModelPreview.
+    Config config = [] {
+        auto value = default_config();
+        value.smart_model_preview = false;
+        return value;
+    }();
     std::function<void(const InputEffect::CommitSample&, std::u16string_view)> on_training_commit;
     std::function<void(const llavon::ime::protocol::SessionId&)> on_training_discard;
     // Shortens the engine's commit correction window for tests.
@@ -115,11 +121,14 @@ public:
 
     std::string preedit() const;
     bool composition_empty() const;
+    bool update_ready() const { return !engine_->has_pending_composition(); }
     bool has_candidates() const;
     std::size_t candidate_count() const;
     std::string candidate(std::size_t index) const;
     std::vector<std::string> candidates() const;
     std::vector<std::string> selection_keys() const;
+    // Choose a visible candidate by its text using the actual selection key.
+    void choose_text(std::string_view text);
     // Cursor row within the candidate list, or -1 when no list is open.
     int cursor_index() const;
     int render_page() const;
@@ -134,6 +143,8 @@ public:
     void expect_commit(std::string_view text);
     // Presses a key that commits directly and requires the committed text.
     void expect_direct_commit(std::string_view text, const Key& key);
+    // A mixed-input Space stays editable; only Return submits to the client.
+    void expect_space_then_commit(std::string_view text);
     void expect_focus_out_commit(std::string_view text);
     std::vector<std::string> commits() const;
     std::string last_commit() const;
@@ -158,6 +169,8 @@ public:
     // Detaches the context, which closes the prediction service session.
     void detach();
     void activate();
+    // Choose another client without settling the previous client's text.
+    void use_context(ContextId context);
     void focus_out();
     void reset();
     InputSession* session() const;
@@ -165,6 +178,8 @@ public:
     // MARK: Prediction and service
 
     void settle_prediction();
+    bool pending_model_idle() const;
+    std::uint64_t pending_model_requests() const;
     // Runs queued host work until `predicate` holds (service responses arrive
     // through it); returns whether the predicate held in time.
     bool pump_until(const std::function<bool()>& predicate,
@@ -173,6 +188,7 @@ public:
     void drain();
 
     test::FakeHost& host() { return host_; }
+    Engine& engine() { return *engine_; }
 
 private:
     void apply_environment() const;
@@ -189,6 +205,9 @@ private:
 };
 
 // MARK: Suite registration
+
+// Entry point for the runner's exec-based memory-context test client.
+int committed_client_main(std::string_view format, int commands, int responses);
 
 class SuiteRegistrar {
 public:

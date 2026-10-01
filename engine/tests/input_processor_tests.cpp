@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <algorithm>
 #include <cstdlib>
 
@@ -121,8 +123,8 @@ int run_input_processor_tests() {
     ok = ok && outcome.action == CandidateKeyAction::SelectIndex && outcome.index == 12;
     view.reset();
 
-    // Selection keys pick their row, but a smart-English pending token keeps
-    // ASCII letters for the mixed decoder.
+    // A candidate list is explicitly opened with Down. Configured alphabetic
+    // keys select their row there; normal mixed typing never opens it.
     CandidateKeyConfig home_row;
     home_row.selection_keys = "asdfghjkl";
     home_row.selection_key_count = 9;
@@ -131,7 +133,7 @@ int run_input_processor_tests() {
     outcome = handle_candidate_key(key(U'A'), home_row, view, 25, false, false);
     ok = ok && outcome.action == CandidateKeyAction::SelectIndex && outcome.index == 0;
     ok = ok && handle_candidate_key(key(U'a'), home_row, view, 25, true, false).action ==
-                   CandidateKeyAction::Unhandled;
+                    CandidateKeyAction::SelectIndex;
 
     // Unmatched keys fall through; punctuation is swallowed while listing.
     ok = ok && handle_candidate_key(key(U'x'), home_row, view, 25, false, false).action ==

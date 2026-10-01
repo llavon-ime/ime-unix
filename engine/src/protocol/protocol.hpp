@@ -1,4 +1,5 @@
 #pragma once
+#include "protocol/padding_entry.hpp"
 
 #include <array>
 #include <cstdint>
@@ -44,11 +45,6 @@ enum class ErrorCode : std::uint8_t {
     ServiceShuttingDown = 9,
 };
 
-struct PaddingEntry {
-    bool chosen = false;
-    std::u16string bopomofo;
-    char32_t chosen_char = 0;
-};
 struct CommitEntry {
     std::u16string reading;
     char32_t character = 0;
@@ -121,6 +117,7 @@ using Message = std::variant<OpenSessionRequest, OpenSessionResponse, PredictReq
 class ProtocolError : public std::runtime_error {
 public:
     explicit ProtocolError(const std::string& message) : std::runtime_error(message) {}
+    ~ProtocolError() override;
 };
 
 ByteVector encode(const Message& message);
@@ -129,7 +126,7 @@ MessageType message_type(const Message& message);
 MessageType decode_message_type(const ByteVector& frame);
 const char* error_code_name(ErrorCode code) noexcept;
 bool valid_scalar(char32_t value) noexcept;
-bool valid_utf16(const std::u16string& value) noexcept;
+bool valid_utf16(std::u16string_view value) noexcept;
 bool is_zero(const SessionId& id) noexcept;
 
 }  // namespace llavon::ime::protocol

@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "context/accessibility_context.hpp"
 #include "text/utf.hpp"
 

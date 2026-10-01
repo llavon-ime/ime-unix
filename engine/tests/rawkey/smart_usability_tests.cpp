@@ -3,7 +3,25 @@
 using namespace llavon::ime::rawkey;
 
 RAWKEY_SUITE("smart usability", engine_test_smart_usability) {
-    // Hsu Chinese is a reversible preview: Backspace edits raw keys, while a
+    // Contractions, hyphenated words and English punctuation must remain
+    // lossless on both layouts, even when Hsu d/f/j/s resemble tone keys.
+    for (const char* layout : {"標準", "許氏"}) {
+        for (const char* text : {"it's", "we'd", "i'd", "don't", "can't", "off", "adds",
+                                 "added", "adding", "calls", "fixes", "fixed", "testing", "tested",
+                                 "used", "using", "stopped", "stopping",
+                                 "end-to-end", "as-is", "hi!", "ok?", "v2", "utf8"}) {
+            Harness harness;
+            harness.set_configs({{"BopomofoKeyboardLayout", layout}, {"SmartEnglish", "True"}});
+            harness.type(text);
+            if (harness.preedit() != text) {
+                throw Failure{std::string(layout) + ": " + text + " rendered as " + harness.preedit()};
+            }
+            RAWKEY_ASSERT(!harness.has_candidates());
+            harness.expect_space_then_commit(std::string(text) + " ");
+        }
+    }
+
+    // Hsu Chinese is a reversible preview: Shift+Backspace edits raw keys, while a
     // following English continuation can return to the exact Latin spelling.
     {
         Harness harness;
@@ -13,12 +31,12 @@ RAWKEY_SUITE("smart usability", engine_test_smart_usability) {
         harness.type("nef");
         RAWKEY_ASSERT(harness.preedit() == "你");
         RAWKEY_ASSERT(!harness.has_candidates());
-        harness.key(Key("BackSpace"));
+        harness.key(Key("Shift+BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "ne");
         harness.type("farious");
         RAWKEY_ASSERT(harness.preedit() == "nefarious");
         RAWKEY_ASSERT(!harness.has_candidates());
-        harness.expect_direct_commit("nefarious ", Key(" "));
+        harness.expect_space_then_commit("nefarious ");
 }
 
     // OOV Latin words must not be treated as Chinese merely because the final
@@ -31,7 +49,7 @@ RAWKEY_SUITE("smart usability", engine_test_smart_usability) {
         harness.type("need");
         RAWKEY_ASSERT(harness.preedit() == "need");
         RAWKEY_ASSERT(!harness.has_candidates());
-        harness.expect_direct_commit("need ", Key(" "));
+        harness.expect_space_then_commit("need ");
 }
 
     // A complete number is the safe preview. Chinese remains available only
@@ -42,12 +60,12 @@ RAWKEY_SUITE("smart usability", engine_test_smart_usability) {
                              {"SmartEnglish", "True"},
                              {"SelectionKeys", "數字鍵"}});
         harness.type("283");
-        RAWKEY_ASSERT(harness.preedit() == "283");
+        RAWKEY_ASSERT(harness.preedit() == "打");
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "283");
-        RAWKEY_ASSERT(harness.candidate(1) == "打");
-        harness.key(Key("2"));
+        RAWKEY_ASSERT(harness.candidate(0) == "打");
+        RAWKEY_ASSERT(harness.candidate(1) == "283");
+        harness.choose_text("打");
         RAWKEY_ASSERT(harness.preedit() == "打");
         harness.expect_commit("打");
 }
@@ -63,8 +81,8 @@ RAWKEY_SUITE("smart usability", engine_test_smart_usability) {
         RAWKEY_ASSERT(harness.preedit() == "hello打");
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "hello283");
-        RAWKEY_ASSERT(harness.candidate(1) == "hello打");
+        RAWKEY_ASSERT(harness.candidate(0) == "hello打");
+        RAWKEY_ASSERT(harness.candidate(1) == "hello283");
         harness.key(Key("Escape"));
         RAWKEY_ASSERT(harness.preedit() == "hello打");
         RAWKEY_ASSERT(!harness.has_candidates());

@@ -44,7 +44,7 @@ RAWKEY_SUITE("smart long", engine_test_smart_long) {
         harness.set_config("SmartEnglish", "True");
         harness.type("deadline");
         RAWKEY_ASSERT(harness.preedit() == "deadline");
-        harness.expect_direct_commit("deadline ", Key(" "));
+        harness.expect_space_then_commit("deadline ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -55,11 +55,11 @@ RAWKEY_SUITE("smart long", engine_test_smart_long) {
         harness.set_config("SmartEnglish", "True");
         harness.type("meeting");
         RAWKEY_ASSERT(harness.preedit() == "meeting");
-        harness.expect_direct_commit("meeting ", Key(" "));
+        harness.expect_space_then_commit("meeting ");
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("report");
         RAWKEY_ASSERT(harness.preedit() == "report");
-        harness.expect_direct_commit("report ", Key(" "));
+        harness.expect_space_then_commit("report ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -73,7 +73,7 @@ RAWKEY_SUITE("smart long", engine_test_smart_long) {
         harness.type("2k7");
         RAWKEY_ASSERT(harness.preedit() == "會上的");
         harness.type("review");
-        harness.expect_direct_commit("會上的review ", Key(" "));
+        harness.expect_space_then_commit("會上的review ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -102,25 +102,25 @@ RAWKEY_SUITE("smart long", engine_test_smart_long) {
         harness.key(Key("BackSpace"));
         harness.key(Key("BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "gith");
-        harness.expect_direct_commit("gith ", Key(" "));
+        harness.expect_space_then_commit("gith ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
-    // 8. Chinese previews remain reversible: Backspace removes one original
-    // key at a time and re-decodes the remaining raw input.
+    // 8. Chinese previews remain reversible: Shift+Backspace explicitly undoes
+    // one original key; ordinary Backspace deletes the displayed character.
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("su3");
         harness.type("cl3");
         RAWKEY_ASSERT(harness.preedit() == "你好");
-        harness.key(Key("BackSpace"));
+        harness.key(Key("Shift+BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "你cl");
         harness.key(Key("BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "你c");
         harness.key(Key("BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "你");
-        harness.key(Key("BackSpace"));
+        harness.key(Key("Shift+BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "su");
         harness.key(Key("BackSpace"));
         RAWKEY_ASSERT(harness.preedit() == "s");

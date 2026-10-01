@@ -12,31 +12,6 @@
 
 namespace llavon::ime {
 
-namespace {
-
-bool is_ascii_letter(char16_t ch) {
-    return (ch >= u'a' && ch <= u'z') || (ch >= u'A' && ch <= u'Z');
-}
-
-bool is_complete_structured_ascii(std::u16string_view raw) {
-    for (const auto& token : tokenize_ascii(raw, 0)) {
-        if (token.end != raw.size()) continue;
-        switch (token.kind) {
-            case AsciiTokenKind::Email:
-            case AsciiTokenKind::Domain:
-            case AsciiTokenKind::URL:
-            case AsciiTokenKind::FilesystemPath:
-            case AsciiTokenKind::Identifier:
-                return true;
-            default:
-                break;
-        }
-    }
-    return false;
-}
-
-}  // namespace
-
 std::optional<int> selection_index_for_key(char32_t symbol, std::string_view selection_keys,
                                            int selection_key_count, bool caps_lock_inputs_bopomofo) {
     const auto normalized_key = caps_lock_inputs_bopomofo ? ascii_lower(symbol) : symbol;
@@ -102,11 +77,8 @@ CandidateKeyOutcome handle_candidate_key(const InputKey& key, const CandidateKey
 
     if (const auto index = selection_index_for_key(key.sym, config.selection_keys, config.selection_key_count,
                                                    config.caps_lock_inputs_bopomofo)) {
-        if (!(mixed_decision_active && key.sym <= 0x7f &&
-              ((key.sym >= U'a' && key.sym <= U'z') || (key.sym >= U'A' && key.sym <= U'Z')))) {
-            const int page_offset = view.page_offset(config.page_size, candidate_count);
-            return {CandidateKeyAction::SelectIndex, page_offset + *index};
-        }
+        const int page_offset = view.page_offset(config.page_size, candidate_count);
+        return {CandidateKeyAction::SelectIndex, page_offset + *index};
     }
 
     if (has_chewing_punctuation && !mixed_decision_active) {
@@ -214,6 +186,22 @@ void InputProcessor::commit_text(std::u16string text) {
 }
 
 namespace {
+// Pending smart input is inserted at the buffer caret, just like settled
+// literals and phonetic segments. Display and all commit routes share this
+// assembly so a suffix never moves in front of newly typed text.
+std::u16string composition_with_pending(const CompositionBuffer& buffer, std::u16string_view pending,
+                                       bool candidates_only = false) {
+    std::u16string text;
+    const auto& segments = buffer.segments();
+    for (size_t i = 0; i <= segments.size(); ++i) {
+        if (i == buffer.caret()) text += pending;
+        if (i < segments.size() && (!candidates_only || segments[i].visible_candidate())) {
+            text += segments[i].rendered_text();
+        }
+    }
+    return text;
+}
+
 // Everything the composition does not account for was typed literally:
 // SmartEnglish pending words and the trailing space or punctuation. Like
 // Windows, they stay in the sample as context without a reading.
@@ -277,6 +265,7 @@ std::optional<InputEffect::CommitSample> mixed_training_sample(const InputSessio
     InputEffect::CommitSample sample;
     bool trainable = false;
     for (const auto& segment : segments) {
+        if (segment.consumed_boundary) continue;
         if (segment.kind == MixedSegmentKind::Bopomofo) {
             if (segment.reading.empty() || segment.candidates.empty() || segment.candidates.front() == 0)
                 return std::nullopt;
@@ -293,6 +282,38 @@ std::optional<InputEffect::CommitSample> mixed_training_sample(const InputSessio
     }
     if (!trainable) return std::nullopt;
     if (!append_literal_tail(sample, committed)) return std::nullopt;
+    return sample;
+}
+
+std::optional<InputEffect::CommitSample> commit_training_sample(const InputSession& session,
+                                                               std::u16string_view committed) {
+    if (!session.pending_token.empty() && !session.buffer.caret_at_end()) {
+        // The old append-only sample assembly would label an inserted reading
+        // as literal text, or associate it with a matching suffix character.
+        // Materialize a copy at the same caret before capturing the sample.
+        auto buffer = session.buffer;
+        const auto& decision = session.mixed_decision;
+        if (decision.active() && decision.source_revision == session.pending_token.revision &&
+            decision.result.raw == session.pending_token.raw && decision.preview_path > 0 &&
+            decision.preview_path < decision.result.paths.size()) {
+            for (const auto& segment : decision.result.paths[decision.preview_path].segments) {
+                if (segment.consumed_boundary) continue;
+                if (segment.kind == MixedSegmentKind::Bopomofo) {
+                    const auto inserted = buffer.add_bopomofo_keys(segment.body_keys, segment.tone_key,
+                        session.pending_token.layout, true, segment.reading);
+                    if (!inserted || !inserted->completed || segment.candidates.empty() ||
+                        !buffer.set_segment_candidates(inserted->segment_index, segment.candidates)) return std::nullopt;
+                } else {
+                    for (const char16_t ch : segment.raw) (void)buffer.add_literal(ch);
+                }
+            }
+        } else {
+            for (const char16_t ch : session.pending_token.raw) (void)buffer.add_literal(ch);
+        }
+        return training_sample(buffer, committed);
+    }
+    auto sample = training_sample(session.buffer, committed);
+    if (!sample) sample = mixed_training_sample(session, committed);
     return sample;
 }
 }
@@ -343,10 +364,8 @@ InputEffect InputProcessor::reset(InputSession& session, const Config& config, I
                                (reason == InputResetReason::FocusOut &&
                                 (!session.pending_token.empty() || complete_composition));
     if (should_commit) {
-        auto text = session.buffer.candidate_commit_text();
-        text += pending_rendered_text(session);
-        effect_.training_sample = training_sample(session.buffer, text);
-        if (!effect_.training_sample) effect_.training_sample = mixed_training_sample(session, text);
+        auto text = composition_with_pending(session.buffer, pending_rendered_text(session), true);
+        effect_.training_sample = commit_training_sample(session, text);
         commit_text(std::move(text));
     }
 
@@ -374,8 +393,7 @@ void InputProcessor::prepare_for_config_change(InputSession& session) {
 }
 
 void InputProcessor::process_impl(const InputKey& key) {
-    const auto layout = config_->keyboard_layout == "hsu" ? BopomofoKeyboardLayout::Hsu
-                                                          : BopomofoKeyboardLayout::Standard;
+    const auto layout = bopomofo_keyboard_layout(config_->keyboard_layout);
     const auto raw_symbol = key.sym;
 
     // CapsLock state only exists in the raw key. When Chinese input is
@@ -404,11 +422,13 @@ void InputProcessor::process_impl(const InputKey& key) {
     const bool arrow_key = key.sym == keysym::Left || key.sym == keysym::Right;
     if (arrow_key && key.has(InputKeyState::Shift) &&
         !(key.has(InputKeyState::Alt) || key.has(InputKeyState::Super) || key.has(InputKeyState::Meta)) &&
-        !session_->symbol_menu.active() && !candidate_list_active(*session_) && !session_->buffer.empty() &&
-        session_->buffer.extend_selection(key.sym == keysym::Left ? -1 : 1)) {
-        redraw();
-        consume();
-        return;
+        !session_->symbol_menu.active() && !candidate_list_active(*session_) && !composition_empty(*session_)) {
+        if (config_->smart_english && !session_->pending_token.empty()) (void)settle_pending_preview();
+        if (session_->buffer.extend_selection(key.sym == keysym::Left ? -1 : 1)) {
+            redraw();
+            consume();
+            return;
+        }
     }
 
     // Shift+space commits the composition followed by a space; with an empty
@@ -423,10 +443,9 @@ void InputProcessor::process_impl(const InputKey& key) {
     }
 
     const auto chewing_punctuation = chewing_punctuation_for_key(key, layout);
-    const bool punctuation_is_standard_bopomofo =
-        layout == BopomofoKeyboardLayout::Standard && !key.has_blocking_modifier() &&
-        (raw_symbol == U',' || raw_symbol == U'.' || raw_symbol == U';');
-    const auto punctuation = punctuation_is_standard_bopomofo ? std::nullopt : chewing_punctuation;
+    const bool punctuation_is_bopomofo = !key.has_blocking_modifier() &&
+        lookup_bopomofo_key(raw_symbol, layout, false).has_value();
+    const auto punctuation = punctuation_is_bopomofo ? std::nullopt : chewing_punctuation;
     if (!punctuation && key.has_shortcut_modifier()) return;
 
     if (session_->symbol_menu.active()) {
@@ -515,8 +534,8 @@ void InputProcessor::process_impl(const InputKey& key) {
     }
 
     // Smart English keeps the raw input in a pending token; the mixed-input
-    // decoder derives every language interpretation. It only resolves at an
-    // explicit tone key or Space.
+    // decoder ranks parallel interpretations after every input event. Raw
+    // keys (including Space) remain editable until an explicit confirmation.
     if (config_->smart_english) {
         const bool is_upper = raw_symbol >= U'A' && raw_symbol <= U'Z';
         const bool is_lower = raw_symbol >= U'a' && raw_symbol <= U'z';
@@ -536,8 +555,6 @@ void InputProcessor::process_impl(const InputKey& key) {
                 } else if (session_->mixed_decision.active() && session_->mixed_decision.preview_path != 0) {
                     session_->mixed_decision.preview_path = 0;
                     session_->mixed_decision.preview_character = 0;
-                    session_->mixed_decision.english_boundary = false;
-                    session_->mixed_decision.raw_forced = true;
                 } else {
                     session_->pending_token.clear();
                     session_->mixed_decision.clear();
@@ -552,21 +569,7 @@ void InputProcessor::process_impl(const InputKey& key) {
                 if (session_->mixed_decision.active() && session_->choosing_candidate()) {
                     (void)transition_to(InputStateKind::Inputting);
                 }
-                if (session_->mixed_decision.active() && session_->mixed_decision.english_boundary) {
-                    session_->mixed_decision.clear();
-                    (void)transition_to(InputStateKind::Inputting);
-                    redraw();
-                    consume();
-                    return;
-                }
-                session_->pending_token.pop();
-                session_->mixed_decision.clear();
-                (void)transition_to(composition_empty(*session_) ? InputStateKind::Empty : InputStateKind::Inputting);
-                if (session_->pending_token.empty()) {
-                    redraw();
-                } else {
-                    rerun_pending_decision(false);
-                }
+                backspace_pending(key.raw_has(InputKeyState::Shift));
                 consume();
                 return;
             }
@@ -584,39 +587,8 @@ void InputProcessor::process_impl(const InputKey& key) {
             }
 
             if (key.sym == U' ') {
-                if (session_->mixed_decision.active()) {
-                    if (session_->mixed_decision.preview_path == 0) {
-                        if (!session_->mixed_decision.english_boundary &&
-                            is_complete_structured_ascii(session_->pending_token.raw)) {
-                            rerun_pending_decision(true);
-                        } else {
-                            (void)commit_composition_with(U' ');
-                        }
-                    } else {
-                        const auto& preview =
-                            session_->mixed_decision.result.paths[session_->mixed_decision.preview_path];
-                        if (!preview.segments.empty() &&
-                            preview.segments.back().kind == MixedSegmentKind::Bopomofo) {
-                            (void)settle_pending_preview();
-                        } else {
-                            std::u16string latin_tail;
-                            for (auto it = preview.segments.rbegin(); it != preview.segments.rend(); ++it) {
-                                if (it->kind == MixedSegmentKind::Bopomofo) break;
-                                latin_tail.insert(0, it->raw);
-                            }
-                            const bool long_latin = latin_tail.size() >= 4 &&
-                                                    std::all_of(latin_tail.begin(), latin_tail.end(),
-                                                                [](char16_t ch) { return is_ascii_letter(ch); });
-                            if (fallback_.is_known_english(latin_tail) || long_latin) {
-                                (void)commit_composition_with(U' ');
-                            } else {
-                                rerun_pending_decision(true);
-                            }
-                        }
-                    }
-                } else {
-                    rerun_pending_decision(true);
-                }
+                append_pending_char(U' ', smart_layout);
+                rerun_pending_decision();
                 consume();
                 return;
             }
@@ -631,16 +603,8 @@ void InputProcessor::process_impl(const InputKey& key) {
             }
 
             if (raw_symbol >= 0x21 && raw_symbol <= 0x7e && !key.has_blocking_modifier()) {
-                if (session_->mixed_decision.active() && session_->mixed_decision.english_boundary) {
-                    if (session_->mixed_decision.preview_path == 0) {
-                        settle_pending_as_literals();
-                        (void)session_->buffer.add_literal(U' ');
-                    } else {
-                        (void)settle_pending_preview();
-                    }
-                }
                 append_pending_char(raw_symbol, smart_layout);
-                rerun_pending_decision(false);
+                rerun_pending_decision();
                 consume();
                 return;
             }
@@ -654,6 +618,13 @@ void InputProcessor::process_impl(const InputKey& key) {
         const bool all_literals = !segments.empty() &&
                                   std::all_of(segments.begin(), segments.end(),
                                               [](const Segment& segment) { return segment.literal != 0; });
+        if (session_->pending_token.empty() && all_literals && key.sym == U' ' && !key.has_blocking_modifier()) {
+            (void)session_->buffer.add_literal(U' ');
+            (void)transition_to(InputStateKind::Inputting);
+            redraw();
+            consume();
+            return;
+        }
         if (session_->pending_token.empty() && all_literals && !session_->buffer.caret_at_end() &&
             raw_symbol >= 0x20 && raw_symbol <= 0x7e && !key.has_blocking_modifier()) {
             (void)session_->buffer.add_literal(raw_symbol);
@@ -664,10 +635,22 @@ void InputProcessor::process_impl(const InputKey& key) {
             return;
         }
 
-        if (session_->pending_token.empty() && is_smart_start_char(key.sym, layout)) {
+        // A tone cannot complete a nonexistent syllable. Keep its exact key
+        // reversible instead of leaving an orphan phonetic mark (for example
+        // an IBM '.' after explicitly typed uppercase filename letters).
+        if (session_->pending_token.empty() && !session_->buffer.has_unfinished_reading() &&
+            raw_symbol >= 0x21 && raw_symbol <= 0x7e && !key.has_blocking_modifier() &&
+            is_bopomofo_tone_key(raw_symbol, layout)) {
+            append_pending_char(raw_symbol, layout);
+            rerun_pending_decision();
+            consume();
+            return;
+        }
+
+        if (session_->pending_token.empty() && !key.has_blocking_modifier() && is_smart_start_char(key.sym, layout)) {
             if (candidate_list_active(*session_)) (void)transition_to(InputStateKind::Inputting);
             append_pending_char(key.sym, layout);
-            rerun_pending_decision(false);
+            rerun_pending_decision();
             consume();
             return;
         }
@@ -699,8 +682,10 @@ void InputProcessor::process_impl(const InputKey& key) {
     }
 
     // Match Chewing: digits commit directly from an empty state, join completed
-    // composition as literals, and bell while a Hsu syllable is unfinished.
-    if (layout == BopomofoKeyboardLayout::Hsu && is_ascii_digit_keysym(static_cast<std::uint32_t>(key.sym))) {
+    // composition as literals, and bell while a syllable is unfinished, when
+    // this layout does not assign the digit to a phonetic symbol or tone.
+    if (is_ascii_digit_keysym(static_cast<std::uint32_t>(key.sym)) &&
+        !lookup_bopomofo_key(key.sym, layout, false)) {
         if (session_->buffer.has_unfinished_reading()) {
             consume();
             return;
@@ -876,7 +861,7 @@ std::size_t InputProcessor::candidate_count() const {
     if (!session_->choosing_candidate()) return 0;
     if (session_->mixed_decision.active()) {
         return decoder_
-            .expand_candidates(session_->mixed_decision.result, config_->candidate_page_size,
+            .expand_candidates(session_->mixed_decision.result, static_cast<size_t>(config_->candidate_page_size),
                                session_->mixed_decision.preview_path)
             .size();
     }
@@ -900,10 +885,8 @@ CandidateKeyConfig InputProcessor::candidate_key_config() const {
 }
 
 void InputProcessor::commit_current() {
-    auto text = session_->buffer.commit_text();
-    text += pending_rendered_text(*session_);
-    effect_.training_sample = training_sample(session_->buffer, text);
-    if (!effect_.training_sample) effect_.training_sample = mixed_training_sample(*session_, text);
+    auto text = current_preedit(*session_);
+    effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
     session_->pending_token.clear();
     session_->mixed_decision.clear();
@@ -915,11 +898,9 @@ void InputProcessor::commit_current() {
 }
 
 void InputProcessor::commit_composition_with(char32_t extra) {
-    std::u16string text = session_->buffer.commit_text();
-    text += pending_rendered_text(*session_);
+    auto text = current_preedit(*session_);
     if (extra != 0) text += utf8_to_u16(char32_to_utf8(extra));
-    effect_.training_sample = training_sample(session_->buffer, text);
-    if (!effect_.training_sample) effect_.training_sample = mixed_training_sample(*session_, text);
+    effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
     session_->pending_token.clear();
     session_->mixed_decision.clear();
@@ -976,13 +957,11 @@ bool InputProcessor::select_symbol_impl(int index, std::uint64_t epoch) {
 bool InputProcessor::commit_mixed_candidate_impl(int index) {
     if (!session_->mixed_decision.active() || index < 0) return false;
     const auto entries = decoder_.expand_candidates(session_->mixed_decision.result,
-                                                    candidate_page_size(*session_, *config_),
+                                                    static_cast<size_t>(candidate_page_size(*session_, *config_)),
                                                     session_->mixed_decision.preview_path);
     if (index >= static_cast<int>(entries.size())) return false;
 
-    auto text = session_->buffer.commit_text();
-    text += entries[static_cast<size_t>(index)].text;
-    if (index == 0 && session_->mixed_decision.english_boundary) text.push_back(u' ');
+    auto text = composition_with_pending(session_->buffer, entries[static_cast<size_t>(index)].text);
     session_->buffer.clear();
     session_->pending_token.clear();
     session_->mixed_decision.clear();
@@ -999,24 +978,16 @@ bool InputProcessor::select_mixed_candidate_impl(int index) {
     if (session_->mixed_decision.source_revision != session_->pending_token.revision) return false;
 
     const auto entries = decoder_.expand_candidates(session_->mixed_decision.result,
-                                                    candidate_page_size(*session_, *config_),
+                                                    static_cast<size_t>(candidate_page_size(*session_, *config_)),
                                                     session_->mixed_decision.preview_path);
     if (index >= static_cast<int>(entries.size())) return false;
 
-    if (index == 0) {
-        if (session_->mixed_decision.english_boundary) {
-            (void)commit_composition_with(U' ');
-        } else {
-            session_->mixed_decision.preview_path = 0;
-            session_->mixed_decision.preview_character = 0;
-            session_->mixed_decision.raw_forced = true;
-            (void)transition_to(InputStateKind::Inputting);
-            redraw();
-        }
+    const auto& entry = entries[static_cast<size_t>(index)];
+    if (entry.path_index == 0) {
+        settle_pending_as_literals();
+        redraw();
         return true;
     }
-
-    const auto& entry = entries[static_cast<size_t>(index)];
     if (entry.path_index >= session_->mixed_decision.result.paths.size()) return false;
     return apply_mixed_path(session_->mixed_decision.result.paths[entry.path_index], entry.char_index);
 }
@@ -1028,12 +999,12 @@ bool InputProcessor::show_mixed_candidates() {
     }
 
     const auto entries = decoder_.expand_candidates(session_->mixed_decision.result,
-                                                    candidate_page_size(*session_, *config_),
+                                                    static_cast<size_t>(candidate_page_size(*session_, *config_)),
                                                     session_->mixed_decision.preview_path);
     if (entries.size() < 2) return false;
     (void)transition_to(InputStateKind::ChoosingCandidate);
     session_->candidate_view.cursor = 0;
-    for (size_t i = 1; i < entries.size(); ++i) {
+    for (size_t i = 0; i < entries.size(); ++i) {
         if (entries[i].path_index == session_->mixed_decision.preview_path &&
             entries[i].char_index == session_->mixed_decision.preview_character) {
             session_->candidate_view.cursor = static_cast<int>(i);
@@ -1045,18 +1016,20 @@ bool InputProcessor::show_mixed_candidates() {
     return true;
 }
 
-bool InputProcessor::apply_mixed_path(const MixedPath& path, std::size_t char_index) {
+bool InputProcessor::apply_mixed_path(const MixedPath& path, std::size_t char_index, bool manual) {
     CompositionBuffer next = session_->buffer;
     for (size_t i = 0; i < path.segments.size(); ++i) {
         const auto& segment = path.segments[i];
+        if (segment.consumed_boundary) continue;
         if (segment.kind == MixedSegmentKind::Bopomofo) {
             const auto result =
-                next.add_bopomofo_keys(segment.body_keys, segment.tone_key, session_->pending_token.layout, true);
+                next.add_bopomofo_keys(segment.body_keys, segment.tone_key, session_->pending_token.layout, true,
+                                      segment.reading);
             if (!result || !result->completed) return false;
             (void)next.set_segment_candidates(result->segment_index, segment.candidates);
             const size_t candidate_index = i + 1 == path.segments.size() ? char_index : 0;
             if (candidate_index >= segment.candidates.size()) return false;
-            if (!next.select_candidate(result->segment_index, candidate_index,
+            if (manual && !next.select_candidate(result->segment_index, candidate_index,
                                        config_->move_cursor_after_selection)) {
                 return false;
             }
@@ -1163,196 +1136,103 @@ void InputProcessor::close_symbol_menu() {
     redraw();
 }
 
-bool InputProcessor::is_smart_tone_key(char32_t key, BopomofoKeyboardLayout layout) const {
-    if (layout == BopomofoKeyboardLayout::Hsu) {
-        return key == U'd' || key == U'f' || key == U'j' || key == U's';
-    }
-    if (const auto symbol = lookup_bopomofo_key(key)) {
-        return is_bopomofo_tone(*symbol) && *symbol != U' ';
-    }
-    return false;
-}
-
 bool InputProcessor::is_smart_start_char(char32_t key, BopomofoKeyboardLayout layout) const {
+    // A leading underscore is an ASCII identifier start, including private
+    // names. Keep it reversible instead of turning it into Chinese punctuation.
+    if (key == U'_') return true;
     if (key >= U'a' && key <= U'z') return true;
-    if (layout == BopomofoKeyboardLayout::Standard) {
-        if (const auto symbol = lookup_bopomofo_key(key)) return !is_bopomofo_tone(*symbol);
-    }
+    if (const auto symbol = lookup_bopomofo_key(key, layout)) return !is_bopomofo_tone(*symbol);
     return false;
 }
 
 // Re-decode the exact raw pending keys. A language decision only changes the
 // preedit preview; it is not written into the composition until confirmation.
-void InputProcessor::rerun_pending_decision(bool space_triggered) {
+void InputProcessor::rerun_pending_decision() {
     if (session_->pending_token.empty()) return;
+    auto context = session_->context_text;
+    context += session_->buffer.rendered_prefix_before_caret();
+    auto result = decoder_.decode(session_->pending_token.raw, session_->pending_token.layout,
+                                  false, context);
+    const size_t preview = result.best_path;
+    set_mixed_preview(std::move(result), preview);
+}
 
-    std::vector<MixedSegment> previous_chinese;
-    if (session_->mixed_decision.active() && session_->mixed_decision.preview_path > 0 &&
-        session_->mixed_decision.preview_path < session_->mixed_decision.result.paths.size() &&
-        session_->mixed_decision.source_revision + (space_triggered ? 0 : 1) == session_->pending_token.revision) {
-        for (const auto& segment : session_->mixed_decision.result.paths[session_->mixed_decision.preview_path].segments) {
-            if (segment.kind == MixedSegmentKind::Bopomofo) previous_chinese.push_back(segment);
-        }
-    }
-
-    auto result = decoder_.decode(session_->pending_token.raw, session_->pending_token.layout, space_triggered);
-    const size_t raw_size = session_->pending_token.raw.size();
-    const size_t no_path = std::numeric_limits<size_t>::max();
-    size_t best_closing = no_path;
-    size_t best_chinese = no_path;
-    size_t best_known_prefix_closing = no_path;
-    size_t best_known_tail = no_path;
-    size_t best_preserved = no_path;
-    size_t best_prefix_len = std::numeric_limits<size_t>::max();
-    size_t longest_known_prefix = 0;
-    double best_closing_score = -1;
-    double best_chinese_score = -1;
-    double best_known_prefix_score = -1;
-    double best_known_tail_score = -1;
-    double best_preserved_score = -1;
-    size_t best_chinese_segments = 0;
-
-    for (size_t i = 1; i < result.paths.size(); ++i) {
-        const auto& path = result.paths[i];
-        if (path.segments.empty()) continue;
-
-        bool has_chinese = false;
-        bool seen_chinese = false;
-        bool known_latin_tail = false;
-        size_t chinese_segments = 0;
-        size_t preserved_segments = 0;
-        for (const auto& segment : path.segments) {
-            if (segment.kind == MixedSegmentKind::Bopomofo) {
-                has_chinese = true;
-                seen_chinese = true;
-                ++chinese_segments;
-                if (preserved_segments < previous_chinese.size()) {
-                    const auto& previous = previous_chinese[preserved_segments];
-                    if (segment.begin == previous.begin && segment.end == previous.end &&
-                        segment.reading == previous.reading) {
-                        ++preserved_segments;
-                    }
+void InputProcessor::backspace_pending(bool undo_raw_key) {
+    auto& pending = session_->pending_token;
+    const auto& decision = session_->mixed_decision;
+    std::optional<MixedPath> survivor;
+    if (!undo_raw_key && decision.active() && decision.source_revision == pending.revision &&
+        decision.preview_path < decision.result.paths.size()) {
+        auto path = decision.result.paths[decision.preview_path];
+        // A consumed Space has no displayed character. Delete the last
+        // displayed unit together with its raw boundary, not an invisible key.
+        while (!path.segments.empty() && path.segments.back().consumed_boundary) path.segments.pop_back();
+        if (!path.segments.empty()) {
+            auto& tail = path.segments.back();
+            if (tail.kind == MixedSegmentKind::Bopomofo && !tail.candidates.empty()) {
+                pending.raw.resize(tail.begin);
+                ++pending.revision;
+                const auto character = tail.candidates.front();
+                path.rendered.resize(path.rendered.size() - (character > 0xffff ? 2U : 1U));
+                path.segments.pop_back();
+                survivor = std::move(path);
+            } else if (!tail.raw.empty()) {
+                // Literal letters/digits/symbols remain one-character edits;
+                // retain the visible prefix instead of guessing its language
+                // again just because the user deleted a trailing character.
+                pending.raw.resize(tail.end - 1);
+                ++pending.revision;
+                tail.raw.pop_back();
+                --tail.end;
+                // An unfinished reading is displayed as these same raw keys.
+                // Retain that literal prefix for this edit; fresh candidate
+                // interpretations remain available in the decoded result.
+                if (tail.kind == MixedSegmentKind::BopomofoIncomplete) {
+                    tail.kind = MixedSegmentKind::Symbol;
+                    tail.reading.clear();
                 }
-            } else if (seen_chinese && segment.kind == MixedSegmentKind::Latin &&
-                       fallback_.is_known_english(segment.raw)) {
-                known_latin_tail = true;
-            }
-        }
-        if (has_chinese &&
-            (chinese_segments > best_chinese_segments ||
-             (chinese_segments == best_chinese_segments && path.score > best_chinese_score))) {
-            best_chinese = i;
-            best_chinese_score = path.score;
-            best_chinese_segments = chinese_segments;
-        }
-        if (known_latin_tail && path.score > best_known_tail_score) {
-            best_known_tail = i;
-            best_known_tail_score = path.score;
-        }
-        if (!previous_chinese.empty() && preserved_segments == previous_chinese.size() &&
-            path.score > best_preserved_score) {
-            best_preserved = i;
-            best_preserved_score = path.score;
-        }
-
-        if (path.segments.back().kind == MixedSegmentKind::Bopomofo) {
-            const size_t begin = path.segments.back().begin;
-            if (begin < best_prefix_len ||
-                (begin == best_prefix_len && path.score > best_closing_score)) {
-                best_closing = i;
-                best_prefix_len = begin;
-                best_closing_score = path.score;
-            }
-            if (begin >= 3) {
-                const auto prefix = session_->pending_token.raw.substr(0, begin);
-                if (fallback_.is_known_english(prefix) &&
-                    (begin > longest_known_prefix ||
-                     (begin == longest_known_prefix && path.score > best_known_prefix_score))) {
-                    best_known_prefix_closing = i;
-                    longest_known_prefix = begin;
-                    best_known_prefix_score = path.score;
-                }
+                path.rendered.pop_back();
+                if (tail.raw.empty()) path.segments.pop_back();
+                survivor = std::move(path);
             }
         }
     }
-
-    const bool explicit_tone = is_smart_tone_key(session_->pending_token.raw.back(), session_->pending_token.layout);
-    const bool whole_token_closing =
-        best_closing != no_path && result.paths[best_closing].segments.back().begin == 0;
-    if (space_triggered) {
-        const bool all_letters = std::all_of(session_->pending_token.raw.begin(), session_->pending_token.raw.end(),
-                                             [](char16_t ch) { return is_ascii_letter(ch); });
-        if (previous_chinese.empty() &&
-            (fallback_.is_known_english(session_->pending_token.raw) ||
-             (all_letters && session_->pending_token.raw.size() >= 4))) {
-            commit_composition_with(U' ');
-            return;
-        }
-        if (explicit_tone && !whole_token_closing && best_preserved == no_path &&
-            best_known_prefix_closing == no_path) {
-            commit_composition_with(U' ');
-            return;
-        }
-        if (best_closing == no_path) {
-            commit_composition_with(U' ');
-            return;
-        }
-        const size_t preview = best_preserved != no_path ? best_preserved :
-                               pending_prefers_raw() ? 0 :
-                               best_known_prefix_closing != no_path ? best_known_prefix_closing : best_closing;
-        set_mixed_preview(std::move(result), preview, true);
-        return;
-    }
-
-    bool prefer_raw = pending_prefers_raw();
-    if (explicit_tone && raw_size > 4 &&
-        fallback_.is_known_english(session_->pending_token.raw.substr(0, raw_size - 1))) {
-        prefer_raw = true;
-    }
-
-    size_t preview = no_path;
-    if (is_complete_structured_ascii(session_->pending_token.raw) && best_chinese != no_path) {
-        preview = 0;
-    } else if (explicit_tone && best_preserved != no_path) {
-        preview = best_preserved;
-    } else if (best_known_tail != no_path) {
-        preview = best_known_tail;
-    } else if (explicit_tone && best_known_prefix_closing != no_path) {
-        preview = best_known_prefix_closing;
-    } else if (prefer_raw && best_chinese != no_path) {
-        preview = 0;
-    } else if (best_preserved != no_path &&
-               session_->pending_token.layout == BopomofoKeyboardLayout::Standard) {
-        preview = best_preserved;
-    } else if (explicit_tone && whole_token_closing) {
-        preview = best_closing;
-    } else if (explicit_tone) {
-        preview = 0;
-    } else if (session_->pending_token.layout == BopomofoKeyboardLayout::Standard && best_chinese != no_path) {
-        preview = best_chinese;
-    }
-
-    if (preview != no_path) {
-        set_mixed_preview(std::move(result), preview, false);
-    } else {
-        session_->mixed_decision.clear();
-        (void)transition_to(InputStateKind::Inputting);
+    if (!survivor) pending.pop(); // unfinished reading or explicit raw-key undo
+    session_->mixed_decision.clear();
+    (void)transition_to(composition_empty(*session_) ? InputStateKind::Empty : InputStateKind::Inputting);
+    if (pending.empty()) { redraw(); return; }
+    rerun_pending_decision();
+    if (survivor && !survivor->segments.empty()) {
+        auto& result = session_->mixed_decision.result;
+        // The retained, previously displayed path is valid provenance, even
+        // when a fresh beam would prune it. Raw remains path zero and no text
+        // was manually selected or silently committed by this operation.
+        const auto found = std::ranges::find_if(result.paths, [&](const auto& path) {
+            return path.rendered == survivor->rendered && std::ranges::equal(path.segments, survivor->segments,
+                [](const auto& a, const auto& b) {
+                    return a.kind == b.kind && a.begin == b.begin && a.end == b.end &&
+                           a.reading == b.reading && a.raw == b.raw && a.consumed_boundary == b.consumed_boundary;
+                });
+        });
+        const auto preview = found == result.paths.end() ? result.paths.size() :
+            static_cast<std::size_t>(std::distance(result.paths.begin(), found));
+        if (found == result.paths.end()) result.paths.push_back(std::move(*survivor));
+        session_->mixed_decision.preview_path = preview;
         redraw();
     }
 }
 
-void InputProcessor::set_mixed_preview(MixedDecodeResult result, std::size_t preview_path, bool english_boundary) {
+void InputProcessor::set_mixed_preview(MixedDecodeResult result, std::size_t preview_path) {
     session_->mixed_decision.result = std::move(result);
     session_->mixed_decision.source_revision = session_->pending_token.revision;
     session_->mixed_decision.preview_path = preview_path;
     session_->mixed_decision.preview_character = 0;
-    session_->mixed_decision.english_boundary = english_boundary;
-    session_->mixed_decision.raw_forced = false;
     (void)transition_to(InputStateKind::Inputting);
     redraw();
 }
 
 void InputProcessor::append_pending_char(char32_t key, BopomofoKeyboardLayout layout) {
+    if (session_->pending_token.empty()) (void)session_->buffer.clear_selection(false);
     session_->pending_token.push(key, layout);
     (void)transition_to(InputStateKind::Inputting);
     redraw();
@@ -1371,29 +1251,19 @@ bool InputProcessor::settle_pending_preview() {
         session_->mixed_decision.preview_path > 0 &&
         session_->mixed_decision.preview_path < session_->mixed_decision.result.paths.size()) {
         return apply_mixed_path(session_->mixed_decision.result.paths[session_->mixed_decision.preview_path],
-                                session_->mixed_decision.preview_character);
+                                session_->mixed_decision.preview_character, false);
     }
     settle_pending_as_literals();
     return true;
 }
 
-bool InputProcessor::pending_prefers_raw() const {
-    if (session_->pending_token.empty()) return false;
-    if (session_->pending_token.raw.size() == 1 || fallback_.is_known_english(session_->pending_token.raw)) return true;
-    if (is_complete_structured_ascii(session_->pending_token.raw)) return true;
-
-    const bool all_letters = std::all_of(session_->pending_token.raw.begin(), session_->pending_token.raw.end(),
-                                         [](char16_t ch) { return is_ascii_letter(ch); });
-    if (all_letters && session_->pending_token.raw.size() >= 4) return true;
-
-    for (const auto& token : tokenize_ascii(session_->pending_token.raw, 0)) {
-        if (token.end == session_->pending_token.raw.size() && token.kind == AsciiTokenKind::Number) return true;
-    }
-    return false;
-}
-
-void InputProcessor::apply_fallback_candidates(InputSession& session, std::size_t segment_index) {
+void InputProcessor::apply_fallback_candidates(InputSession& session, std::size_t segment_index, bool preserve_existing) {
     if (!session.buffer.segment_complete(segment_index)) return;
+    // A service failure is not a new reading. Settling a mixed preview already
+    // supplies valid candidates; retain them instead of replacing its displayed
+    // words with a second fallback ranking. Reading edits clear candidates.
+    const auto* existing = session.buffer.segment_candidates(segment_index);
+    if (preserve_existing && existing != nullptr && !existing->empty()) return;
 
     const auto predictions = fallback_.predict(session.buffer);
     if (segment_index >= predictions.size()) return;
@@ -1565,10 +1435,7 @@ std::u16string InputProcessor::pending_rendered_text(const InputSession& session
 }
 
 std::u16string InputProcessor::current_preedit(const InputSession& session) {
-    auto rendered = session.buffer.rendered_composition();
-    const auto pending = pending_rendered_text(session);
-    if (!pending.empty()) rendered += pending;
-    return rendered;
+    return composition_with_pending(session.buffer, pending_rendered_text(session));
 }
 
 std::u16string InputProcessor::marking_hint_text(const InputSession& session) {

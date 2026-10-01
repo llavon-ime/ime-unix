@@ -6,6 +6,7 @@
 #include <type_traits>
 
 namespace llavon::ime::protocol {
+ProtocolError::~ProtocolError() = default;
 
 namespace {
 
@@ -36,7 +37,7 @@ void text8(ByteVector& out, const std::string& value, const char* field) {
     u32(out, checked(value.size(), field, kMaxUtf8StringBytes));
     out.insert(out.end(), value.begin(), value.end());
 }
-void text16(ByteVector& out, const std::u16string& value, const char* field, std::uint32_t limit) {
+void text16(ByteVector& out, std::u16string_view value, const char* field, std::uint32_t limit) {
     if (!valid_utf16(value)) fail(std::string("invalid UTF-16: ") + field);
     u32(out, checked(value.size(), field, limit));
     for (const auto unit : value) u16(out, static_cast<std::uint16_t>(unit));
@@ -69,7 +70,7 @@ public:
         const auto result = static_cast<std::uint16_t>(bytes_[offset_]) |
                             (static_cast<std::uint16_t>(bytes_[offset_ + 1]) << 8U);
         offset_ += 2;
-        return result;
+        return static_cast<std::uint16_t>(result);
     }
     std::uint32_t read_u32() {
         require(4);
@@ -135,11 +136,11 @@ void count_ok(const Reader& reader, std::uint32_t count, std::size_t minimum, co
         fail(std::string("too many protocol entries: ") + field);
 }
 void append_padding(ByteVector& out, const PaddingEntry& entry) {
-    u8(out, entry.chosen ? 1 : 0);
-    if (entry.chosen) {
-        if (entry.chosen_char == 0) fail("chosen padding has no character");
-        scalar(out, entry.chosen_char, "chosen character");
-    } else text16(out, entry.bopomofo, "bopomofo", kMaxBopomofoCodeUnits);
+    u8(out, entry.chosen() ? 1 : 0);
+    if (entry.chosen()) {
+        if (entry.chosen_char() == 0) fail("chosen padding has no character");
+        scalar(out, entry.chosen_char(), "chosen character");
+    } else text16(out, entry.bopomofo(), "bopomofo", kMaxBopomofoCodeUnits);
 }
 std::vector<PaddingEntry> read_padding(Reader& reader) {
     const auto count = reader.read_u32();
@@ -149,10 +150,10 @@ std::vector<PaddingEntry> read_padding(Reader& reader) {
     for (std::uint32_t i = 0; i < count; ++i) {
         PaddingEntry entry;
         const auto kind = reader.read_u8();
-        if (kind == 0) entry.bopomofo = reader.read_utf16("bopomofo", kMaxBopomofoCodeUnits);
-        else if (kind == 1) { entry.chosen = true; entry.chosen_char = reader.read_scalar("chosen character"); }
+        if (kind == 0) entry = PaddingEntry(reader.read_utf16("bopomofo", kMaxBopomofoCodeUnits));
+        else if (kind == 1) entry = PaddingEntry(reader.read_scalar("chosen character"));
         else fail("unknown padding entry kind");
-        if (entry.chosen && entry.chosen_char == 0) fail("chosen padding has no character");
+        if (entry.chosen() && entry.chosen_char() == 0) fail("chosen padding has no character");
         result.push_back(std::move(entry));
     }
     return result;
@@ -219,7 +220,7 @@ bool valid_scalar(char32_t value) noexcept {
     const auto cp = static_cast<std::uint32_t>(value);
     return cp <= 0x10ffffU && !(cp >= 0xd800U && cp <= 0xdfffU);
 }
-bool valid_utf16(const std::u16string& value) noexcept {
+bool valid_utf16(std::u16string_view value) noexcept {
     for (std::size_t i = 0; i < value.size(); ++i) {
         const auto unit = static_cast<std::uint16_t>(value[i]);
         if (unit >= 0xd800 && unit <= 0xdbff) {

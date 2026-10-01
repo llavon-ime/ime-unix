@@ -1,0 +1,52 @@
+name: Verify Linux app-managed updates
+on:
+  push:
+    branches: [main, preview]
+    paths:
+      - 'engine/**'
+      - 'fcitx5/**'
+      - 'ime-unix-service/src/training/native/**'
+      - 'ime-unix-service/tests/linux_update_tests.cpp'
+      - 'scripts/*linux-repository.sh'
+      - 'scripts/tests/verify-linux-repository.sh'
+      - 'scripts/linux-update-tests/**'
+      - '.github/workflows/linux*'
+  pull_request:
+    paths:
+      - 'engine/**'
+      - 'fcitx5/**'
+      - 'ime-unix-service/src/training/native/**'
+      - 'ime-unix-service/tests/linux_update_tests.cpp'
+      - 'scripts/*linux-repository.sh'
+      - 'scripts/tests/verify-linux-repository.sh'
+      - 'scripts/linux-update-tests/**'
+      - '.github/workflows/linux*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    container: debian:13
+    steps:
+      - name: Install verification dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build g++ qt6-base-dev \
+            qt6-base-dev-tools nlohmann-json3-dev libfcitx5core-dev fcitx5-modules-dev \
+            libxcb1-dev pkg-config dbus gnupg dpkg-dev apt-utils rpm createrepo-c dnf python3
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify PackageKit D-Bus transactions
+        run: |
+          cmake -S scripts/linux-update-tests -B build/linux-update-tests -G Ninja
+          cmake --build build/linux-update-tests --parallel 2
+          ctest --test-dir build/linux-update-tests --output-on-failure
+      - name: Build Fcitx safe restart integration and run raw keys
+        run: |
+          cmake -S fcitx5 -B build/linux-update-addon -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAVON_IME_BUILD_TESTS=ON
+          cmake --build build/linux-update-addon --target llavon-ime-addon llavon_ime_rawkey_tests --parallel 2
+          build/linux-update-addon/engine/tests/llavon_ime_rawkey_tests
+      - name: Verify signed APT and DNF repository snapshots
+        run: bash scripts/tests/verify-linux-repository.sh

@@ -173,6 +173,7 @@ required_files=(
     "${private_root}/llavon-ime-unix-service"
     "${private_root}/llavon-ime-lora"
     "${private_root}/llavon-ime-lora-gui"
+    "${private_root}/llavon-ime-lora-backend"
     "${private_root}/atspi_probe"
     "${addon_path}"
     "${PKGROOT}/usr/share/fcitx5/addon/llavon-ime.conf"

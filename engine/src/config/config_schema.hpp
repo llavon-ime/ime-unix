@@ -13,11 +13,7 @@ namespace llavon::ime {
 struct Config;
 
 // Value of one config field, independent of the field's C++ type.
-struct ConfigValue {
-    bool boolean = false;
-    int integer = 0;
-    std::string text;
-};
+using ConfigValue = std::variant<bool, int, std::string>;
 
 enum class ConfigValueKind { Boolean, Integer, Text, Choice };
 

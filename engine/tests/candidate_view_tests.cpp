@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <cstdlib>
 
 #include "input/candidate_view.hpp"

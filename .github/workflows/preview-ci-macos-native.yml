@@ -38,10 +38,13 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 
       - name: Install build prerequisites
-        run: brew install autoconf autoconf-archive automake libtool cmake ninja pkg-config
+        run: brew install autoconf autoconf-archive automake libtool cmake ninja pkg-config qtbase
 
       - name: Run the engine and raw-key test suites
         run: scripts/verify-engine-tests.sh
+
+      - name: Verify update feed signatures and installation gating
+        run: bash macos/scripts/verify-updates.sh
 
       - name: Fetch vcpkg version history
         run: |

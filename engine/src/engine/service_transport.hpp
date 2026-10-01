@@ -71,7 +71,7 @@ private:
     };
 
     void enqueue(RequestKind kind, protocol::Message message, Callback callback);
-    void run();
+    void run(std::stop_token stop);
     bool ensure_connected();
     void disconnect() noexcept;
     void shutdown_service() noexcept;
@@ -82,14 +82,14 @@ private:
 
     ServiceTransportOptions options_;
     mutable std::mutex mutex_;
-    std::condition_variable condition_;
+    std::condition_variable_any condition_;
     std::queue<Pending> queue_;
     std::optional<protocol::ServiceEpoch> epoch_;
     bool stopping_ = false;
     bool connected_ = false;
     int socket_fd_ = -1;
-    std::thread worker_;
     std::chrono::steady_clock::time_point spawn_backoff_until_{};
+    std::jthread worker_;
 };
 
 }  // namespace llavon::ime

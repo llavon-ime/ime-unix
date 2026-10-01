@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "context/caret_prefix_sampler.hpp"
 
 #include <cstdint>

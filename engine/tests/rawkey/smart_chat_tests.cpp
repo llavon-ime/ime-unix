@@ -13,7 +13,7 @@ RAWKEY_SUITE("smart chat", engine_test_smart_chat) {
         harness.set_config("SmartEnglish", "True");
         harness.type("hello");
         RAWKEY_ASSERT(harness.preedit() == "hello");
-        harness.expect_direct_commit("hello ", Key(" "));
+        harness.expect_space_then_commit("hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -32,7 +32,7 @@ RAWKEY_SUITE("smart chat", engine_test_smart_chat) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("bye");
-        harness.expect_direct_commit("bye ", Key(" "));
+        harness.expect_space_then_commit("bye ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -45,7 +45,7 @@ RAWKEY_SUITE("smart chat", engine_test_smart_chat) {
         RAWKEY_ASSERT(harness.preedit() == "你");
         harness.type("good");
         RAWKEY_ASSERT(harness.preedit() == "你good");
-        harness.expect_direct_commit("你good ", Key(" "));
+        harness.expect_space_then_commit("你good ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -72,7 +72,7 @@ RAWKEY_SUITE("smart chat", engine_test_smart_chat) {
         RAWKEY_ASSERT(harness.preedit() == "今");
         harness.type("hello");
         RAWKEY_ASSERT(harness.preedit() == "今hello");
-        harness.expect_direct_commit("今hello ", Key(" "));
+        harness.expect_space_then_commit("今hello ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 
@@ -99,14 +99,14 @@ RAWKEY_SUITE("smart chat", engine_test_smart_chat) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("no");
-        harness.expect_direct_commit("no ", Key(" "));
+        harness.expect_space_then_commit("no ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("yes");
-        harness.expect_direct_commit("yes ", Key(" "));
+        harness.expect_space_then_commit("yes ");
         RAWKEY_ASSERT(harness.preedit().empty());
 }
 }

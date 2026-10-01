@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <vector>
@@ -10,6 +12,10 @@ int run_fallback_engine_tests() {
     using namespace llavon::ime;
 
     FallbackEngine fallback(LLAVON_IME_TEST_TABLE_PATH);
+    // Token IDs put "of" above "add" numerically, but real language data
+    // says "of" is substantially more common. This guards the original bug.
+    if (fallback.latin_frequency(u"of") <= fallback.latin_frequency(u"add")) return EXIT_FAILURE;
+    if (!fallback.is_known_english(u"ADDED") || !fallback.is_known_english(u"nefarious")) return EXIT_FAILURE;
     CompositionBuffer buffer;
     for (const char32_t key : std::u32string(U"su3")) {
         if (!buffer.add_bopomofo_key(key, BopomofoKeyboardLayout::Standard)) return EXIT_FAILURE;

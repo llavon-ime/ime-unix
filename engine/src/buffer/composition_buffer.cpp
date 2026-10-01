@@ -94,19 +94,8 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_key(char32_t 
     }
 
     Syllable active = active_index < segments_.size() ? segments_[active_index].syllable : Syllable();
-    const auto before = active;
-    bool natural_extension = false;
-    if (layout == BopomofoKeyboardLayout::Standard) {
-        auto natural = before;
-        if (const auto symbol = lookup_bopomofo_key(key, accept_uppercase)) {
-            natural_extension = natural.accept(*symbol);
-        }
-    }
     auto result = apply_bopomofo_key(active, layout, key, accept_uppercase);
     if (result.status == BopomofoKeyStatus::Rejected) return std::nullopt;
-    if (layout == BopomofoKeyboardLayout::Hsu) {
-        natural_extension = active.text().size() > before.text().size();
-    }
 
     if (active_index < segments_.size()) {
         auto& segment = segments_[active_index];
@@ -133,15 +122,15 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_key(char32_t 
     }
     last_edited_segment_ = active_index;
     touch();
-    return BopomofoInputResult{active_index, result.status == BopomofoKeyStatus::Completed, natural_extension};
+    return BopomofoInputResult{active_index, result.status == BopomofoKeyStatus::Completed, result.natural_extension};
 }
 
 std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_keys(
     std::u16string_view keys,
     char32_t tone_key,
     BopomofoKeyboardLayout layout,
-    bool strict) {
-    if (caret_ != segments_.size()) return std::nullopt;
+    bool strict,
+    std::u16string_view expected_reading) {
     if (caret_ > 0) {
         const auto& previous = segments_[caret_ - 1];
         if (!previous.visible_candidate() && !previous.reading_finalized) return std::nullopt;
@@ -149,10 +138,26 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_keys(
 
     const size_t original_size = segments_.size();
     const size_t original_caret = caret_;
+    if (!expected_reading.empty()) {
+        const auto interpretations = replay_bopomofo_keys(keys, tone_key, layout);
+        const auto found = std::ranges::find_if(interpretations, [&](const auto& syllable) {
+            return syllable.text() == expected_reading;
+        });
+        if (found == interpretations.end()) return std::nullopt;
+        Segment next;
+        next.syllable = *found;
+        next.reading_finalized = true;
+        selection_anchor_.reset();
+        segments_.insert(segments_.begin() + static_cast<std::ptrdiff_t>(caret_), std::move(next));
+        last_edited_segment_ = caret_++;
+        touch();
+        return BopomofoInputResult{original_caret, true, true};
+    }
     for (const char32_t key : keys) {
         const auto result = add_bopomofo_key(key, layout, true);
         if (!result || (strict && !result->natural_extension)) {
-            while (segments_.size() > original_size) segments_.pop_back();
+            segments_.erase(segments_.begin() + static_cast<std::ptrdiff_t>(original_caret),
+                            segments_.begin() + static_cast<std::ptrdiff_t>(original_caret + segments_.size() - original_size));
             caret_ = original_caret;
             last_edited_segment_.reset();
             touch();
@@ -162,7 +167,8 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_keys(
 
     const auto result = add_bopomofo_key(tone_key, layout, true);
     if (!result || !result->completed) {
-        while (segments_.size() > original_size) segments_.pop_back();
+        segments_.erase(segments_.begin() + static_cast<std::ptrdiff_t>(original_caret),
+                        segments_.begin() + static_cast<std::ptrdiff_t>(original_caret + segments_.size() - original_size));
         caret_ = original_caret;
         last_edited_segment_.reset();
         touch();
@@ -255,9 +261,9 @@ bool CompositionBuffer::extend_selection(int delta) {
     return true;
 }
 
-bool CompositionBuffer::clear_selection() {
+bool CompositionBuffer::clear_selection(bool restore_caret) {
     if (!selection_anchor_) return false;
-    caret_ = *selection_anchor_;
+    if (restore_caret) caret_ = *selection_anchor_;
     selection_anchor_.reset();
     touch();
     return true;

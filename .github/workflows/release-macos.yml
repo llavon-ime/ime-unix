@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write
 
+# The rolling feed and Homebrew cask must be updated in release order.
+concurrency:
+  group: macos-release-feed
+  cancel-in-progress: false
+
 env:
   MODEL_REPOSITORY: "tony65535/llavon-ime-llama-250m-GGUF"
   MODEL_REVISION: "fae44704fb1a7361bcc1150bf910c1d74fa367a4"
@@ -38,6 +43,9 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+      LLAVON_IME_ENABLE_UPDATES: "1"
+      LLAVON_IME_RELEASE_REPOSITORY: ${{ github.repository }}
 
     steps:
       - name: Check runner architecture
@@ -92,11 +100,29 @@ jobs:
             exit 1
           fi
 
+      - name: Require update signing and notarization configuration
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          set -euo pipefail
+          for name in SPARKLE_PUBLIC_ED_KEY SPARKLE_PRIVATE_ED_KEY \
+            MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD \
+            DEVELOPER_ID_APPLICATION DEVELOPER_ID_INSTALLER \
+            APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Set ${name} before publishing an app-managed update." >&2
+              exit 1
+            fi
+          done
+
+      - name: Verify update tooling
+        run: bash macos/scripts/verify-updates.sh
+
       - name: Install build tools
         run: |
           set -euo pipefail
           brew update
-          brew install autoconf autoconf-archive automake libtool cmake ninja pkg-config
+          brew install autoconf autoconf-archive automake libtool cmake ninja pkg-config qtbase
 
       - name: Cache vcpkg binary cache
         uses: actions/cache@v4
@@ -179,12 +205,51 @@ jobs:
           echo "sha256=${sha}" >> "${GITHUB_OUTPUT}"
           echo "${sha}  ${pkg}"
 
+      - name: Sign package and generate signed appcast
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_PKG: ${{ steps.package.outputs.pkg }}
+        run: |
+          set -euo pipefail
+          ROOT_DIR="${GITHUB_WORKSPACE}"
+          source macos/scripts/sparkle-config.sh
+          prepare_sparkle
+          key_file="${RUNNER_TEMP}/sparkle-private-key"
+          trap 'rm -f "${key_file}"' EXIT
+          umask 077
+          printf '%s' "${SPARKLE_PRIVATE_ED_KEY}" > "${key_file}"
+          signature="$("${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" -p "${RELEASE_PKG}")"
+          swift macos/scripts/verify-update-signature.swift "${SPARKLE_PUBLIC_ED_KEY}" "${signature}" "${RELEASE_PKG}"
+          pkgutil --check-signature "${RELEASE_PKG}"
+          xcrun stapler validate "${RELEASE_PKG}"
+
+          # Use the macOS-only feed, never GitHub's /releases/latest, which may
+          # have been published by Linux while its macOS pkg is still building.
+          previous_args=()
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == "macos-updates") | .assets[] | select(.name == "appcast.xml") | .browser_download_url' \
+            > "${RUNNER_TEMP}/previous-feed-url"
+          previous_url="$(cat "${RUNNER_TEMP}/previous-feed-url")"
+          if [[ -n "${previous_url}" ]]; then
+            curl --fail --location --retry 3 "${previous_url}" -o "${RUNNER_TEMP}/previous-appcast.xml"
+            "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" --verify "${RUNNER_TEMP}/previous-appcast.xml"
+            previous_args=(--previous "${RUNNER_TEMP}/previous-appcast.xml")
+          fi
+          python3 scripts/macos-appcast.py --version "${RELEASE_VERSION}" \
+            --package "${RELEASE_PKG}" --signature "${signature}" \
+            --repository "${GITHUB_REPOSITORY}" ${previous_args[@]+"${previous_args[@]}"} \
+            --output dist/macos/appcast.xml
+          "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" dist/macos/appcast.xml
+          "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" --verify dist/macos/appcast.xml
+
       - name: Create or update GitHub release
         run: |
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
           assets=(
             "${{ steps.package.outputs.pkg }}"
+            "dist/macos/appcast.xml"
           )
           notes="Native macOS input method package."
           # A moved tag leaves its release behind as a draft that the by-tag
@@ -220,6 +285,23 @@ jobs:
           curl --fail --silent --show-error --location --head "${asset_url}" >/dev/null
           gh release view "${tag}" --json isDraft --jq '.isDraft' | grep -qx false
 
+      - name: Publish macOS update feed after the package is reachable
+        run: |
+          set -euo pipefail
+          pkg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.version.outputs.tag }}/llavon-ime-${{ steps.version.outputs.version }}-arm64.pkg"
+          curl --fail --silent --show-error --location --head "${pkg_url}" >/dev/null
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == "macos-updates") | .id' > "${RUNNER_TEMP}/feed-release-id"
+          if [[ ! -s "${RUNNER_TEMP}/feed-release-id" ]]; then
+            gh release create macos-updates --target "${GITHUB_SHA}" --prerelease \
+              --title "macOS update feed" --notes "Signed Sparkle feed for app-managed macOS pkg updates."
+          fi
+          gh release upload macos-updates dist/macos/appcast.xml --clobber
+          curl --fail --silent --show-error --location \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/macos-updates/appcast.xml" \
+            -o "${RUNNER_TEMP}/published-appcast.xml"
+          cmp dist/macos/appcast.xml "${RUNNER_TEMP}/published-appcast.xml"
+
       - name: Check Homebrew tap token
         run: |
           set -euo pipefail
@@ -249,12 +331,22 @@ jobs:
           sha256 = ENV.fetch("SHA256")
           repository = ENV.fetch("RELEASE_REPOSITORY")
           text = File.read(path)
+          installed = text[/version\s+"([^"]+)"/, 1]
+          if installed && Gem::Version.new(version) < Gem::Version.new(installed)
+            puts "Keeping the newer Homebrew Cask #{installed}."
+            exit
+          end
           text.sub!(/version\s+"[^"]+"/, %(version "#{version}"))
           text.sub!(/sha256\s+"[^"]+"/, %(sha256 "#{sha256}"))
           text.sub!(%r{url "https://github\.com/[^/]+/[^/]+/releases/download/},
                     %(url "https://github.com/#{repository}/releases/download/))
           text.sub!(/verified:\s+"github\.com\/[^\"]+"/, %(verified: "github.com/#{repository}/"))
           text.sub!(/homepage "https:\/\/github\.com\/[^\"]+"/, %(homepage "https://github.com/#{repository}"))
+          if text.match?(/^\s*auto_updates\s+/)
+            text.sub!(/^\s*auto_updates\s+.*$/, "  auto_updates true")
+          else
+            text.sub!(/^(\s*sha256[^\n]*\n)/, "\\1\n  auto_updates true\n")
+          end
           File.write(path, text)
           RUBY
 

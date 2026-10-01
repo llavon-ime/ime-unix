@@ -5,7 +5,8 @@ Priority: optional
 Architecture: amd64
 Maintainer: llavon-ime contributors <noreply@github.com>
 Homepage: https://github.com/llavon-ime/ime-unix
-Depends: fcitx5 (>= 5.1.12), at-spi2-core, libatspi2.0-0t64 | libatspi2.0-0, libglib2.0-0t64 | libglib2.0-0, libc6 (>= 2.41), libstdc++6, libgcc-s1, libvulkan1, libsqlite3-0, xdg-utils, curl, tar, coreutils
+Depends: fcitx5 (>= 5.1.12), at-spi2-core, libatspi2.0-0t64 | libatspi2.0-0, libglib2.0-0t64 | libglib2.0-0, libc6 (>= 2.41), libstdc++6, libgcc-s1, libvulkan1, libsqlite3-0, xdg-utils, curl, tar, coreutils, libqt6widgets6, libqt6network6, libqt6dbus6, qt6-qpa-plugins, qt6-wayland
+Recommends: packagekit, polkitd
 Installed-Size: @INSTALLED_SIZE@
 Description: Llavon IME frontend and local inference service for Fcitx5
  Llavon IME provides local llama.cpp-based text prediction for Fcitx5. This

@@ -523,7 +523,7 @@ private:
             ready_ok_ = false;
         }
         running_.store(true);
-        backend_thread_ = std::thread([this]() { run(); });
+        backend_thread_ = std::jthread([this]() { run(); });
 
         std::unique_lock lock(ready_mutex_);
         if (!ready_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return ready_; })) {
@@ -543,7 +543,7 @@ private:
     std::atomic<bool> attempted_{false};
     GMainContext* context_ = nullptr;
     GMainLoop* loop_ = nullptr;
-    std::thread backend_thread_;
+    std::jthread backend_thread_;
     std::atomic<guint> idle_source_{0};
     std::atomic<std::uint64_t> idle_generation_{0};
     AtspiAccessible* pending_source_ = nullptr;

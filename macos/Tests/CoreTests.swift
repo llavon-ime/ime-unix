@@ -51,6 +51,13 @@ struct CoreTests {
             exit(2)
         }
 
+        // Keep model-enabled fallback checks isolated from the installed IME.
+        let runtime = FileManager.default.temporaryDirectory
+            .appendingPathComponent("llavon-ime-swift-tests-\(ProcessInfo.processInfo.processIdentifier)")
+        try! FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        setenv("XDG_RUNTIME_DIR", runtime.path, 1)
+        defer { try? FileManager.default.removeItem(at: runtime) }
+
         let overridesPath = "/tmp/llavon-ime-core-tests-\(ProcessInfo.processInfo.processIdentifier).txt"
         let queue = PumpQueue()
         let core = EngineCore()
@@ -73,12 +80,36 @@ struct CoreTests {
         precondition(!releaseHandled, "release events must not be consumed")
 
         // Bopomofo composition commits through the host on Return.
+        precondition(!core.hasPendingComposition)
+        type(core, context, "su")
+        precondition(core.hasPendingComposition, "an unfinished reading must block update termination")
+        for _ in 0..<3 { _ = core.hasPendingComposition }
+        precondition(host.commits.isEmpty, "update readiness must not commit the reading")
+        _ = core.sendKey(context, keyCode: 0x35, charactersIgnoringModifiers: "\u{1b}",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(!core.hasPendingComposition)
         type(core, context, "su3")
         queue.pumpUntilIdle()
         let returnHandled = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
         precondition(returnHandled, "Return must be consumed")
         precondition(host.commits == ["你"], "expected 你, got \(host.commits)")
+        precondition(!core.hasPendingComposition)
+
+        // The second client is empty, but the first still owns pending text.
+        let otherHost = RecordingHost()
+        let other = core.allocateContext()
+        core.attach(other, host: otherHost)
+        type(core, context, "su")
+        type(core, other, "su3")
+        _ = core.sendKey(other, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(core.hasPendingComposition, "all attached clients must be inspected")
+        precondition(host.commits == ["你"])
+        _ = core.sendKey(context, keyCode: 0x35, charactersIgnoringModifiers: "\u{1b}",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(!core.hasPendingComposition)
+        core.detach(other)
 
         // Down opens the candidate list with the engine's render state.
         type(core, context, "su3")
@@ -122,9 +153,252 @@ struct CoreTests {
         try? FileManager.default.removeItem(atPath: overridesPath)
 
         Self.testEngineConfig()
+        Self.testKeyboardLayouts(tablePath: tablePath)
+        Self.testSmartEditing(tablePath: tablePath)
+        Self.testSmartCursorInsertion(tablePath: tablePath)
+        Self.testSmartLocalErrors(tablePath: tablePath)
+        Self.testSmartReportedBoundaries(tablePath: tablePath)
         Self.testCandidatePageWindow()
         Self.testKeyNormalization()
         print("core tests passed")
+    }
+
+    private static func testKeyboardLayouts(tablePath: String) {
+        let layouts = [("standard", "su3cl3"), ("hsu", "nefhwf"), ("ibm", "7a,-;,"),
+                       ("et", "ne3hz3"), ("ginyieh", "d-avla"), ("et26", "nejhzj"),
+                       ("dachen_cp26", "surclr")]
+        for (layout, keys) in layouts {
+            for smart in [false, true] {
+                let queue = PumpQueue()
+                let core = EngineCore()
+                core.setPostToMain { queue.post($0) }
+                let json = #"{"keyboard_layout":"\#(layout)","smart_english":\#(smart)}"#
+                core.start(options: EngineStartOptions(tablePath: tablePath, configJson: json,
+                                                       autoStartService: false, enableAccessibility: false))
+                let host = RecordingHost()
+                let context = core.allocateContext()
+                core.attach(context, host: host)
+                precondition(ConfigJSON.object(core.configJson())?["keyboard_layout"] as? String == layout)
+                type(core, context, keys + (smart ? "hello" : ""))
+                let expected = smart ? "你好hello" : "你好"
+                if smart {
+                    _ = core.sendKey(context, keyCode: 0x7d, charactersIgnoringModifiers: nil,
+                                     modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                    guard let snapshot = core.snapshot(context),
+                          let row = snapshot.candidates.firstIndex(of: expected) else {
+                        fatalError("\(layout): mixed candidate missing")
+                    }
+                    precondition(snapshot.candidates.contains(keys + "hello"), "raw candidate must remain")
+                    core.selectCandidate(context, index: Int32(row))
+                }
+                _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                                 modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                precondition(host.commits.last == expected, "\(layout), smart=\(smart): \(host.commits)")
+                core.detach(context)
+                core.stop()
+                queue.pumpUntilIdle()
+            }
+        }
+    }
+
+    private static func testSmartEditing(tablePath: String) {
+        let layouts = [("standard", "su3cl3"), ("hsu", "nefhwf"), ("ibm", "7a,-;,"),
+                       ("et", "ne3hz3"), ("ginyieh", "d-avla"), ("et26", "nejhzj"),
+                       ("dachen_cp26", "surclr")]
+        for (layout, keys) in layouts {
+            let queue = PumpQueue()
+            let core = EngineCore()
+            core.setPostToMain { queue.post($0) }
+            let json = #"{"keyboard_layout":"\#(layout)","smart_english":true}"#
+            core.start(options: EngineStartOptions(tablePath: tablePath, configJson: json,
+                                                   autoStartService: false, enableAccessibility: false))
+            let host = RecordingHost()
+            let context = core.allocateContext()
+            core.attach(context, host: host)
+            type(core, context, keys)
+            _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你", "\(layout): deletes 好")
+            var shift = KeyModifiers()
+            shift.shift = true
+            _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                             modifiers: shift, capsLock: false, isRelease: false)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == String(keys.prefix(2)),
+                         "\(layout): raw Shift must reach the shared engine")
+            core.detach(context)
+            core.stop()
+            queue.pumpUntilIdle()
+        }
+        let queue = PumpQueue()
+        let core = EngineCore()
+        core.setPostToMain { queue.post($0) }
+        core.start(options: EngineStartOptions(tablePath: tablePath,
+                                               configJson: #"{"smart_english":true}"#,
+                                               autoStartService: false, enableAccessibility: false))
+        let host = RecordingHost()
+        let context = core.allocateContext()
+        core.attach(context, host: host)
+        type(core, context, "us3") // ㄧ then ㄋ then third tone
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "你")
+        core.detach(context)
+        core.stop()
+        queue.pumpUntilIdle()
+    }
+
+    private static func testSmartCursorInsertion(tablePath: String) {
+        let layouts = [("standard", "su3cl3"), ("hsu", "nefhwf"), ("ibm", "7a,-;,"),
+                       ("et", "ne3hz3"), ("ginyieh", "d-avla"), ("et26", "nejhzj"),
+                       ("dachen_cp26", "surclr")]
+        for (layout, keys) in layouts {
+            let queue = PumpQueue()
+            let core = EngineCore()
+            core.setPostToMain { queue.post($0) }
+            core.start(options: EngineStartOptions(tablePath: tablePath,
+                configJson: #"{"keyboard_layout":"\#(layout)","smart_english":true}"#,
+                autoStartService: false, enableAccessibility: false))
+            let host = RecordingHost()
+            let context = core.allocateContext()
+            core.attach(context, host: host)
+            type(core, context, keys)
+            _ = core.sendKey(context, keyCode: 0x7b, charactersIgnoringModifiers: nil,
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            type(core, context, "hello" + keys)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你hello你好好",
+                         "\(layout): insertion must precede the settled suffix")
+            precondition(core.snapshot(context)?.caret == 8)
+            precondition(host.commits.isEmpty)
+            _ = core.sendKey(context, keyCode: 0x7c, charactersIgnoringModifiers: nil,
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你hello你好好")
+            precondition(core.snapshot(context)?.caret == 9)
+            _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(host.commits.last == "你hello你好好")
+            type(core, context, keys)
+            var shift = KeyModifiers()
+            shift.shift = true
+            _ = core.sendKey(context, keyCode: 0x7b, charactersIgnoringModifiers: nil,
+                             modifiers: shift, capsLock: false, isRelease: false)
+            type(core, context, keys)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你你好好")
+            precondition(core.snapshot(context)?.preedit.allSatisfy { !$0.underlined } == true,
+                         "\(layout): typing cancels the mark without returning to its anchor")
+            var control = KeyModifiers()
+            control.control = true
+            _ = core.sendKey(context, keyCode: 0x2b, charactersIgnoringModifiers: ",",
+                             modifiers: control, capsLock: false, isRelease: false)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你你好，好")
+            _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(host.commits.last == "你你好，好")
+            core.detach(context)
+            core.stop()
+            queue.pumpUntilIdle()
+        }
+    }
+
+    private static func testSmartLocalErrors(tablePath: String) {
+        let layouts = [("standard", "su3cl3", "sss"), ("hsu", "nefhwf", "nnn"),
+                       ("ibm", "7a,-;,", "777"), ("et", "ne3hz3", "nnn"),
+                       ("ginyieh", "d-avla", "ddd"), ("et26", "nejhzj", "nnn"),
+                       ("dachen_cp26", "surclr", "sss")]
+        for (layout, keys, broken) in layouts {
+            let queue = PumpQueue()
+            let core = EngineCore()
+            core.setPostToMain { queue.post($0) }
+            let json = #"{"keyboard_layout":"\#(layout)","smart_english":true}"#
+            core.start(options: EngineStartOptions(tablePath: tablePath, configJson: json,
+                                                   autoStartService: false, enableAccessibility: false))
+            let host = RecordingHost()
+            let context = core.allocateContext()
+            core.attach(context, host: host)
+            type(core, context, keys + broken)
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好" + broken,
+                         "\(layout): malformed syllable must stay local")
+            for _ in broken {
+                _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                                 modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            }
+            precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好",
+                         "\(layout): deleting wrong keys preserves Chinese")
+            _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            precondition(host.commits.last == "你好")
+            if layout != "dachen_cp26" {
+                let longError = String(repeating: String(broken.first!), count: 24)
+                type(core, context, keys + longError)
+                precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好" + longError,
+                             "\(layout): long local error must not erase Chinese")
+                for _ in longError {
+                    _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                                     modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                }
+                precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好")
+                _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                                 modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                precondition(host.commits.last == "你好")
+            }
+            core.detach(context)
+            core.stop()
+            queue.pumpUntilIdle()
+        }
+    }
+
+    private static func testSmartReportedBoundaries(tablePath: String) {
+        let queue = PumpQueue()
+        let core = EngineCore()
+        core.setPostToMain { queue.post($0) }
+        core.start(options: EngineStartOptions(tablePath: tablePath,
+            configJson: #"{"smart_english":true,"shift_letter_keys":"directly_put_to_buffer"}"#,
+            autoStartService: false, enableAccessibility: false))
+        let host = RecordingHost()
+        let context = core.allocateContext()
+        core.attach(context, host: host)
+        type(core, context, "xu/4j94vu04y94appao6u.3wj61ul ")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "另外現在app沒有圖標")
+        type(core, context, "o4")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "另外現在app沒有圖標欸")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "另外現在app沒有圖標欸")
+        type(core, context, "o4]")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "欸]")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "欸]")
+        type(core, context, "j g n0 ")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "巫師三")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "巫師三")
+        type(core, context, "j g ")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "j g ")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "j g ")
+        precondition(core.reloadConfigJson(#"{"keyboard_layout":"ibm","smart_english":true,"shift_letter_keys":"directly_put_to_buffer"}"#))
+        type(core, context, ".")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == ".")
+        _ = core.sendKey(context, keyCode: 0x33, charactersIgnoringModifiers: nil,
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(core.snapshot(context)?.compositionEmpty == true)
+        // Shift/direct-to-buffer retains its existing lowercase contract.
+        type(core, context, "README.md")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "readme.md")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "readme.md")
+        type(core, context, "7a,")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        precondition(host.commits.last == "你")
+        core.detach(context)
+        core.stop()
+        queue.pumpUntilIdle()
     }
 
     private static func testCandidatePageWindow() {
@@ -195,57 +469,29 @@ struct CoreTests {
         precondition(translated.sym == 0x41 && translated.modifiers.shift, "ctrl+shift+a")
     }
 
-    // The settings model is schema-driven: the engine exports the field list
-    // and values decode generically, so no field name is hardcoded here.
+    // The host consumes validated runtime JSON; the shared app owns the schema.
     private static func testEngineConfig() {
-        guard let schema = EngineCore.configSchema(), !schema.fields.isEmpty else {
-            fatalError("expected the engine to export a config schema")
-        }
-        for field in schema.fields {
-            precondition(!field.key.isEmpty && !field.label.isEmpty && !field.group.isEmpty,
-                         "expected every field to carry a key, label and group")
-            switch field.kind {
-            case .choice:
-                precondition(!field.choices.isEmpty, "choice fields need choices: \(field.key)")
-            case .integer:
-                precondition(field.minimum != nil && field.maximum != nil, "integer bounds: \(field.key)")
-            default:
-                break
-            }
-        }
-
-        let json = Data(#"{"candidate_page_size":7,"candidate_layout":"vertical","smart_english":true,"model_path":"/tmp/model.gguf"}"#.utf8)
-        guard var config = EngineConfig.decode(schema: schema, json: json) else {
-            fatalError("expected config values to decode")
-        }
-        precondition(config.value("candidate_page_size") == .integer(7), "expected candidate_page_size")
-        precondition(config.value("candidate_layout") == .text("vertical"), "expected candidate_layout")
-        precondition(config.value("smart_english") == .boolean(true), "expected smart_english")
-        precondition(config.value("keyboard_layout") == nil, "missing keys must stay unset")
-
-        config.set("candidate_page_size", .integer(4))
-        config.set("selection_keys", .text("asdfghjkl"))
-        guard let encoded = config.jsonData(),
-              let roundtrip = EngineConfig.decode(schema: schema, json: encoded) else {
-            fatalError("expected config values to encode")
-        }
-        precondition(roundtrip.value("candidate_page_size") == .integer(4), "expected the value to round-trip")
-        precondition(roundtrip.value("selection_keys") == .text("asdfghjkl"), "expected the value to round-trip")
-        precondition(roundtrip.value("model_path") == .text("/tmp/model.gguf"), "expected model_path to round-trip")
+        let core = EngineCore()
+        core.start(options: EngineStartOptions(tablePath: ProcessInfo.processInfo.environment["LLAVON_IME_TABLE_PATH"], configJson: #"{"candidate_page_size":7,"candidate_layout":"vertical","smart_english":true}"#, autoStartService: false, enableAccessibility: false))
+        defer { core.stop() }
+        precondition(ConfigJSON.object(core.configJson())?["candidate_page_size"] as? Int == 7)
+        precondition(core.reloadConfigJson(#"{"candidate_page_size":4,"selection_keys":"asdfghjkl"}"#))
+        precondition(ConfigJSON.object(core.configJson())?["candidate_page_size"] as? Int == 4)
+        precondition(ConfigJSON.object(core.configJson())?["selection_keys"] as? String == "asdfghjkl")
 
         // The app mirrors the fcitx5 addon by keeping the effective model path
         // in the config JSON: missing/empty gets filled, an existing path wins.
-        guard let filled = EngineConfig.fillingModelPath(nil, with: "/tmp/filled.gguf"),
+        guard let filled = ConfigJSON.fillingModelPath(nil, with: "/tmp/filled.gguf"),
               let filledData = filled.data(using: .utf8),
               let filledObject = try? JSONSerialization.jsonObject(with: filledData) as? [String: Any] else {
             fatalError("expected a filled config JSON")
         }
         precondition(filledObject["model_path"] as? String == "/tmp/filled.gguf", "expected model_path to be filled")
-        precondition(EngineConfig.fillingModelPath(#"{"model_path":"/keep.gguf"}"#, with: "/new.gguf")
+        precondition(ConfigJSON.fillingModelPath(#"{"model_path":"/keep.gguf"}"#, with: "/new.gguf")
                      == #"{"model_path":"/keep.gguf"}"#, "expected an existing model path to win")
-        let replaced = EngineConfig.fillingModelPath(#"{"model_path":""}"#, with: "/new.gguf")
+        let replaced = ConfigJSON.fillingModelPath(#"{"model_path":""}"#, with: "/new.gguf")
         precondition(replaced?.contains("/new.gguf") == true, "expected an empty model path to be replaced")
-        precondition(EngineConfig.fillingModelPath(#"{"model_path":""}"#, with: nil)
+        precondition(ConfigJSON.fillingModelPath(#"{"model_path":""}"#, with: nil)
                      == #"{"model_path":""}"#, "expected no path to leave the config alone")
     }
 

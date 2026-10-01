@@ -1,3 +1,5 @@
+#include "test_suites.h"
+
 #include <cstdlib>
 #include <string>
 
@@ -60,9 +62,9 @@ int run_buffer_tests() {
     ok = ok && buffer.add_bopomofo(U'ㄧ');
     ok = ok && buffer.add_bopomofo(U'ˇ');
     llavon::ime::FallbackEngine fallback(LLAVON_IME_TEST_TABLE_PATH);
-    const auto predictions = fallback.predict(buffer);
-    ok = ok && predictions.size() == 1;
-    ok = ok && !predictions.front().candidates.empty();
+    const auto initial_predictions = fallback.predict(buffer);
+    ok = ok && initial_predictions.size() == 1;
+    ok = ok && !initial_predictions.front().candidates.empty();
 
     buffer.clear();
     ok = ok && type_keys(buffer, fallback, U"su3cl3");
@@ -70,6 +72,25 @@ int run_buffer_tests() {
     ok = ok && buffer.rendered_composition() == std::u16string(u"你好");
     ok = ok && buffer.commit_text() == std::u16string(u"你好");
     ok = ok && buffer.completed_segment_indices().size() == 2;
+
+    // A replayed syllable may be inserted before a settled suffix. Rejected
+    // replay must erase only its tentative insertion, never pop the suffix.
+    for (const bool canonical : {false, true}) {
+        llavon::ime::CompositionBuffer middle;
+        ok = ok && type_keys(middle, fallback, U"su3cl3");
+        ok = ok && middle.select_candidate(1, 0, false);
+        ok = ok && middle.move_cursor_left();
+        ok = ok && !middle.add_bopomofo_keys(u"ss", U'3', llavon::ime::BopomofoKeyboardLayout::Standard,
+                                            true, canonical ? u"ㄋㄧˇ" : u"");
+        ok = ok && middle.rendered_composition() == u"你好" && middle.caret() == 1;
+        ok = ok && middle.segments().size() == 2 && middle.segments()[1].manually_chosen;
+        const auto inserted = middle.add_bopomofo_keys(u"su", U'3', llavon::ime::BopomofoKeyboardLayout::Standard,
+                                                     true, canonical ? u"ㄋㄧˇ" : u"");
+        ok = ok && inserted && inserted->completed && inserted->segment_index == 1;
+        ok = ok && middle.set_segment_candidates(1, {U'你'});
+        ok = ok && middle.rendered_composition() == u"你你好" && middle.caret() == 2;
+        ok = ok && middle.segments().size() == 3 && middle.segments()[2].manually_chosen;
+    }
 
     // Phrase overrides pin each character for prediction without masquerading as
     // an explicit candidate choice. An explicit choice still wins afterward.

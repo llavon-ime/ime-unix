@@ -1,3 +1,4 @@
+#include "test_suites.h"
 #include "protocol/protocol.hpp"
 
 #include <cstdlib>
@@ -37,7 +38,7 @@ int run_protocol_tests() {
     ok = ok && decoded_request != nullptr && decoded_request->request_id == request.request_id &&
          decoded_request->buffer_revision == request.buffer_revision && decoded_request->context == request.context &&
          decoded_request->padding.size() == 1 &&
-          decoded_request->padding.front().chosen && decoded_request->padding.front().chosen_char == U'好';
+          decoded_request->padding.front().chosen() && decoded_request->padding.front().chosen_char() == U'好';
 
     RecordCommitRequest commit;
     commit.event_id[0] = 42;

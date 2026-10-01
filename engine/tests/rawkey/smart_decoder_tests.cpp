@@ -14,9 +14,7 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         harness.key(Key(" "));
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "https://example.com5j/");
-        RAWKEY_ASSERT(harness.candidate(1) == "https://example.com中");
-        harness.key(Key("2"));
+        harness.choose_text("https://example.com中");
         RAWKEY_ASSERT(harness.preedit() == "https://example.com中");
         harness.expect_commit("https://example.com中");
 }
@@ -56,25 +54,25 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("v1.2.3");
-        harness.expect_direct_commit("v1.2.3 ", Key(" "));
+        harness.expect_space_then_commit("v1.2.3 ");
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("192.168.1.1");
-        harness.expect_direct_commit("192.168.1.1 ", Key(" "));
+        harness.expect_space_then_commit("192.168.1.1 ");
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("localhost:8080");
-        harness.expect_direct_commit("localhost:8080 ", Key(" "));
+        harness.expect_space_then_commit("localhost:8080 ");
 }
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("2026-08-08");
-        harness.expect_direct_commit("2026-08-08 ", Key(" "));
+        harness.expect_space_then_commit("2026-08-08 ");
 }
 
     // mp3 is a known English token and does not open candidates automatically.
@@ -83,7 +81,7 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         harness.set_config("SmartEnglish", "True");
         harness.type("mp3");
         RAWKEY_ASSERT(!harness.has_candidates());
-        harness.expect_direct_commit("mp3 ", Key(" "));
+        harness.expect_space_then_commit("mp3 ");
 }
 
     // Backspace removes an explicitly applied Chinese candidate, then the next
@@ -92,16 +90,16 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("283");
-        RAWKEY_ASSERT(harness.preedit() == "283");
+        RAWKEY_ASSERT(harness.preedit() == "打");
         harness.key(Key("Down"));
-        harness.key(Key("2"));
+        harness.choose_text("打");
         RAWKEY_ASSERT(harness.preedit() == "打");
         harness.key(Key("BackSpace"));
         RAWKEY_ASSERT(harness.preedit().empty());
         harness.type("284");
-        RAWKEY_ASSERT(harness.preedit() == "284");
+        RAWKEY_ASSERT(harness.preedit() == "大");
         harness.key(Key("Down"));
-        harness.key(Key("2"));
+        harness.choose_text("大");
         RAWKEY_ASSERT(harness.preedit() == "大");
         harness.expect_commit("大");
 }
@@ -113,7 +111,7 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         harness.set_configs({{"BopomofoKeyboardLayout", "許氏"}, {"SmartEnglish", "True"}});
         harness.type("hellod");
         RAWKEY_ASSERT(harness.preedit() == "hellod");
-        harness.expect_direct_commit("hellod ", Key(" "));
+        harness.expect_space_then_commit("hellod ");
 }
 
     // Hsu: Chinese sequences after a domain prefix keep the mixed candidate.
@@ -124,9 +122,9 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
         RAWKEY_ASSERT(harness.candidate(0) == "mail.google.comnef");
-        RAWKEY_ASSERT(harness.candidate(1) == "mail.google.co敏");
-        harness.key(Key("2"));
-        harness.expect_commit("mail.google.co敏");
+        RAWKEY_ASSERT(harness.candidate(1) == "mail.google.com你");
+        harness.choose_text("mail.google.com你");
+        harness.expect_commit("mail.google.com你");
 }
 
     // Every complete path shown by the decoder must be selectable, including
@@ -139,9 +137,8 @@ RAWKEY_SUITE("smart decoder", engine_test_smart_decoder) {
         harness.type("hello283su3");
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "hello283su3");
-        RAWKEY_ASSERT(harness.candidate(1) == "hello打你");
-        harness.key(Key("2"));
+        RAWKEY_ASSERT(harness.candidate(0) == "hello打你");
+        harness.choose_text("hello打你");
         RAWKEY_ASSERT(harness.preedit() == "hello打你");
         harness.expect_commit("hello打你");
 }

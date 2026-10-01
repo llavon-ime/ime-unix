@@ -1,6 +1,7 @@
 #include "unix_socket_server.hpp"
 
 #include "../pipe/protocol.hpp"
+#include "../../../engine/src/util/unique_fd.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -12,6 +13,7 @@
 #include <poll.h>
 #include <queue>
 #include <random>
+#include <span>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -35,6 +37,8 @@
 
 namespace ime::unix_service {
 
+using llavon::ime::UniqueFd;
+
 namespace {
 
 std::uint32_t read_u32_le(const std::uint8_t* bytes) {
@@ -42,8 +46,9 @@ std::uint32_t read_u32_le(const std::uint8_t* bytes) {
            (static_cast<std::uint32_t>(bytes[2]) << 16U) | (static_cast<std::uint32_t>(bytes[3]) << 24U);
 }
 
-bool read_all(int fd, void* destination, std::size_t size) {
-    auto* bytes = static_cast<std::uint8_t*>(destination);
+bool read_all(int fd, std::span<std::uint8_t> destination) {
+    auto* bytes = destination.data();
+    const auto size = destination.size();
     std::size_t offset = 0;
     while (offset < size) {
         const auto count = ::recv(fd, bytes + offset, size - offset, 0);
@@ -57,7 +62,9 @@ bool read_all(int fd, void* destination, std::size_t size) {
     return true;
 }
 
-void write_all(int fd, const std::uint8_t* bytes, std::size_t size) {
+void write_all(int fd, std::span<const std::uint8_t> source) {
+    const auto* bytes = source.data();
+    const auto size = source.size();
     std::size_t offset = 0;
     while (offset < size) {
         int flags = 0;
@@ -102,20 +109,18 @@ void require_private_directory(const std::filesystem::path& path, bool create) {
 }
 
 bool socket_is_active(const std::filesystem::path& path) {
-    const int probe = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (probe < 0) throw std::system_error(errno, std::generic_category(), "create Unix socket probe");
+    const UniqueFd probe(::socket(AF_UNIX, SOCK_STREAM, 0));
+    if (!probe.valid()) throw std::system_error(errno, std::generic_category(), "create Unix socket probe");
     sockaddr_un address {};
     address.sun_family = AF_UNIX;
     const auto string_path = path.string();
     if (string_path.size() >= sizeof(address.sun_path)) {
-        ::close(probe);
         throw std::runtime_error("Unix socket path is too long: " + string_path);
     }
     std::memcpy(address.sun_path, string_path.c_str(), string_path.size() + 1);
-    const int result = ::connect(probe, reinterpret_cast<const sockaddr*>(&address),
+    const int result = ::connect(probe.get(), reinterpret_cast<const sockaddr*>(&address),
                                  static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + string_path.size() + 1));
     const int saved_errno = errno;
-    ::close(probe);
     if (result == 0) return true;
     if (saved_errno == ECONNREFUSED || saved_errno == ENOENT || saved_errno == ECONNRESET) return false;
     throw std::system_error(saved_errno, std::generic_category(), "probe Unix socket");
@@ -167,7 +172,8 @@ class UnixSocketServer::WorkerPool {
 public:
     explicit WorkerPool(std::size_t count) {
         count = std::max<std::size_t>(1, count);
-        for (std::size_t i = 0; i < count; ++i) workers_.emplace_back([this]() { run(); });
+        for (std::size_t i = 0; i < count; ++i)
+            workers_.emplace_back([this](std::stop_token stop) { run(stop); });
     }
 
     ~WorkerPool() {
@@ -204,14 +210,14 @@ public:
     }
 
 private:
-    void run() {
+    void run(std::stop_token stop) {
         while (true) {
             std::function<void()> task;
             {
                 std::unique_lock lock(mutex_);
-                condition_.wait(lock, [this]() { return stopping_ || !queue_.empty(); });
+                condition_.wait(lock, stop, [this]() { return stopping_ || !queue_.empty(); });
                 if (queue_.empty()) {
-                    if (stopping_) return;
+                    if (stopping_ || stop.stop_requested()) return;
                     continue;
                 }
                 task = std::move(queue_.front());
@@ -227,10 +233,10 @@ private:
     }
 
     std::mutex mutex_;
-    std::condition_variable condition_;
+    std::condition_variable_any condition_;
     std::queue<std::function<void()>> queue_;
     bool stopping_ = false;
-    std::vector<std::thread> workers_;
+    std::vector<std::jthread> workers_;
 };
 
 class UnixSocketServer::Connection final : public std::enable_shared_from_this<Connection> {
@@ -244,7 +250,7 @@ public:
     void run() {
         while (!closed()) {
             std::array<std::uint8_t, 4> header{};
-            if (!read_all(fd(), header.data(), header.size())) break;
+            if (!read_all(fd(), header)) break;
             const auto payload_length = read_u32_le(header.data());
             if (payload_length > protocol::kMaxFramePayloadBytes) {
                 send_error(protocol::ErrorCode::ProtocolError, {}, 0, 0, "protocol frame is too large");
@@ -252,7 +258,7 @@ public:
             }
             protocol::ByteVector frame(header.begin(), header.end());
             protocol::ByteVector payload(payload_length);
-            if (!read_all(fd(), payload.data(), payload.size())) break;
+            if (!read_all(fd(), payload)) break;
             frame.insert(frame.end(), payload.begin(), payload.end());
             try {
                 dispatch(protocol::decode(frame));
@@ -286,7 +292,7 @@ public:
         try {
             const auto bytes = protocol::encode(message);
             std::lock_guard lock(write_mutex_);
-            if (fd_ >= 0) write_all(fd_, bytes.data(), bytes.size());
+            if (fd_ >= 0) write_all(fd_, bytes);
         } catch (...) {
             close();
         }
@@ -407,6 +413,11 @@ void UnixSocketServer::settle_staged_commits(bool all) {
 UnixSocketServer::~UnixSocketServer() {
     request_stop();
     close_connections();
+    for (auto& thread : connection_threads_) {
+        if (thread.joinable()) thread.join();
+    }
+    connection_threads_.clear();
+    if (workers_) workers_->shutdown();
     if (listen_fd_ >= 0) {
         ::close(listen_fd_);
         listen_fd_ = -1;
@@ -524,31 +535,25 @@ void UnixSocketServer::request_stop() noexcept {
 void UnixSocketServer::accept_connections() {
     sockaddr_un address {};
     socklen_t length = sizeof(address);
-    const int connection_fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&address), &length);
-    if (connection_fd < 0) {
+    UniqueFd accepted(::accept(listen_fd_, reinterpret_cast<sockaddr*>(&address), &length));
+    if (!accepted.valid()) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return;
         if (stopping_.load(std::memory_order_acquire)) return;
         throw std::system_error(errno, std::generic_category(), "accept Unix socket");
     }
-    try {
+    const int connection_fd = accepted.get();
 #ifdef SO_NOSIGPIPE
-        // macOS has no MSG_NOSIGNAL; ask the socket itself not to raise SIGPIPE.
-        const int enabled = 1;
-        (void)::setsockopt(connection_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+    // macOS has no MSG_NOSIGNAL; ask the socket itself not to raise SIGPIPE.
+    const int enabled = 1;
+    (void)::setsockopt(connection_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
 #endif
-        const auto uid = peer_uid(connection_fd);
-        if (uid != static_cast<std::uint64_t>(::getuid())) {
-            ::close(connection_fd);
-            return;
-        }
-        auto connection = std::make_shared<Connection>(*this, connection_fd, uid);
-        std::lock_guard lock(connections_mutex_);
-        connections_.push_back(connection);
-        connection_threads_.emplace_back([connection]() { connection->run(); });
-    } catch (...) {
-        ::close(connection_fd);
-        throw;
-    }
+    const auto uid = peer_uid(connection_fd);
+    if (uid != static_cast<std::uint64_t>(::getuid())) return;
+    auto connection = std::make_shared<Connection>(*this, connection_fd, uid);
+    (void)accepted.release();
+    std::lock_guard lock(connections_mutex_);
+    connections_.push_back(connection);
+    connection_threads_.emplace_back([connection]() { connection->run(); });
 }
 
 void UnixSocketServer::close_connections() noexcept {

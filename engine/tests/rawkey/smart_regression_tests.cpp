@@ -17,7 +17,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         RAWKEY_ASSERT(harness.candidate(1) == "矮");
         harness.key(Key("1"));
         RAWKEY_ASSERT(!harness.has_candidates());
-        harness.expect_direct_commit("if ", Key(" "));
+        harness.expect_space_then_commit("if ");
 }
 
     {
@@ -43,7 +43,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         harness.set_config("SmartEnglish", "True");
         harness.type("user@example.com");
         RAWKEY_ASSERT(harness.preedit() == "user@example.com");
-        harness.expect_direct_commit("user@example.com ", Key(" "));
+        harness.expect_space_then_commit("user@example.com ");
 }
 
     // Finishing an email must not bias the next token away from valid Zhuyin.
@@ -51,11 +51,11 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         Harness harness;
         harness.set_configs({{"BopomofoKeyboardLayout", "標準"}, {"SmartEnglish", "True"}});
         harness.type("user@example.com");
-        harness.expect_direct_commit("user@example.com ", Key(" "));
+        harness.expect_space_then_commit("user@example.com ");
         harness.type("283");
-        RAWKEY_ASSERT(harness.preedit() == "283");
+        RAWKEY_ASSERT(harness.preedit() == "打");
         harness.key(Key("Down"));
-        harness.key(Key("2"));
+        harness.choose_text("打");
         RAWKEY_ASSERT(harness.preedit() == "打");
         harness.type("5j/");
         harness.key(Key(" "));
@@ -75,13 +75,13 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         Harness harness;
         harness.set_configs({{"BopomofoKeyboardLayout", "標準"}, {"SmartEnglish", "True"}});
         harness.type("gmail.com283");
-        RAWKEY_ASSERT(harness.preedit() == "gmail.com283");
+        RAWKEY_ASSERT(harness.preedit() == "gmail.com打");
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
         RAWKEY_ASSERT(harness.has_candidates());
-        RAWKEY_ASSERT(harness.candidate(0) == "gmail.com283");
-        RAWKEY_ASSERT(harness.candidate(1) == "gmail.com打");
-        harness.key(Key("2"));
+        RAWKEY_ASSERT(harness.candidate(0) == "gmail.com打");
+        RAWKEY_ASSERT(harness.candidate(1) == "gmail.com283");
+        harness.choose_text("gmail.com打");
         RAWKEY_ASSERT(harness.preedit() == "gmail.com打");
         harness.type("5j/");
         harness.key(Key(" "));
@@ -96,9 +96,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         harness.type("user@example.com283");
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "user@example.com283");
-        RAWKEY_ASSERT(harness.candidate(1) == "user@example.com打");
-        harness.key(Key("2"));
+        harness.choose_text("user@example.com打");
         harness.expect_commit("user@example.com打");
 }
 
@@ -109,9 +107,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         harness.key(Key(" "));
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "https://example.com5j/");
-        RAWKEY_ASSERT(harness.candidate(1) == "https://example.com中");
-        harness.key(Key("2"));
+        harness.choose_text("https://example.com中");
         harness.expect_commit("https://example.com中");
 }
 
@@ -124,9 +120,9 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
         RAWKEY_ASSERT(harness.has_candidates());
-        RAWKEY_ASSERT(harness.candidate(0) == "hello283");
-        RAWKEY_ASSERT(harness.candidate(1) == "hello打");
-        harness.key(Key("2"));
+        RAWKEY_ASSERT(harness.candidate(0) == "hello打");
+        RAWKEY_ASSERT(harness.candidate(1) == "hello283");
+        harness.choose_text("hello打");
         RAWKEY_ASSERT(harness.preedit() == "hello打");
         harness.type("5j/");
         harness.key(Key(" "));
@@ -134,13 +130,18 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         harness.expect_commit("hello打中");
 }
 
-    // A long uninterrupted Latin token is safer as English than as a possible
-    // all-letter first-tone suffix.
+    // English + first-tone Chinese can share an uninterrupted raw span. The
+    // literal OOV spelling remains selectable instead of a length override.
     {
         Harness harness;
         harness.set_configs({{"BopomofoKeyboardLayout", "標準"}, {"SmartEnglish", "True"}});
         harness.type("hellorup");
-        harness.expect_direct_commit("hellorup ", Key(" "));
+        harness.key("space");
+        RAWKEY_ASSERT(harness.preedit() == "hello今");
+        RAWKEY_ASSERT(harness.commits().empty());
+        harness.key("Down");
+        harness.choose_text("hellorup ");
+        harness.expect_commit("hellorup ");
 }
 
     // Suffix parsing is grammatical and does not depend on the English lexicon.
@@ -161,7 +162,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("gmail.com");
-        harness.expect_direct_commit("gmail.com ", Key(" "));
+        harness.expect_space_then_commit("gmail.com ");
 }
 
     // Intrinsically ambiguous English+tone input exposes both complete results.
@@ -174,7 +175,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         RAWKEY_ASSERT(harness.candidate(0) == "hello4");
         RAWKEY_ASSERT(harness.candidate(1) == "hell欸");
         harness.key(Key("1"));
-        harness.expect_direct_commit("hello4 ", Key(" "));
+        harness.expect_space_then_commit("hello4 ");
 }
 
     // Hsu uses the same parallel suffix decision with letter tone keys.
@@ -199,9 +200,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         harness.key(Key(" "));
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
-        RAWKEY_ASSERT(harness.candidate(0) == "gmail.comjxl");
-        RAWKEY_ASSERT(harness.candidate(1) == "gmail.com中");
-        harness.key(Key("2"));
+        harness.choose_text("gmail.com中");
         harness.expect_commit("gmail.com中");
 }
 
@@ -213,7 +212,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
                              {"SelectionKeys", "本位列"}});
         harness.type("hda");
         RAWKEY_ASSERT(harness.preedit() == "hda");
-        harness.expect_direct_commit("hda ", Key(" "));
+        harness.expect_space_then_commit("hda ");
 }
 
     // The same token reset must hold for Hsu's letter-based tone keys.
@@ -221,7 +220,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         Harness harness;
         harness.set_configs({{"BopomofoKeyboardLayout", "許氏"}, {"SmartEnglish", "True"}});
         harness.type("user@example.com");
-        harness.expect_direct_commit("user@example.com ", Key(" "));
+        harness.expect_space_then_commit("user@example.com ");
         harness.type("dyf");
         RAWKEY_ASSERT(harness.preedit() == "打");
         harness.type("jxl");
@@ -235,15 +234,20 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         harness.set_config("SmartEnglish", "True");
         harness.type("https://example.com/v1.2.3");
         RAWKEY_ASSERT(harness.preedit() == "https://example.com/v1.2.3");
-        harness.expect_direct_commit("https://example.com/v1.2.3 ", Key(" "));
+        harness.expect_space_then_commit("https://example.com/v1.2.3 ");
 }
 
-    // A known English token commits directly instead of opening ambiguity.
+    // A known English token and a first-tone reading are both selectable;
+    // lexical membership does not override explicit keyboard evidence.
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
         harness.type("ai");
-        harness.expect_direct_commit("ai ", Key(" "));
+        harness.key("space");
+        RAWKEY_ASSERT(harness.commits().empty());
+        harness.key("Down");
+        harness.choose_text("ai ");
+        harness.expect_commit("ai ");
 }
 
     // Single-key first-tone readings are no longer forced to English.
@@ -255,9 +259,9 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.key(Key("Down"));
         RAWKEY_ASSERT(harness.has_candidates());
-        RAWKEY_ASSERT(harness.candidate(0) == "u");
+        RAWKEY_ASSERT(harness.candidate(0) == "u ");
         RAWKEY_ASSERT(harness.candidate(1) == "一");
-        harness.key(Key("2"));
+        harness.choose_text("一");
         RAWKEY_ASSERT(harness.preedit() == "一");
         harness.expect_commit("一");
 }
@@ -328,7 +332,7 @@ RAWKEY_SUITE("smart regressions", engine_test_smart_regressions) {
         RAWKEY_ASSERT(!harness.has_candidates());
         harness.type(".");
         RAWKEY_ASSERT(harness.preedit() == "if.");
-        harness.expect_direct_commit("if. ", Key(" "));
+        harness.expect_space_then_commit("if. ");
 }
 
     // Return confirms the raw preview in one action.

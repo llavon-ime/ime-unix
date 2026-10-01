@@ -15,7 +15,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "fcitx5/ime_config.hpp"
+#include "fcitx5/settings_launcher.hpp"
 #include "fcitx5/input_context_property.hpp"
 #include "host/engine.hpp"
 #include "host/host.hpp"
@@ -26,6 +26,8 @@ class InputContext;
 }  // namespace fcitx
 
 namespace llavon::ime {
+
+class UpdateBridge;
 
 // Fcitx5 host adapter: it converts fcitx key events into engine keys, exposes
 // the engine's render states through the fcitx input panel, and implements the
@@ -62,23 +64,23 @@ private:
     ContextId context_id(fcitx::InputContext* input_context);
     fcitx::InputContext* input_context(ContextId context) const;
     void reload_config();
-    void update_accessibility_status();
-    void refresh_phrase_override_editor() const;
+    std::string settings_status() const;
 
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     std::unique_ptr<Engine> engine_;
     std::filesystem::path active_service_model_path_;
-    ImeFcitxConfig fcitx_config_;
-    // Refreshed in place so a pointer handed to a config frontend stays valid.
-    mutable PhraseOverrideEditorConfig phrase_override_editor_;
+    SettingsLauncher settings_launcher_;
     fcitx::Instance* instance_ = nullptr;
-    fcitx::EventDispatcher* event_dispatcher_ = nullptr;
+    std::unique_ptr<fcitx::EventDispatcher> event_dispatcher_;
     std::atomic<std::uint64_t> next_context_id_{1};
     std::unordered_map<ContextId, fcitx::TrackableObjectReference<fcitx::InputContext>> contexts_;
     ImeInputContextPropertyFactory property_factory_;
     std::unique_ptr<fcitx::HandlerTableEntry<fcitx::EventHandler>> capability_changed_handler_;
     fcitx::SimpleAction lora_manager_action_;
     fcitx::ScopedConnection lora_manager_connection_;
+#ifdef __linux__
+    std::unique_ptr<UpdateBridge> update_bridge_;
+#endif
 };
 
 class ImeEngineFactory final : public fcitx::AddonFactory {
