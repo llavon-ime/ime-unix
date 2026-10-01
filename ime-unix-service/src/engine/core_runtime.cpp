@@ -59,9 +59,11 @@ void CoreRuntime::ensure_loaded() {
         auto core = std::make_shared<llavon::ime::core::Core>(llavon::ime::core::CoreConfig{
             .model_path = config_.model_path,
             .tables_dir = config_.tables_dir,
+            .vulkan_pipeline_cache_dir = {},
             .context_length = config_.context_length,
             .threads = config_.threads,
             .gpu_layers = config_.gpu_layers,
+            .inference_device = {},
             .logger = logger,
         });
         std::lock_guard lock(state_mutex_);
