@@ -44,7 +44,7 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
       SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
-      LLAVON_IME_ENABLE_UPDATES: "1"
+      LLAVON_IME_ENABLE_UPDATES: "0"
       LLAVON_IME_RELEASE_REPOSITORY: ${{ github.repository }}
 
     steps:
@@ -100,11 +100,24 @@ jobs:
             exit 1
           fi
 
-      - name: Require update signing and notarization configuration
+      - name: Select signed or manual-install release
+        id: signing
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
           set -euo pipefail
+          signing_names=(MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD
+            DEVELOPER_ID_APPLICATION DEVELOPER_ID_INSTALLER
+            APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD)
+          configured=0
+          for name in "${signing_names[@]}"; do
+            if [[ -n "${!name}" ]]; then configured=$((configured + 1)); fi
+          done
+          if [[ "${configured}" == 0 ]]; then
+            echo "signed=false" >> "${GITHUB_OUTPUT}"
+            echo "Publishing an ad-hoc signed, unnotarized package for manual installation."
+            exit 0
+          fi
           for name in SPARKLE_PUBLIC_ED_KEY SPARKLE_PRIVATE_ED_KEY \
             MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD \
             DEVELOPER_ID_APPLICATION DEVELOPER_ID_INSTALLER \
@@ -114,6 +127,8 @@ jobs:
               exit 1
             fi
           done
+          echo "signed=true" >> "${GITHUB_OUTPUT}"
+          echo "LLAVON_IME_ENABLE_UPDATES=1" >> "${GITHUB_ENV}"
 
       - name: Verify update tooling
         run: bash macos/scripts/verify-updates.sh
@@ -206,6 +221,7 @@ jobs:
           echo "${sha}  ${pkg}"
 
       - name: Sign package and generate signed appcast
+        if: steps.signing.outputs.signed == 'true'
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
@@ -249,9 +265,22 @@ jobs:
           tag="${{ steps.version.outputs.tag }}"
           assets=(
             "${{ steps.package.outputs.pkg }}"
-            "dist/macos/appcast.xml"
           )
           notes="Native macOS input method package."
+          if [[ "${{ steps.signing.outputs.signed }}" == true ]]; then
+            assets+=("dist/macos/appcast.xml")
+          else
+            notes="Native macOS input method package (Apple Silicon). This package is not Developer ID signed or notarized; its executables use ad-hoc signatures. In-app automatic updates are disabled."
+            install_notes="${RUNNER_TEMP}/macos-install.txt"
+            cat > "${install_notes}" <<'NOTES'
+          ### macOS manual installation (Apple Silicon)
+
+          The macOS `.pkg` is **not Developer ID signed or Apple notarized**. Executables use ad-hoc signatures. In-app automatic updates are disabled; install future versions manually.
+
+          Download the `.pkg` from this release and open it in Finder. If macOS blocks the installer, open **System Settings → Privacy & Security**, find the blocked installer, and choose **Open Anyway**, then follow the installer prompts. After installation, add 拉風輸入法 in **System Settings → Keyboard → Text Input → Edit**. macOS may also require approval of the installed input method in Privacy & Security.
+          NOTES
+            assets+=("${install_notes}#macos-install.txt")
+          fi
           # A moved tag leaves its release behind as a draft that the by-tag
           # lookups cannot see, and `gh release create` refuses to replace it.
           # Drop those leftovers so the tag gets a release that is reachable
@@ -284,8 +313,17 @@ jobs:
           asset_url="$(gh release view "${tag}" --json assets --jq '.assets[0].url')"
           curl --fail --silent --show-error --location --head "${asset_url}" >/dev/null
           gh release view "${tag}" --json isDraft --jq '.isDraft' | grep -qx false
+          if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
+            gh release view "${tag}" --json body --jq '.body // ""' > "${RUNNER_TEMP}/release-notes.md"
+            if ! grep -q '^### macOS manual installation' "${RUNNER_TEMP}/release-notes.md"; then
+              printf '\n' >> "${RUNNER_TEMP}/release-notes.md"
+              cat "${install_notes}" >> "${RUNNER_TEMP}/release-notes.md"
+              gh release edit "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md"
+            fi
+          fi
 
       - name: Publish macOS update feed after the package is reachable
+        if: steps.signing.outputs.signed == 'true'
         run: |
           set -euo pipefail
           pkg_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.version.outputs.tag }}/llavon-ime-${{ steps.version.outputs.version }}-arm64.pkg"
@@ -325,6 +363,7 @@ jobs:
           SHA256="${{ steps.sha.outputs.sha256 }}" \
           CASK="${cask}" \
           RELEASE_REPOSITORY="${RELEASE_REPOSITORY}" \
+          AUTO_UPDATES="${{ steps.signing.outputs.signed }}" \
           ruby <<'RUBY'
           path = ENV.fetch("CASK")
           version = ENV.fetch("VERSION")
@@ -343,8 +382,12 @@ jobs:
           text.sub!(/verified:\s+"github\.com\/[^\"]+"/, %(verified: "github.com/#{repository}/"))
           text.sub!(/homepage "https:\/\/github\.com\/[^\"]+"/, %(homepage "https://github.com/#{repository}"))
           if text.match?(/^\s*auto_updates\s+/)
-            text.sub!(/^\s*auto_updates\s+.*$/, "  auto_updates true")
-          else
+            if ENV.fetch("AUTO_UPDATES") == "true"
+              text.sub!(/^\s*auto_updates\s+.*$/, "  auto_updates true")
+            else
+              text.sub!(/^\s*auto_updates\s+.*\n?/, "")
+            end
+          elsif ENV.fetch("AUTO_UPDATES") == "true"
             text.sub!(/^(\s*sha256[^\n]*\n)/, "\\1\n  auto_updates true\n")
           end
           File.write(path, text)
