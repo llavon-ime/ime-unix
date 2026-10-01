@@ -51,3 +51,30 @@ fcitx5/third_party/llama.cpp/
 
 # Machine-local iterative research session state
 .opencode/ralph-loop.local.md
+
+# Local documentation and one-off research tools are not release sources.
+/docs/
+/scripts/inference-bench/
+/scripts/linux-app-rawkey/
+/scripts/linux-wayland-rawkey/
+/.impeccable.md
+/scripts/verify-native-settings-linux.sh
+/ime-unix-service/tests/native_entry_probe.cpp
+/engine/tools/audit_model_service.py
+/engine/tools/evaluate_*.py
+/engine/tools/validate_structured_holdout.py
+/engine/tools/mixed_input_probe.cpp
+/engine/tools/model_mixed_probe/
+/engine/tests/rawkey/typing_usability_probe.cpp
+/engine/tests/rawkey/live_mixed_model_preview.hpp
+/engine/tests/rawkey/keyboard_layout_cases.json
+/engine/tests/rawkey/model_mixed_cases.json
+/engine/tests/rawkey/model_workflow_cases.json
+/engine/tests/rawkey/smart_editing_cases.json
+/engine/tests/rawkey/smart_local_error_cases.json
+/engine/tests/rawkey/smart_reading_architecture_cases.json
+/engine/tests/rawkey/smart_singleton_new_sentences.json
+/engine/tests/rawkey/smart_singleton_workflows.json
+/engine/tests/rawkey/smart_valid_boundary_cases.json
+/engine/tests/rawkey/structured_boundary_cases.json
+/engine/tests/rawkey/typing_usability_cases.json

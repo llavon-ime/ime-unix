@@ -1,4 +1,11 @@
-#include "live_mixed_model_preview.hpp"
+#include "raw_key_harness.hpp"
+#include "engine/fallback_engine.hpp"
+#include "text/utf.hpp"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <vector>
 #include "ipc/unix_socket.hpp"
 
 #include <atomic>
@@ -621,194 +628,11 @@ RAWKEY_SUITE("production lexical reading repair rejects stale replies and preser
     }
 }
 
-void wait_idle(Harness& harness, LiveMixedModelPreview& preview) {
-    RAWKEY_ASSERT(harness.pump_until([&] { return preview.idle(); }, std::chrono::seconds(5)));
-}
-
 void wait_request(Harness& harness, ScriptService& service) {
     RAWKEY_ASSERT(harness.pump_until([&] { return service.calls.load() != 0; }, std::chrono::seconds(2)));
 }
 
 }  // namespace
-
-RAWKEY_SUITE("live mixed model preview", live_mixed_model_preview) {
-    const FallbackEngine fallback(LLAVON_IME_TEST_TABLE_PATH);
-    // A result reaches real preedit and real Enter commit, not a parallel text
-    // variable. Shift+Backspace after refinement still edits the original keys.
-    {
-        ScriptService service;
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3"); preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "擬");
-        harness.key("Shift+BackSpace"); preview.on_key();
-        RAWKEY_ASSERT(harness.session()->pending_token.raw == u"su");
-        harness.type("3"); preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "擬");
-        harness.key("Return"); preview.on_key();
-        RAWKEY_ASSERT(harness.last_commit() == "擬");
-        RAWKEY_ASSERT(harness.composition_empty());
-    }
-    // A late answer for the old tone cannot overwrite a retyped raw sequence;
-    // the latest desired sequence is coalesced and eventually applied.
-    {
-        ScriptService service(true);
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3"); preview.on_key(); wait_request(harness, service);
-        harness.key("Shift+BackSpace"); preview.on_key();
-        harness.type("4"); preview.on_key();
-        const auto corrected = harness.preedit();
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(preview.stats.stale == 1);
-        RAWKEY_ASSERT(harness.session()->pending_token.raw == u"su4");
-        RAWKEY_ASSERT(harness.preedit() == corrected);
-        RAWKEY_ASSERT(harness.preedit() != "擬");
-    }
-    // Opening the candidate panel freezes its rows until the user leaves it.
-    {
-        ScriptService service(true);
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 4);
-        harness.type("su3"); preview.on_key(); wait_request(harness, service);
-        harness.key("Down"); preview.on_key();
-        const auto panel = harness.candidates();
-        const auto shown = harness.preedit();
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(preview.stats.stale == 1);
-        RAWKEY_ASSERT(harness.candidates() == panel);
-        RAWKEY_ASSERT(harness.preedit() == shown);
-    }
-    // Explicit Enter or cancellation must win over an unfinished model job.
-    for (const bool commit : {true, false}) {
-        ScriptService service(true);
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3"); preview.on_key(); wait_request(harness, service);
-        if (commit) harness.key("Return");
-        else { harness.key("Escape"); harness.key("Escape"); }
-        preview.on_key();
-        const auto committed = harness.commits();
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.composition_empty());
-        RAWKEY_ASSERT(harness.commits() == committed);
-        RAWKEY_ASSERT(preview.stats.applied == 0);
-    }
-    // A manual selection stays pinned even if a pre-selection model job returns.
-    {
-        ScriptService service(true);
-        Harness harness(smart_options());
-        harness.set_config("SelectionKeys", "數字鍵");
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3"); preview.on_key(); wait_request(harness, service);
-        harness.key("Down"); preview.on_key();
-        const auto candidates = harness.candidates();
-        const auto at = std::ranges::find(candidates, "你");
-        RAWKEY_ASSERT(at != candidates.end());
-        harness.key(Key(static_cast<char32_t>(U'1' + std::distance(candidates.begin(), at)))); preview.on_key();
-        harness.type("hello"); preview.on_key();
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "你hello");
-        harness.key("Return"); preview.on_key();
-        RAWKEY_ASSERT(harness.last_commit() == "你hello");
-    }
-    // Ordinary client context and exact literal prefix precede Chinese. A
-    // sensitive host suppresses document context; it still predicts new keys.
-    for (const bool sensitive : {false, true}) {
-        ScriptService service;
-        Harness harness(smart_options());
-        harness.set_surrounding("history", 7, 7);
-        harness.host().set_sensitive(sensitive);
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("hello"); preview.on_key();
-        RAWKEY_ASSERT(preview.stats.requests == 0);
-        harness.type("su3"); preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "hello擬");
-        RAWKEY_ASSERT(service.contexts().back() == (sensitive ? u"hello" : u"historyhello"));
-    }
-    // Reject a changed document context rather than applying the old answer.
-    {
-        ScriptService service(true);
-        Harness harness(smart_options());
-        harness.set_surrounding("old", 3, 3);
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3"); preview.on_key(); wait_request(harness, service);
-        harness.set_surrounding("new", 3, 3); preview.on_key();
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(preview.stats.stale == 1);
-        RAWKEY_ASSERT(service.contexts().back() == u"new");
-        RAWKEY_ASSERT(harness.preedit() == "擬");
-    }
-    // Wrong protocol correlation and a non-homophone answer both fail closed.
-    for (const int invalid : {1, 2, 3}) {
-        ScriptService service(false, invalid);
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3");
-        const auto baseline = harness.preedit();
-        preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(preview.stats.failures == 1);
-        RAWKEY_ASSERT(harness.preedit() == baseline);
-        harness.key("Return"); preview.on_key();
-        RAWKEY_ASSERT(harness.last_commit() == baseline);
-    }
-    // Focus loss and an explicit reset also invalidate pending preview work.
-    for (const bool focus_out : {true, false}) {
-        ScriptService service(true);
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("su3"); preview.on_key(); wait_request(harness, service);
-        if (focus_out) harness.focus_out();
-        else harness.reset();
-        preview.on_key();
-        const auto commits = harness.commits();
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.composition_empty());
-        RAWKEY_ASSERT(harness.commits() == commits);
-        RAWKEY_ASSERT(preview.stats.applied == 0);
-    }
-    // A previously Chinese-looking Hsu prefix remains reversible to English.
-    {
-        ScriptService service;
-        Harness harness(smart_options());
-        harness.set_config("BopomofoKeyboardLayout", "許氏");
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type("nef"); preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "擬");
-        harness.type("arious"); preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "nefarious");
-        harness.key("Return"); preview.on_key();
-        RAWKEY_ASSERT(harness.last_commit() == "nefarious");
-    }
-    // Slow alternative-path prefetch cannot hold back the primary preview.
-    {
-        ScriptService service(false, 0, true);
-        Harness harness(smart_options());
-        harness.set_config("BopomofoKeyboardLayout", "許氏");
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 4);
-        harness.type("nef"); preview.on_key();
-        RAWKEY_ASSERT(harness.pump_until([&] { return service.calls.load() >= 2; }, std::chrono::seconds(2)));
-        RAWKEY_ASSERT(!preview.idle());
-        RAWKEY_ASSERT(harness.preedit() == "擬");
-        RAWKEY_ASSERT(preview.stats.early_best_applied == 1);
-        service.release(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "擬");
-    }
-    // Fallback-only syllables stay intact and become context, rather than an
-    // invalid reading token which would fail the whole multi-syllable query.
-    {
-        ScriptService service;
-        Harness harness(smart_options());
-        LiveMixedModelPreview preview(harness, fallback, service.socket.string(), 1);
-        harness.type(",4su3"); preview.on_key(); wait_idle(harness, preview);
-        RAWKEY_ASSERT(harness.preedit() == "誒擬");
-        RAWKEY_ASSERT(service.contexts().back() == u"誒");
-        RAWKEY_ASSERT(preview.stats.unsupported_readings == 1);
-        RAWKEY_ASSERT(preview.stats.failures == 0);
-        harness.key("Return"); preview.on_key();
-        RAWKEY_ASSERT(harness.last_commit() == "誒擬");
-    }
-}
 
 RAWKEY_SUITE("stale buffer prediction retains preview", stale_buffer_retains_preview) {
     ScriptService service(false, 0, true);

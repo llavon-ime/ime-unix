@@ -44,11 +44,6 @@ if(NOT WIN32)
     add_test(NAME llavon_ime_resource_tests COMMAND llavon_ime_resource_tests)
 endif()
 
-add_executable(mixed_input_probe ../tools/mixed_input_probe.cpp)
-target_link_libraries(mixed_input_probe PRIVATE llavon_ime_engine)
-target_compile_definitions(mixed_input_probe PRIVATE LLAVON_IME_TEST_TABLE_PATH="${LLAVON_IME_TABLE_SOURCE_DIR}/bopomofo_char.json")
-llavon_ime_enable_warnings(mixed_input_probe)
-
 add_executable(llavon_ime_tests ${LLAVON_IME_ENGINE_TEST_SOURCES})
 llavon_ime_enable_warnings(llavon_ime_tests)
 target_link_libraries(llavon_ime_tests PRIVATE llavon_ime_engine)
