@@ -277,7 +277,7 @@ jobs:
           notes="拉風輸入法 macOS 安裝套件。"
           if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
             notes="拉風輸入法 macOS 安裝套件（Apple Silicon）。"
-            install_notes="${RUNNER_TEMP}/macos-install.txt"
+            install_notes="${RUNNER_TEMP}/macos-install-notes.md"
             cat > "${install_notes}" <<'NOTES'
           ### macOS 安裝與自動更新（Apple Silicon）
 
@@ -297,7 +297,6 @@ jobs:
 
           輸入法使用 Sparkle 檢查及下載更新，並驗證更新來源與安裝包的簽章。安裝更新時需要管理員授權。
           NOTES
-            assets+=("${install_notes}#macos-install.txt")
           fi
           # A moved tag leaves its release behind as a draft that the by-tag
           # lookups cannot see, and `gh release create` refuses to replace it.
