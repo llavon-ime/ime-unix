@@ -24,8 +24,8 @@ HostSettingsPage::HostSettingsPage(bool updates, QWidget* parent, QString helper
     if (updates_) {
         checks_ = new NativeCheckBox(QStringLiteral("自動檢查更新（每日）")); checks_->setObjectName("automaticUpdates"); layout->addWidget(checks_);
         downloads_ = new NativeCheckBox(QStringLiteral("背景下載更新")); downloads_->setObjectName("automaticDownloads"); layout->addWidget(downloads_);
-        auto* note = new QLabel(QStringLiteral("更新由運作中的輸入法與 Sparkle 管理。安裝會等待組字與訓練完成。"));
-        note->setProperty("role", "muted"); note->setWordWrap(true); layout->addWidget(note);
+        auto* note = new QLabel(QStringLiteral("背景下載不會自動安裝。下載就緒後，會在組字與訓練結束時顯示安裝提示。\n設定頁也會顯示「已下載」，按鈕會改為「安裝並重新啟動…」，可再次開啟提示。\n確認並提供管理員授權後才會安裝，並重新啟動輸入法。"));
+        note->setObjectName("updateInstructions"); note->setProperty("role", "muted"); note->setWordWrap(true); layout->addWidget(note);
         check_ = new QPushButton(QStringLiteral("檢查更新…")); check_->setObjectName("checkUpdates"); check_->setProperty("primary", true); layout->addWidget(check_);
         check_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         connect(checks_, &QCheckBox::toggled, this, [this](bool value) { request({{"action", "preferences"}, {"checks", value}}); });
@@ -78,6 +78,7 @@ void HostSettingsPage::render(const QJsonObject& state) {
         checks_->setEnabled(connected && state.value("enabled").toBool());
         downloads_->setEnabled(connected && state.value("allowsDownloads").toBool());
         check_->setEnabled(connected && state.value("canCheck").toBool());
+        check_->setText(state.value("readyToInstall").toBool() ? QStringLiteral("安裝並重新啟動…") : QStringLiteral("檢查更新…"));
     }
 }
 }

@@ -14,7 +14,7 @@ on:
 permissions:
   contents: write
 
-# The rolling feed and Homebrew cask must be updated in release order.
+# The rolling feed must be updated in release order.
 concurrency:
   group: macos-release-feed
   cancel-in-progress: false
@@ -24,17 +24,14 @@ env:
   MODEL_REVISION: "fae44704fb1a7361bcc1150bf910c1d74fa367a4"
   MODEL_FILE_NAME: "llavon-ime-llama-250m-Q4_K_M.gguf"
   MODEL_SHA256: "e0205904a65b735ed735b709d5e1502ebbe31fbd1393042573af9843d39e2ab8"
-  HOMEBREW_TAP_REPO: "llavon-ime/homebrew-llavon-ime"
-  HOMEBREW_CASK_PATH: "Casks/llavon-ime.rb"
   RELEASE_REPOSITORY: ${{ github.repository }}
 
 jobs:
   release-macos:
-    name: Build pkg and update Homebrew tap
+    name: Build pkg and publish Sparkle updates
     runs-on: macos-26
     env:
       GH_TOKEN: ${{ github.token }}
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
@@ -53,7 +50,7 @@ jobs:
           set -euo pipefail
           arch="$(uname -m)"
           if [[ "${arch}" != "arm64" ]]; then
-            echo "This workflow currently publishes the arm64 Cask asset, but the runner architecture is ${arch}." >&2
+            echo "This workflow publishes the arm64 package, but the runner architecture is ${arch}." >&2
             exit 1
           fi
 
@@ -296,6 +293,10 @@ jobs:
           #### 自動更新
 
           輸入法使用 Sparkle 檢查及下載更新，並驗證更新來源與安裝包的簽章。安裝更新時需要管理員授權。
+
+          #### 從 Homebrew 安裝遷移
+
+          Homebrew Cask 不再更新。曾透過 Homebrew 安裝的使用者，先備份個人設定與訓練資料，再直接使用本頁的 `.pkg` 覆蓋安裝，之後改由輸入法內的 Sparkle 管理更新。不需先解除安裝；Homebrew 的安裝紀錄會保留，請勿再對這個 Cask 執行升級、解除安裝或 `--zap`，以免覆蓋或刪除輸入法與資料。
           NOTES
           fi
           # A moved tag leaves its release behind as a draft that the by-tag
@@ -358,74 +359,17 @@ jobs:
               --title "macOS update feed" --notes "Signed Sparkle feed for app-managed macOS pkg updates."
           fi
           gh release upload macos-updates dist/macos/appcast.xml --clobber
-          curl --fail --silent --show-error --location \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/macos-updates/appcast.xml" \
-            -o "${RUNNER_TEMP}/published-appcast.xml"
-          cmp dist/macos/appcast.xml "${RUNNER_TEMP}/published-appcast.xml"
-
-      - name: Check Homebrew tap token
-        run: |
-          set -euo pipefail
-          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
-            echo "Set the HOMEBREW_TAP_TOKEN repository secret with write access to ${HOMEBREW_TAP_REPO}." >&2
-            exit 1
-          fi
-
-      - name: Checkout Homebrew tap
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.HOMEBREW_TAP_REPO }}
-          path: homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-      - name: Update Homebrew Cask
-        run: |
-          set -euo pipefail
-          cask="homebrew-tap/${HOMEBREW_CASK_PATH}"
-          VERSION="${{ steps.version.outputs.version }}" \
-          SHA256="${{ steps.sha.outputs.sha256 }}" \
-          CASK="${cask}" \
-          RELEASE_REPOSITORY="${RELEASE_REPOSITORY}" \
-          AUTO_UPDATES="true" \
-          ruby <<'RUBY'
-          path = ENV.fetch("CASK")
-          version = ENV.fetch("VERSION")
-          sha256 = ENV.fetch("SHA256")
-          repository = ENV.fetch("RELEASE_REPOSITORY")
-          text = File.read(path)
-          installed = text[/version\s+"([^"]+)"/, 1]
-          if installed && Gem::Version.new(version) < Gem::Version.new(installed)
-            puts "Keeping the newer Homebrew Cask #{installed}."
-            exit
-          end
-          text.sub!(/version\s+"[^"]+"/, %(version "#{version}"))
-          text.sub!(/sha256\s+"[^"]+"/, %(sha256 "#{sha256}"))
-          text.sub!(%r{url "https://github\.com/[^/]+/[^/]+/releases/download/},
-                    %(url "https://github.com/#{repository}/releases/download/))
-          text.sub!(/verified:\s+"github\.com\/[^\"]+"/, %(verified: "github.com/#{repository}/"))
-          text.sub!(/homepage "https:\/\/github\.com\/[^\"]+"/, %(homepage "https://github.com/#{repository}"))
-          if text.match?(/^\s*auto_updates\s+/)
-            if ENV.fetch("AUTO_UPDATES") == "true"
-              text.sub!(/^\s*auto_updates\s+.*$/, "  auto_updates true")
-            else
-              text.sub!(/^\s*auto_updates\s+.*\n?/, "")
-            end
-          elsif ENV.fetch("AUTO_UPDATES") == "true"
-            text.sub!(/^(\s*sha256[^\n]*\n)/, "\\1\n  auto_updates true\n")
-          end
-          File.write(path, text)
-          RUBY
-
-      - name: Push Homebrew tap update
-        working-directory: homebrew-tap
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- "${HOMEBREW_CASK_PATH}"; then
-            echo "Homebrew Cask is already up to date."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${HOMEBREW_CASK_PATH}"
-          git commit -m "Update llavon-ime to ${{ steps.version.outputs.version }}"
-          git push
+          feed_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/macos-updates/appcast.xml"
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --location --connect-timeout 15 --max-time 60 \
+              -H 'Cache-Control: no-cache' "${feed_url}?release=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              -o "${RUNNER_TEMP}/published-appcast.xml" && \
+              cmp -s dist/macos/appcast.xml "${RUNNER_TEMP}/published-appcast.xml"; then
+              echo "Published appcast matches the signed feed."
+              exit 0
+            fi
+            echo "Published feed is not yet consistent (attempt ${attempt}/12)." >&2
+            if [[ "${attempt}" != 12 ]]; then sleep 10; fi
+          done
+          echo "Published appcast still differs from the signed feed; refusing to report success." >&2
+          exit 1

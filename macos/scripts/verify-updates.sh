@@ -11,6 +11,11 @@ swiftc -warnings-as-errors -parse-as-library \
     "${ROOT_DIR}/macos/Core/UpdateInstallationGate.swift" \
     "${ROOT_DIR}/macos/Tests/UpdateGateTests.swift" -o "${work}/gate-tests"
 "${work}/gate-tests"
+swiftc -warnings-as-errors -parse-as-library \
+    "${ROOT_DIR}/macos/Core/UpdateInstallationGate.swift" \
+    "${ROOT_DIR}/macos/Core/UpdateReadyReminder.swift" \
+    "${ROOT_DIR}/macos/Tests/UpdateReminderTests.swift" -o "${work}/reminder-tests"
+"${work}/reminder-tests"
 
 # Disposable keys, never the developer's Keychain or a real release key.
 cat > "${work}/test-key.swift" <<'SWIFT'
