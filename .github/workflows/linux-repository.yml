@@ -58,9 +58,14 @@ jobs:
         run: |
           set -euo pipefail
           gh release download "${REPOSITORY_RELEASE_TAG}" --pattern '*.deb' --pattern '*.rpm' --dir packages
+          # A rerun also sees the separately published signed RPM; rebuild from
+          # the original release package, never from our previous output.
+          find packages -name '*-signed.rpm' -delete
           [[ "$(find packages -name '*.deb' | wc -l)" == 1 ]]
           [[ "$(find packages -name '*.rpm' | wc -l)" == 1 ]]
       - name: Generate and verify signed repository snapshots
+        env:
+          LLAVON_REPOSITORY_RELEASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ env.REPOSITORY_RELEASE_TAG }}
         run: |
           set -euo pipefail
           export GNUPGHOME="${RUNNER_TEMP}/repository-key"
@@ -72,11 +77,31 @@ jobs:
           gpg --verify repository/debian13/amd64/InRelease
           gpg --verify repository/fedora43/x86_64/repodata/repomd.xml.asc repository/fedora43/x86_64/repodata/repomd.xml
           rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --import repository/llavon-ime-repository.asc
-          rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --checksig repository/fedora43/x86_64/packages/*.rpm
+          rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --checksig repository/fedora43/x86_64/*-signed.rpm
           tar -czf "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" -C repository .
+          mkdir pages
+          # Pages contains metadata only. Signed packages stay on Releases.
+          tar -C repository --exclude='*.deb' --exclude='*.rpm' -cf - . | tar -C pages -xf -
+          tar -czf "llavon-ime-linux-pages-${REPOSITORY_RELEASE_TAG#v}.tar.gz" -C pages .
       - name: Attach repository deployment bundle to release
         run: |
           set -euo pipefail
           gh release upload "${REPOSITORY_RELEASE_TAG}" "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" --clobber
           gh release upload "${REPOSITORY_RELEASE_TAG}" repository/llavon-ime-repository.asc --clobber
-          echo "Deploy the extracted tree to the configured HTTPS repository host before announcing this update."
+          gh release upload "${REPOSITORY_RELEASE_TAG}" repository/fedora43/x86_64/*-signed.rpm --clobber
+      - name: Verify APT follows the Release package URL
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/apt-external-verification"
+          mkdir -p "${work}/lists/partial" "${work}/cache/archives/partial" "${work}/downloads"
+          touch "${work}/status"
+          printf 'deb [signed-by=%s] file:%s/debian13/amd64 ./\n' \
+            "${GITHUB_WORKSPACE}/repository/llavon-ime-repository.asc" "${GITHUB_WORKSPACE}/repository" > "${work}/sources.list"
+          options=(-o "Dir::Etc::sourcelist=${work}/sources.list" -o Dir::Etc::sourceparts=-
+            -o "Dir::State::lists=${work}/lists" -o "Dir::State::status=${work}/status"
+            -o "Dir::Cache=${work}/cache" -o APT::Architecture=amd64)
+          apt-get "${options[@]}" update
+          (cd "${work}/downloads" && apt-get "${options[@]}" download llavon-ime-fcitx5)
+          cmp "${work}/downloads/"*.deb packages/*.deb
+          gh release upload "${REPOSITORY_RELEASE_TAG}" "llavon-ime-linux-pages-${REPOSITORY_RELEASE_TAG#v}.tar.gz" --clobber
+          echo "Verified metadata-only bundle is ready for the linux-packages Pages workflow."

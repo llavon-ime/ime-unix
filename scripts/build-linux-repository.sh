@@ -11,6 +11,10 @@ if [[ ! "${key}" =~ ^[A-Fa-f0-9]{40}$ ]]; then
     echo "Use the complete 40-digit repository key fingerprint." >&2; exit 2
 fi
 key="${key^^}"
+release_url="${LLAVON_REPOSITORY_RELEASE_URL:-}"
+if [[ -n "${release_url}" && ! "${release_url}" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Use a stable GitHub Release URL for external package downloads." >&2; exit 2
+fi
 export LC_ALL=C
 gpg --batch --list-secret-keys "${key}" >/dev/null
 case "${format}" in
@@ -22,12 +26,28 @@ if [[ -e "${root}" ]]; then echo "Output repository already exists: ${root}" >&2
 mkdir -p "${root}/packages"
 cp "${package}" "${root}/packages/"
 copied="${root}/packages/$(basename "${package}")"
+if [[ "${format}" == rpm && -n "${release_url}" ]]; then
+    # Keep this separately named signed RPM; never replace the original asset.
+    external_name="$(basename "${package}" .rpm)-signed.rpm"
+    mv "${copied}" "${root}/${external_name}"
+    copied="${root}/${external_name}"
+fi
 gpg --batch --armor --export "${key}" > "${output}/llavon-ime-repository.asc"
 if [[ "${format}" == "deb" ]]; then
     test "$(dpkg-deb --field "${package}" Package)" = llavon-ime-fcitx5
     test "$(dpkg-deb --field "${package}" Architecture)" = amd64
     version="$(dpkg-deb --field "${package}" Version)"
     (cd "${root}" && dpkg-scanpackages --multiversion packages /dev/null > Packages)
+    if [[ -n "${release_url}" ]]; then
+        python3 - "${root}/Packages" "${release_url}" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines()
+path.write_text('\n'.join('Filename: ' + sys.argv[2] + '/' + Path(line.split(': ', 1)[1]).name
+                         if line.startswith('Filename: ') else line for line in lines) + '\n')
+PY
+    fi
     gzip -n -9 -c "${root}/Packages" > "${root}/Packages.gz"
     (cd "${root}" && apt-ftparchive \
         -o APT::FTPArchive::Release::Origin=LlavonIME \
@@ -44,7 +64,9 @@ else
     version="$(rpm -qp --qf '%{VERSION}' "${package}")"
     rpmsign --define "_gpg_name ${key}" --define "_gpg_path ${GNUPGHOME:-${HOME}/.gnupg}" \
         --define "__gpg $(command -v gpg)" --addsign "${copied}"
-    createrepo_c --checksum sha256 "${root}"
+    repository_args=()
+    if [[ -n "${release_url}" ]]; then repository_args+=(--baseurl "${release_url}/"); fi
+    createrepo_c --checksum sha256 --general-compress-type gz "${repository_args[@]}" "${root}"
     gpg --batch --yes --local-user "${key}" --digest-algo SHA256 --armor --detach-sign \
         --output "${root}/repodata/repomd.xml.asc" "${root}/repodata/repomd.xml"
 fi
