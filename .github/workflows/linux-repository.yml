@@ -77,7 +77,6 @@ jobs:
           gpg --verify repository/fedora43/x86_64/repodata/repomd.xml.asc repository/fedora43/x86_64/repodata/repomd.xml
           rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --import repository/llavon-ime-repository.asc
           rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --checksig repository/fedora43/x86_64/*.rpm
-          tar -czf "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" -C repository .
           mkdir pages
           # Pages contains metadata only. Signed packages stay on Releases.
           tar -C repository --exclude='*.deb' --exclude='*.rpm' -cf - . | tar -C pages -xf -
@@ -85,7 +84,6 @@ jobs:
       - name: Attach repository deployment bundle to release
         run: |
           set -euo pipefail
-          gh release upload "${REPOSITORY_RELEASE_TAG}" "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" --clobber
           gh release upload "${REPOSITORY_RELEASE_TAG}" repository/llavon-ime-repository.asc --clobber
           gh release upload "${REPOSITORY_RELEASE_TAG}" repository/fedora43/x86_64/*.rpm --clobber
           # APT needs a flat source with metadata and DEB on the same host.
