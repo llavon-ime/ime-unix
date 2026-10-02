@@ -1,5 +1,8 @@
 #include "raw_key_harness.hpp"
 
+#include <algorithm>
+#include <thread>
+
 using namespace llavon::ime::rawkey;
 
 // The SmartEnglish config option: default OFF preserves existing behavior
@@ -7,6 +10,18 @@ using namespace llavon::ime::rawkey;
 // decides; it can be toggled at any time. The config is GLOBAL across
 // scenarios, so every scenario sets the config it needs explicitly.
 RAWKEY_SUITE("smart config", engine_test_smart_config) {
+    // CPU/half-logical-CPU defaults retain the normal preview and Enter commit.
+    {
+        Harness harness;
+        RAWKEY_ASSERT(harness.config().gpu_layers == 0);
+        RAWKEY_ASSERT(harness.config().thread_count ==
+                      static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2)));
+        harness.type("su3");
+        RAWKEY_ASSERT(harness.preedit() == "你");
+        harness.expect_commit("你");
+        RAWKEY_ASSERT(harness.composition_empty());
+    }
+
     // Modernized schema/parser must retain legacy decimal spellings and the
     // same rendered candidates, selected character, and submitted text.
     {

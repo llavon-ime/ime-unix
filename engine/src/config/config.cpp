@@ -213,9 +213,10 @@ std::vector<std::filesystem::path> fcitx_config_paths() {
 Config default_config() {
     Config cfg;
     cfg.model_path = installed_default_model_path();
-    cfg.gpu_layers = 999;
+    cfg.gpu_layers = 0;
     const auto threads = std::thread::hardware_concurrency();
-    cfg.thread_count = threads == 0 ? 1 : static_cast<int>(threads);
+    // Use half the logical CPUs, rounded down; unknown/single-CPU hosts use one.
+    cfg.thread_count = static_cast<int>(std::max(1u, threads / 2));
     return cfg;
 }
 

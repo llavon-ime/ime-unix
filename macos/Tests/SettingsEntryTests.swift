@@ -30,6 +30,11 @@ private final class InertClient: TextClient {
         setenv("XDG_CONFIG_HOME", root.path, 1)
         let controller = LlavonInputController(testClient: InertClient())
         let menu = controller.menu()!
+        precondition(menu.items.map(\.title) == ["設定…", "重新啟動"])
+        precondition(menu.items.allSatisfy { $0.target === controller })
+        precondition(menu.items[0].action == NSSelectorFromString("openSettings"))
+        precondition(menu.items[1].action == NSSelectorFromString("restartPredictionService"))
+        print("PASS macOS input menu contains only Settings and Restart with correct targets")
         func expect(_ page: String, _ action: () -> Void) throws {
             try? FileManager.default.removeItem(at: result)
             action()
@@ -43,11 +48,7 @@ private final class InertClient: TextClient {
             }
             fatalError("Original entry did not launch \(page)")
         }
-        for (title, page) in [("設定…", "settings"), ("管理個人化訓練…", "records")] {
-            let index = menu.indexOfItem(withTitle: title)
-            precondition(index >= 0 && menu.item(at: index)?.target === controller)
-            try expect(page) { menu.performActionForItem(at: index) }
-        }
+        try expect("settings") { menu.performActionForItem(at: menu.indexOfItem(withTitle: "設定…")) }
         try expect("phrases") { precondition(EngineBridge.shared.openSettingsApp(page: "phrases")) }
         try expect("updates") { UpdateController.shared.showSettings(nil) }
         // Retain the old launcher override used by existing development setups.
@@ -101,20 +102,21 @@ private final class InertClient: TextClient {
             wait { visible(firstPID) }
             print("PASS real macOS Settings menu cold launch")
             launched?.hide(); wait { launched!.isHidden }
-            try warm("records") { menu.performActionForItem(at: menu.indexOfItem(withTitle: "管理個人化訓練…")) }
+            try warm("settings") { menu.performActionForItem(at: menu.indexOfItem(withTitle: "設定…")) }
             wait { !launched!.isHidden && visible(firstPID) }
             precondition(running()?.processIdentifier == firstPID)
-            print("PASS real training entry restores hidden existing app")
+            print("PASS real Settings entry restores hidden existing app")
+            try warm("records") { precondition(EngineBridge.shared.openLoraManager()) }
             try warm("phrases") { precondition(EngineBridge.shared.openSettingsApp(page: "phrases")) }
             try warm("updates") { UpdateController.shared.showSettings(nil) }
             try warm("settings") { menu.performActionForItem(at: menu.indexOfItem(withTitle: "設定…")) }
             wait { visible(firstPID) }; precondition(running()?.processIdentifier == firstPID)
             print("PASS real legacy phrases and settings entries reuse one process")
             quit(launched!); wait { running() == nil }
-            try expect("records") { menu.performActionForItem(at: menu.indexOfItem(withTitle: "管理個人化訓練…")) }
+            try expect("settings") { menu.performActionForItem(at: menu.indexOfItem(withTitle: "設定…")) }
             wait { running() != nil }; launched = running()
             wait { visible(launched!.processIdentifier) }
-            print("PASS real training entry relaunch after app closes")
+            print("PASS real Settings entry relaunch after app closes")
             quit(launched!); wait { running() == nil }
         }
     }
