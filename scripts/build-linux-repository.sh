@@ -44,9 +44,13 @@ from pathlib import Path
 import sys
 path = Path(sys.argv[1])
 lines = path.read_text().splitlines()
-path.write_text('\n'.join('Filename: ' + sys.argv[2] + '/' + Path(line.split(': ', 1)[1]).name
+path.write_text('\n'.join('Filename: ' + Path(line.split(': ', 1)[1]).name
                          if line.startswith('Filename: ') else line for line in lines) + '\n')
 PY
+        # APT resolves Filename relative to its source, not as an absolute URL.
+        # Publish these indexes alongside the DEB on GitHub Releases.
+        mv "${copied}" "${root}/$(basename "${package}")"
+        copied="${root}/$(basename "${package}")"
     fi
     gzip -n -9 -c "${root}/Packages" > "${root}/Packages.gz"
     (cd "${root}" && apt-ftparchive \
