@@ -27,8 +27,8 @@ mkdir -p "${root}/packages"
 cp "${package}" "${root}/packages/"
 copied="${root}/packages/$(basename "${package}")"
 if [[ "${format}" == rpm && -n "${release_url}" ]]; then
-    # Keep this separately named signed RPM; never replace the original asset.
-    external_name="$(basename "${package}" .rpm)-signed.rpm"
+    # The canonical Release RPM is signed; manual downloads and DNF use it.
+    external_name="$(basename "${package}")"
     mv "${copied}" "${root}/${external_name}"
     copied="${root}/${external_name}"
 fi

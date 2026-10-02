@@ -304,6 +304,25 @@ jobs:
           path: .
           merge-multiple: true
 
+      - name: Sign and verify the canonical RPM before publication
+        env:
+          LINUX_REPOSITORY_PRIVATE_KEY: ${{ secrets.LINUX_REPOSITORY_PRIVATE_KEY }}
+          LINUX_REPOSITORY_KEY_ID: ${{ vars.LINUX_REPOSITORY_KEY_ID }}
+        run: |
+          set -euo pipefail
+          [[ -n "${LINUX_REPOSITORY_PRIVATE_KEY}" && "${LINUX_REPOSITORY_KEY_ID}" =~ ^[A-Fa-f0-9]{40}$ ]]
+          sudo apt-get update
+          sudo apt-get install -y gnupg rpm
+          export GNUPGHOME="${RUNNER_TEMP}/rpm-release-key"
+          mkdir -m700 "${GNUPGHOME}"
+          trap 'gpgconf --kill all || true; rm -rf "${GNUPGHOME}"' EXIT
+          printf '%s' "${LINUX_REPOSITORY_PRIVATE_KEY}" | gpg --batch --import
+          rpmsign --define "_gpg_name ${LINUX_REPOSITORY_KEY_ID}" --define "_gpg_path ${GNUPGHOME}" \
+            --define "__gpg $(command -v gpg)" --addsign dist/linux/*.rpm
+          gpg --batch --armor --export "${LINUX_REPOSITORY_KEY_ID}" > "${RUNNER_TEMP}/rpm-release-key.asc"
+          rpm --dbpath "${RUNNER_TEMP}/rpm-release-verification" --import "${RUNNER_TEMP}/rpm-release-key.asc"
+          rpm --dbpath "${RUNNER_TEMP}/rpm-release-verification" --checksig dist/linux/*.rpm | grep -q 'signatures OK'
+
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
