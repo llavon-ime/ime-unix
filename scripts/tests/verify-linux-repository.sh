@@ -72,6 +72,38 @@ dnf "${dnf_options[@]}" makecache
 dnf "${dnf_options[@]}" install --downloadonly --downloaddir "${work}/dnf-downloads" llavon-ime-fcitx5
 cmp "${work}/dnf-downloads/"*.rpm "${work}/repo/fedora43/x86_64/packages/"*.rpm
 
+# Metadata-only hosting points to separately published GitHub assets. Keep the
+# local mode above intact, and verify URLs/hashes before stripping packages.
+export LLAVON_REPOSITORY_RELEASE_URL="https://github.com/llavon-ime/ime-unix/releases/download/v1.2.3"
+bash "${ROOT_DIR}/scripts/build-linux-repository.sh" deb "${work}/llavon-ime-fcitx5_1.2.3_amd64.deb" "${work}/external" "${key}"
+bash "${ROOT_DIR}/scripts/build-linux-repository.sh" rpm "${work}/rpm/RPMS/x86_64/llavon-ime-fcitx5-1.2.3-1.x86_64.rpm" "${work}/external" "${key}"
+gpg --verify "${work}/external/debian13/amd64/InRelease"
+gpg --verify "${work}/external/fedora43/x86_64/repodata/repomd.xml.asc" "${work}/external/fedora43/x86_64/repodata/repomd.xml"
+python3 - "${work}/external" "${LLAVON_REPOSITORY_RELEASE_URL}" <<'PY'
+import gzip
+import hashlib
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
+root, url = Path(sys.argv[1]), sys.argv[2]
+fields = dict(line.split(': ', 1) for line in (root / 'debian13/amd64/Packages').read_text().splitlines() if ': ' in line)
+assert fields['Filename'] == url + '/llavon-ime-fcitx5_1.2.3_amd64.deb'
+deb = root / 'debian13/amd64/packages/llavon-ime-fcitx5_1.2.3_amd64.deb'
+assert fields['SHA256'] == hashlib.sha256(deb.read_bytes()).hexdigest()
+rpmroot = root / 'fedora43/x86_64'
+metadata = ET.parse(rpmroot / 'repodata/repomd.xml')
+repo_ns = {'r': 'http://linux.duke.edu/metadata/repo'}
+primary = metadata.find("r:data[@type='primary']/r:location", repo_ns)
+tree = ET.fromstring(gzip.decompress((rpmroot / primary.attrib['href']).read_bytes()))
+ns = {'c': 'http://linux.duke.edu/metadata/common'}
+package = tree.find('c:package', ns)
+location = package.find('c:location', ns)
+assert location.attrib['{http://www.w3.org/XML/1998/namespace}base'] == url + '/'
+assert location.attrib['href'] == 'llavon-ime-fcitx5-1.2.3-1.x86_64-signed.rpm'
+assert package.find('c:checksum', ns).text == hashlib.sha256((rpmroot / location.attrib['href']).read_bytes()).hexdigest()
+PY
+unset LLAVON_REPOSITORY_RELEASE_URL
+
 # A signed index referencing a modified package must fail integrity verification.
 printf 'tampered\n' >> "${work}/repo/debian13/amd64/packages/"*.deb
 rm "${work}/downloads/"*.deb
