@@ -99,10 +99,11 @@ ns = {'c': 'http://linux.duke.edu/metadata/common'}
 package = tree.find('c:package', ns)
 location = package.find('c:location', ns)
 assert location.attrib['{http://www.w3.org/XML/1998/namespace}base'] == url + '/'
-assert location.attrib['href'] == 'llavon-ime-fcitx5-1.2.3-1.x86_64-signed.rpm'
+assert location.attrib['href'] == 'llavon-ime-fcitx5-1.2.3-1.x86_64.rpm'
 assert package.find('c:checksum', ns).text == hashlib.sha256((rpmroot / location.attrib['href']).read_bytes()).hexdigest()
 PY
 unset LLAVON_REPOSITORY_RELEASE_URL
+rpm --dbpath "${work}/rpm-db" --checksig "${work}/external/fedora43/x86_64/"*.rpm | grep -q 'signatures OK'
 
 # Exercise the flat Release-asset layout with APT, not just string assertions.
 printf 'deb [signed-by=%s] file:%s/debian13/amd64 ./\n' "${work}/public.gpg" "${work}/external" > "${work}/sources.list"

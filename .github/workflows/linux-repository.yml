@@ -58,8 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           gh release download "${REPOSITORY_RELEASE_TAG}" --pattern '*.deb' --pattern '*.rpm' --dir packages
-          # A rerun also sees the separately published signed RPM; rebuild from
-          # the original release package, never from our previous output.
+          # Ignore legacy duplicates during migration to one canonical RPM.
           find packages -name '*-signed.rpm' -delete
           [[ "$(find packages -name '*.deb' | wc -l)" == 1 ]]
           [[ "$(find packages -name '*.rpm' | wc -l)" == 1 ]]
@@ -77,7 +76,7 @@ jobs:
           gpg --verify repository/debian13/amd64/InRelease
           gpg --verify repository/fedora43/x86_64/repodata/repomd.xml.asc repository/fedora43/x86_64/repodata/repomd.xml
           rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --import repository/llavon-ime-repository.asc
-          rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --checksig repository/fedora43/x86_64/*-signed.rpm
+          rpm --dbpath "${RUNNER_TEMP}/rpm-verification" --checksig repository/fedora43/x86_64/*.rpm
           tar -czf "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" -C repository .
           mkdir pages
           # Pages contains metadata only. Signed packages stay on Releases.
@@ -88,7 +87,7 @@ jobs:
           set -euo pipefail
           gh release upload "${REPOSITORY_RELEASE_TAG}" "llavon-ime-linux-repository-${REPOSITORY_RELEASE_TAG#v}.tar.gz" --clobber
           gh release upload "${REPOSITORY_RELEASE_TAG}" repository/llavon-ime-repository.asc --clobber
-          gh release upload "${REPOSITORY_RELEASE_TAG}" repository/fedora43/x86_64/*-signed.rpm --clobber
+          gh release upload "${REPOSITORY_RELEASE_TAG}" repository/fedora43/x86_64/*.rpm --clobber
           # APT needs a flat source with metadata and DEB on the same host.
           gh release upload "${REPOSITORY_RELEASE_TAG}" repository/debian13/amd64/{InRelease,Release,Release.gpg,Packages,Packages.gz} --clobber
       - name: Verify APT follows the Release package URL
