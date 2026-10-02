@@ -9,6 +9,8 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
 
     private var controller: SPUStandardUpdaterController?
     private var availableVersion: String?
+    private var readyVersion: String?
+    private var readyOnQuit = false
     private(set) var preparingInstallation = false
     private(set) var status = "開發版本未啟用自動更新"
 
@@ -17,8 +19,28 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         probeBusy: Self.probeTraining,
         waiting: { [weak self] message in self?.setStatus(message) })
 
+    private lazy var readyReminder = UpdateReadyReminder(
+        gate: UpdateInstallationGate(
+            hasComposition: { EngineBridge.shared.hasPendingComposition },
+            probeBusy: Self.probeTraining,
+            waiting: { [weak self] _ in
+                self?.setStatus("更新已下載；組字與訓練完成後會顯示安裝提示，也可按「安裝並重新啟動…」。")
+            }),
+        present: { [weak self] in
+            guard let self, let updater = self.updater,
+                  updater.canCheckForUpdates, !self.preparingInstallation else { return false }
+            self.setDownloadedStatus()
+            // Resume Sparkle's downloaded update into its consent UI, not its
+            // immediate-install handler. Authorization still belongs to Sparkle.
+            updater.checkForUpdates()
+            return true
+        })
+
     var updater: SPUUpdater? { controller?.updater }
-    var checkMenuTitle: String { availableVersion.map { "更新至 \($0)…" } ?? "檢查更新…" }
+    var checkMenuTitle: String {
+        if let readyVersion { return "安裝 \(readyVersion) 並重新啟動…" }
+        return availableVersion.map { "更新至 \($0)…" } ?? "檢查更新…"
+    }
 
     func start() {
         guard controller == nil,
@@ -47,7 +69,9 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
             return
         }
         guard updater.canCheckForUpdates else { return }
-        setStatus("正在檢查更新…")
+        if let readyVersion { readyReminder.userAcknowledged(version: readyVersion) }
+        else { readyReminder.cancel() }
+        setStatus(readyVersion == nil ? "正在檢查更新…" : "正在開啟安裝與重新啟動提示…")
         updater.checkForUpdates()
     }
 
@@ -79,7 +103,8 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
                 "context": "InputMethodKit：由應用程式提供游標周圍文字，不需輔助使用權限。",
                 "status": status, "enabled": updater != nil, "checks": updater?.automaticallyChecksForUpdates ?? false,
                 "downloads": updater?.automaticallyDownloadsUpdates ?? false,
-                "allowsDownloads": updater?.allowsAutomaticUpdates ?? false, "canCheck": updater?.canCheckForUpdates ?? false]
+                "allowsDownloads": updater?.allowsAutomaticUpdates ?? false, "canCheck": updater?.canCheckForUpdates ?? false,
+                "readyToInstall": readyVersion != nil]
     }
     // Sparkle's package installer is allowed to proceed only after the app is
     // idle. Also used by applicationShouldTerminate for a last-moment check.
@@ -90,26 +115,52 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
     func updater(_ updater: SPUUpdater, shouldPostponeRelaunchForUpdate item: SUAppcastItem,
                  untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
         preparingInstallation = true
+        readyReminder.cancel()
         waitUntilIdle(installHandler)
         return true
     }
 
     func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         availableVersion = item.displayVersionString
-        setStatus("有新版本 \(item.displayVersionString)")
+        if readyVersion == item.displayVersionString { setDownloadedStatus() }
+        else { setStatus("有新版本 \(item.displayVersionString)") }
     }
 
     func updater(_ updater: SPUUpdater, didDownloadUpdate item: SUAppcastItem) {
-        setStatus("\(item.displayVersionString) 已下載，等待安裝")
+        readyVersion = item.displayVersionString
+        setStatus("\(item.displayVersionString) 已下載，正在準備安裝提示…")
+    }
+
+    func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
+                 immediateInstallationBlock: @escaping () -> Void) -> Bool {
+        readyVersion = item.displayVersionString
+        readyOnQuit = true
+        setDownloadedStatus()
+        // An input method rarely quits. Once the background cycle completes,
+        // show the ready-to-install UI instead of waiting indefinitely for quit.
+        return false
+    }
+
+    func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: Error?) {
+        if error == nil, readyOnQuit, let readyVersion {
+            readyOnQuit = false
+            readyReminder.ready(version: readyVersion)
+        }
     }
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         availableVersion = nil
+        readyVersion = nil
+        readyOnQuit = false
+        readyReminder.cancel()
         setStatus("目前沒有可安裝的新版")
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         preparingInstallation = false
+        readyVersion = nil
+        readyOnQuit = false
+        readyReminder.cancel()
         installationGate.cancel()
         let code = (error as NSError).code
         if code == SUError.noUpdateError.rawValue {
@@ -121,7 +172,8 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         }
     }
 
-    // LSUIElement input methods should not steal focus while the user types.
+    // Discovery stays quiet. Only downloaded/prepared updates automatically
+    // open the install UI, after composition and personalization work are idle.
     nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
 
     nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
@@ -133,8 +185,28 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
                                                    forUpdate update: SUAppcastItem,
                                                    state: SPUUserUpdateState) {
         MainActor.assumeIsolated {
-            if !state.userInitiated { setStatus("\(update.displayVersionString) 已就緒，從選單檢查更新即可安裝") }
+            guard !state.userInitiated else { return }
+            if state.stage == .downloaded || state.stage == .installing {
+                readyVersion = update.displayVersionString
+                setDownloadedStatus()
+                if !handleShowingUpdate { readyReminder.ready(version: update.displayVersionString) }
+            } else {
+                setStatus("有新版本 \(update.displayVersionString)；請按「檢查更新…」開啟更新視窗。")
+            }
         }
+    }
+
+    nonisolated func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        MainActor.assumeIsolated { readyReminder.userAcknowledged(version: update.displayVersionString) }
+    }
+
+    nonisolated func standardUserDriverWillFinishUpdateSession() {
+        MainActor.assumeIsolated { readyReminder.cancel() }
+    }
+
+    private func setDownloadedStatus() {
+        guard let readyVersion else { return }
+        setStatus("\(readyVersion) 已下載，可安裝；請在安裝提示中確認，或按「安裝並重新啟動…」。")
     }
 
     private func setStatus(_ message: String) {

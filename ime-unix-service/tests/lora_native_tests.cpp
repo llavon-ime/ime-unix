@@ -753,22 +753,42 @@ void NativeTests::hostSettingsMigration() {
     auto* automatic = page->findChild<QCheckBox*>("automaticUpdates");
     auto* downloads = page->findChild<QCheckBox*>("automaticDownloads");
     auto* status = page->findChild<QLabel*>("hostStatus");
+    auto* instructions = page->findChild<QLabel*>("updateInstructions"); QVERIFY(instructions);
+    QVERIFY(instructions->text().contains(QStringLiteral("不會自動安裝")));
+    QVERIFY(instructions->text().contains(QStringLiteral("顯示安裝提示")));
+    QVERIFY(instructions->text().contains(QStringLiteral("按鈕會改為「安裝並重新啟動…」")));
+    QVERIFY(instructions->text().contains(QStringLiteral("管理員授權")));
     QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("尚未連接")), 5000);
     QVERIFY(!check->isEnabled()); QVERIFY(!automatic->isEnabled());
     const auto fixture = qEnvironmentVariable("LLAVON_SETTINGS_HOST_FIXTURE");
     if (fixture.isEmpty()) return;
-    QProcess server; server.start(fixture, {"--serve"});
+    QProcess server;
+    auto hostEnvironment = QProcessEnvironment::systemEnvironment();
+    const auto readyPath = directory.path() + "/download-ready";
+    hostEnvironment.insert("LLAVON_TEST_READY_FILE", readyPath);
+    server.setProcessEnvironment(hostEnvironment); server.start(fixture, {"--serve"});
     QVERIFY(server.waitForReadyRead(5000)); QVERIFY(server.readAllStandardOutput().contains("READY"));
     const auto cleanup = qScopeGuard([&server] { server.kill(); server.waitForFinished(3000); });
     page->refresh(); QTRY_VERIFY_WITH_TIMEOUT(automatic->isEnabled(), 5000);
     QVERIFY(automatic->isChecked()); QVERIFY(!downloads->isChecked());
+    QCOMPARE(check->text(), QStringLiteral("檢查更新…"));
     QTest::mouseClick(automatic, Qt::LeftButton, Qt::NoModifier, QPoint(8, automatic->height() / 2));
     QTRY_VERIFY_WITH_TIMEOUT(automatic->isEnabled(), 5000); QVERIFY(!automatic->isChecked());
     QTest::mouseClick(downloads, Qt::LeftButton, Qt::NoModifier, QPoint(8, downloads->height() / 2));
     QTRY_VERIFY_WITH_TIMEOUT(downloads->isEnabled(), 5000); QVERIFY(downloads->isChecked());
     page->refresh(); QTRY_VERIFY_WITH_TIMEOUT(downloads->isEnabled(), 5000); QVERIFY(downloads->isChecked());
+    capture(window, "34-updates-before-download");
+    QFile readyFile(readyPath); QVERIFY(readyFile.open(QIODevice::WriteOnly)); readyFile.close();
+    // Background readiness must change the visible page via its periodic
+    // refresh, without another check/update button click.
+    QTRY_COMPARE_WITH_TIMEOUT(check->text(), QStringLiteral("安裝並重新啟動…"), 6000);
+    QVERIFY(status->text().contains(QStringLiteral("已下載，可安裝")));
     QTest::mouseClick(check, Qt::LeftButton);
-    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("已要求 Sparkle")), 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("已下載")), 5000);
+    QCOMPARE(check->text(), QStringLiteral("安裝並重新啟動…"));
+    QVERIFY(status->text().contains(QStringLiteral("或按「安裝並重新啟動…」")));
+    page->refresh(); QTRY_VERIFY_WITH_TIMEOUT(check->isEnabled(), 5000);
+    QCOMPARE(check->text(), QStringLiteral("安裝並重新啟動…"));
     capture(window, "34-migrated-updates");
     window.showPage("about");
     auto* diagnostics = window.findChild<llavon::lora::HostSettingsPage*>("hostDiagnostics");
@@ -778,6 +798,7 @@ void NativeTests::hostSettingsMigration() {
     server.kill(); QVERIFY(server.waitForFinished(3000));
     page->refresh(); QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("尚未連接")), 5000);
     QVERIFY(!downloads->isEnabled()); QVERIFY(!automatic->isEnabled());
+    QCOMPARE(check->text(), QStringLiteral("檢查更新…"));
 #else
     llavon::lora::HostSettingsPage page(false); page.show();
     QTRY_VERIFY_WITH_TIMEOUT(page.findChild<QLabel*>("hostStatus")->text().contains(QStringLiteral("尚未連接")), 5000);
