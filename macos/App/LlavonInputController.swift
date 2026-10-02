@@ -88,30 +88,13 @@ final class LlavonInputController: IMKInputController, EngineHost {
         EngineBridge.shared.finalize(contextId)
     }
 
-    // Extra entries shown under the input source in the input menu.
+    // Keep the input menu minimal; all management pages live in Settings.
     override func menu() -> NSMenu! {
         let menu = NSMenu(title: "LlavonIME")
         let settings = menu.addItem(withTitle: "設定…",
                                     action: #selector(openSettings),
                                     keyEquivalent: "")
         settings.target = self
-        let training = menu.addItem(withTitle: "管理個人化訓練…",
-                                    action: #selector(openLoraManager),
-                                    keyEquivalent: "")
-        training.target = self
-        let update = menu.addItem(withTitle: "檢查更新…",
-                                  action: #selector(UpdateController.checkForUpdates(_:)),
-                                  keyEquivalent: "")
-        let updateSettings = menu.addItem(withTitle: "軟體更新設定…",
-                                          action: #selector(UpdateController.showSettings(_:)),
-                                          keyEquivalent: "")
-        // InputMethodKit's legacy declaration lacks main-actor annotations;
-        // macOS invokes menu construction on the main thread.
-        MainActor.assumeIsolated {
-            update.title = UpdateController.shared.checkMenuTitle
-            update.target = UpdateController.shared
-            updateSettings.target = UpdateController.shared
-        }
         let restart = menu.addItem(withTitle: "重新啟動",
                                    action: #selector(restartPredictionService),
                                    keyEquivalent: "")
@@ -124,14 +107,6 @@ final class LlavonInputController: IMKInputController, EngineHost {
             let alert = NSAlert()
             alert.messageText = "找不到拉風設定與個人化程式"
             alert.informativeText = "請重新安裝包含設定程式的完整套件。"
-            alert.runModal()
-        }
-    }
-
-    @objc private func openLoraManager() {
-        if !EngineBridge.shared.openLoraManager() {
-            let alert = NSAlert()
-            alert.messageText = "找不到個人化訓練管理程式"
             alert.runModal()
         }
     }

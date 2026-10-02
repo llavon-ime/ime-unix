@@ -6,6 +6,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "config/config.hpp"
@@ -179,8 +180,13 @@ int run_config_tests() {
     bool ok = test_config_schema();
     auto cfg = llavon::ime::default_config();
     ok = ok && cfg.context_length == 512;
-    ok = ok && cfg.thread_count >= 1;
-    ok = ok && cfg.gpu_layers == 999;
+    const auto expected_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2));
+    ok = ok && cfg.thread_count == expected_threads;
+    ok = ok && cfg.gpu_layers == 0;
+    const auto omitted_runtime = llavon::ime::config_from_json(nlohmann::json::object());
+    ok = ok && omitted_runtime.thread_count == expected_threads && omitted_runtime.gpu_layers == 0;
+    const auto explicit_runtime = llavon::ime::config_from_json({{"thread_count", 3}, {"gpu_layers", 999}});
+    ok = ok && explicit_runtime.thread_count == 3 && explicit_runtime.gpu_layers == 999;
     ok = ok && cfg.idle_timeout_seconds == 1800;
     ok = ok && cfg.keyboard_layout == "standard";
     ok = ok && cfg.selection_keys == "1234567890";
@@ -197,6 +203,8 @@ int run_config_tests() {
     auto json = llavon::ime::to_json(cfg);
     auto roundtrip = llavon::ime::config_from_json(json);
     ok = ok && roundtrip.context_length == cfg.context_length;
+    ok = ok && roundtrip.thread_count == cfg.thread_count;
+    ok = ok && roundtrip.gpu_layers == cfg.gpu_layers;
     ok = ok && roundtrip.idle_timeout_seconds == cfg.idle_timeout_seconds;
     ok = ok && roundtrip.selection_keys == cfg.selection_keys;
     ok = ok && roundtrip.select_phrase == cfg.select_phrase;
@@ -245,6 +253,8 @@ int run_config_tests() {
     std::filesystem::remove_all(config_root);
     setenv("XDG_CONFIG_HOME", config_root.c_str(), 1);
     std::filesystem::create_directories(llavon::ime::config_path().parent_path());
+    const auto missing_file = llavon::ime::load_config();
+    ok = ok && missing_file.thread_count == expected_threads && missing_file.gpu_layers == 0;
     {
         std::ofstream output(llavon::ime::config_path());
         output << "ModelPath=/tmp/model.gguf\n"
@@ -290,6 +300,7 @@ int run_config_tests() {
     }
     const auto quoted_space_loaded = llavon::ime::load_config();
     ok = ok && quoted_space_loaded.model_path == "/Library/Application Support/llavon-ime/models/model.gguf";
+    ok = ok && quoted_space_loaded.thread_count == expected_threads && quoted_space_loaded.gpu_layers == 0;
 
     {
         std::ofstream output(llavon::ime::config_path());
