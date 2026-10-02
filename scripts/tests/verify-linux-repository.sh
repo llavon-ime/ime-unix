@@ -87,8 +87,8 @@ import sys
 import xml.etree.ElementTree as ET
 root, url = Path(sys.argv[1]), sys.argv[2]
 fields = dict(line.split(': ', 1) for line in (root / 'debian13/amd64/Packages').read_text().splitlines() if ': ' in line)
-assert fields['Filename'] == url + '/llavon-ime-fcitx5_1.2.3_amd64.deb'
-deb = root / 'debian13/amd64/packages/llavon-ime-fcitx5_1.2.3_amd64.deb'
+assert fields['Filename'] == 'llavon-ime-fcitx5_1.2.3_amd64.deb'
+deb = root / 'debian13/amd64/llavon-ime-fcitx5_1.2.3_amd64.deb'
 assert fields['SHA256'] == hashlib.sha256(deb.read_bytes()).hexdigest()
 rpmroot = root / 'fedora43/x86_64'
 metadata = ET.parse(rpmroot / 'repodata/repomd.xml')
@@ -103,6 +103,15 @@ assert location.attrib['href'] == 'llavon-ime-fcitx5-1.2.3-1.x86_64-signed.rpm'
 assert package.find('c:checksum', ns).text == hashlib.sha256((rpmroot / location.attrib['href']).read_bytes()).hexdigest()
 PY
 unset LLAVON_REPOSITORY_RELEASE_URL
+
+# Exercise the flat Release-asset layout with APT, not just string assertions.
+printf 'deb [signed-by=%s] file:%s/debian13/amd64 ./\n' "${work}/public.gpg" "${work}/external" > "${work}/sources.list"
+rm "${work}/downloads/"*.deb
+apt-get "${options[@]}" update
+(cd "${work}/downloads" && apt-get "${options[@]}" download llavon-ime-fcitx5)
+cmp "${work}/downloads/"*.deb "${work}/llavon-ime-fcitx5_1.2.3_amd64.deb"
+printf 'deb [signed-by=%s] file:%s/debian13/amd64 ./\n' "${work}/public.gpg" "${work}/repo" > "${work}/sources.list"
+apt-get "${options[@]}" update
 
 # A signed index referencing a modified package must fail integrity verification.
 printf 'tampered\n' >> "${work}/repo/debian13/amd64/packages/"*.deb
