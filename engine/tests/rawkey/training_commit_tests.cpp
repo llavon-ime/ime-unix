@@ -261,10 +261,9 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
     UnixSocketServer server;
     server.bind_listen(socket);
     std::atomic<bool> discarded{false};
-    std::atomic<bool> closed{false};
     std::atomic<bool> matched{true};
-    std::promise<void> commit_completed;
-    auto committed = commit_completed.get_future();
+    std::promise<void> commit_requested;
+    auto requested = commit_requested.get_future();
     protocol::SessionId committed_id{};
     std::thread worker([&] {
         try {
@@ -281,10 +280,9 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
                 if (std::holds_alternative<protocol::StatusRequest>(message)) {
                     connection.send_all(protocol::encode(protocol::StatusResponse{epoch, false, false, 0, 8, std::nullopt}));
                 } else if (std::holds_alternative<protocol::OpenSessionRequest>(message)) {
-                    // Return commits while the open response is still in flight.
-                    // Its eventual response must close the orphaned session,
-                    // without ending the connection used to withdraw the sample.
-                    if (committed.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                    // Return now waits for this open/prediction round trip.
+                    // Release it only after the raw-key submission is requested.
+                    if (requested.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
                         matched = false;
                         break;
                     }
@@ -302,7 +300,6 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
                     break;
                 } else if (const auto* close = std::get_if<protocol::CloseSessionRequest>(&message)) {
                     connection.send_all(protocol::encode(protocol::CloseSessionResponse{close->session_id, true}));
-                    closed = true;
                 } else { matched = false; break; }
             }
         } catch (...) { matched = false; }
@@ -315,7 +312,10 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
         harness.set_surrounding("早安", 2, 2);
         harness.type("su3");
         harness.expect_commit("你");
-        commit_completed.set_value();
+        RAWKEY_ASSERT(harness.commits().empty());
+        commit_requested.set_value();
+        RAWKEY_ASSERT(harness.pump_until([&] { return harness.composition_empty(); }));
+        RAWKEY_ASSERT(harness.last_commit() == "你");
         // These flags are set by the fake service without posting UI work.
         // Pump in short slices so waiting does not consume the correction window.
         const auto wait_for = [&](const std::atomic<bool>& flag) {
@@ -327,10 +327,9 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
             } while (std::chrono::steady_clock::now() < deadline);
             return false;
         };
-        const bool orphan_closed = wait_for(closed);
         harness.set_surrounding("早安你", 3, 3);
         harness.key("BackSpace");
-        completed = wait_for(discarded) && orphan_closed;
+        completed = wait_for(discarded);
         harness.detach();
     }
     if (!discarded.load()) {

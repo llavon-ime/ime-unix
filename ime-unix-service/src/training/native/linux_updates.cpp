@@ -147,7 +147,7 @@ void LinuxPackageUpdater::finished(uint exit, uint runtime) {
 LinuxUpdatesPage::LinuxUpdatesPage(std::function<bool()> trainingBusy, QWidget* parent)
     : QWidget(parent), trainingBusy_(std::move(trainingBusy)) {
     auto* layout = new QVBoxLayout(this);
-    auto* explanation = new QLabel(QStringLiteral("由拉風檢查與操作，透過系統套件管理器安裝。請先加入對應發行版的官方更新來源。"));
+    auto* explanation = new QLabel(QStringLiteral("透過系統套件管理器更新，需先加入發行版的官方更新來源。"));
     explanation->setWordWrap(true); layout->addWidget(explanation);
     automatic_ = new NativeCheckBox(QStringLiteral("設定視窗開啟時，每日自動檢查更新")); automatic_->setObjectName("automaticUpdates");
     automatic_->setChecked(QSettings().value("updates/automatic", false).toBool()); layout->addWidget(automatic_);

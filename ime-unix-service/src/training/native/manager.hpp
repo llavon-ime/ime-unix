@@ -23,6 +23,7 @@ namespace llavon::lora {
 class HistoryGraph;
 class SettingsPage;
 class LinuxUpdatesPage;
+class GuidePage;
 
 class Backend final : public QObject {
     Q_OBJECT
@@ -61,6 +62,7 @@ private:
     QWidget* trainingPage();
     QWidget* historyPage();
     void ensurePersonalizationPages();
+    void dismissQuickStart();
     void act(const QString& path, const QJsonObject& body = {}, Backend::Reply reply = {});
     void renderRecords(const QJsonObject& data);
     void renderProtection(const QJsonObject& data);
@@ -78,7 +80,11 @@ private:
     QStackedWidget* pages_;
     SettingsPage* settings_;
     SettingsPage* phrases_ = nullptr;
-    QLabel *heading_, *subtitle_, *message_, *collection_, *counts_, *pageInfo_, *model_, *trainer_, *device_, *job_, *historyDetail_, *emptyRecords_;
+    GuidePage* guide_ = nullptr;
+    QWidget* quickStart_;
+    QPushButton* guideButton_;
+    bool quickStartDismissed_ = false;
+    QLabel *heading_, *message_, *collection_, *counts_, *pageInfo_, *model_, *trainer_, *device_, *job_, *historyDetail_, *emptyRecords_;
     QLineEdit *password_, *confirmation_, *trainPassword_;
     QLabel* trainPasswordLabel_ = nullptr;
     QComboBox *filter_, *strength_, *base_;

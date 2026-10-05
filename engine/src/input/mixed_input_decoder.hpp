@@ -39,6 +39,11 @@ struct MixedPath {
     std::vector<MixedSegment> segments;
     std::u16string rendered;
     double score = 0;
+    // Explicit boundary repairs are offered in the candidate panel, never used
+    // to override an automatic opaque-token interpretation.
+    bool boundary_alternative = false;
+    // An additional model-refined copy beside its unchanged dictionary repair.
+    bool boundary_model_refined = false;
 };
 
 struct MixedDecodeResult {
@@ -78,7 +83,8 @@ public:
     MixedDecodeResult decode(std::u16string_view raw, BopomofoKeyboardLayout layout, bool space_tone,
                              std::u16string_view context = {}) const;
 
-    // Best/preferred path first, then the raw choice and ranked alternatives.
+    // Best/preferred path first, then raw, an explicit boundary repair when
+    // available, and the remaining ranked alternatives.
     // Earlier-character choices and alternative boundaries are lattice paths;
     // remaining rows are filled with final-character homophones.
     std::vector<MixedCandidateEntry> expand_candidates(

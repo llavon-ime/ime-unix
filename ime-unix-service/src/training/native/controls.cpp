@@ -11,7 +11,11 @@
 #include <QStyleOptionButton>
 #include <QStylePainter>
 #include <QWheelEvent>
+#include <QHBoxLayout>
+#include <QLineEdit>
+#include <QPushButton>
 #include <algorithm>
+#include <utility>
 
 namespace llavon::lora {
 namespace {
@@ -65,6 +69,29 @@ public:
 private:
     QComboBox* combo_;
 };
+}
+
+QWidget* recordingCredentials(QWidget* parent) {
+    auto* content = new QWidget(parent);
+    auto* row = new QHBoxLayout(content); row->setContentsMargins(0, 0, 0, 0);
+    for (const auto& entry : {std::pair{"reviewPassword", QStringLiteral("資料密碼")},
+             std::pair{"confirmation", QStringLiteral("再次輸入密碼")}}) {
+        auto* input = new QLineEdit; input->setObjectName(entry.first);
+        input->setPlaceholderText(entry.second); input->setAccessibleName(entry.second);
+        input->setEchoMode(QLineEdit::Password); input->setMinimumHeight(32);
+        row->addWidget(input, 1);
+    }
+    for (const auto& entry : {std::pair{"unlock", QStringLiteral("解鎖檢視")},
+             std::pair{"setup", QStringLiteral("設定並收集")}, std::pair{"lock", QStringLiteral("鎖定")},
+             std::pair{"recording", QStringLiteral("暫停收集")}}) {
+        auto* action = new QPushButton(entry.second); action->setObjectName(entry.first);
+        action->setAutoDefault(false); action->setMinimumHeight(34);
+        action->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        if (QString::fromLatin1(entry.first) == "unlock" || QString::fromLatin1(entry.first) == "setup") action->setProperty("primary", true);
+        row->addWidget(action);
+    }
+    row->addStretch();
+    return content;
 }
 
 NativeComboBox::NativeComboBox(QWidget* parent) : QComboBox(parent) {

@@ -61,6 +61,7 @@ set(service_src "${training}/..")
 
 set(engine_src "${CMAKE_CURRENT_SOURCE_DIR}/../../../../engine/src")
 add_library(llavon_lora_widgets STATIC manager.hpp manager.cpp appearance.hpp appearance.cpp controls.hpp controls.cpp host_settings.hpp host_settings.cpp backend.cpp history_graph.hpp history_graph.cpp
+    guide.hpp guide.cpp guide_illustration.hpp guide_illustration.cpp
     settings.hpp settings.cpp phrase_table.hpp phrase_table.cpp phrase_list.hpp phrase_list.cpp "${engine_src}/config/config.cpp" "${engine_src}/config/config_schema.cpp"
     "${engine_src}/phrase_override/phrase_override_store.cpp" "${engine_src}/text/utf.cpp")
 target_compile_features(llavon_lora_widgets PUBLIC cxx_std_23)
@@ -129,10 +130,18 @@ install(PROGRAMS llavon-ime-settings llavon-ime-phrases DESTINATION "${CMAKE_INS
 if(APPLE)
     # Keep the existing menu-launched bin name and add a Finder-launchable app.
     set_target_properties(llavon-ime-lora-gui PROPERTIES MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist.in"
         MACOSX_BUNDLE_ICON_FILE "AppIcon.icns"
         MACOSX_BUNDLE_GUI_IDENTIFIER "org.llavon-ime.lora-manager"
-        MACOSX_BUNDLE_BUNDLE_NAME "拉風設定與個人化"
+        MACOSX_BUNDLE_BUNDLE_NAME "拉風輸入法"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.2.0")
+    # Finder uses localized bundle names rather than the executable filename.
+    foreach(language en zh-Hant)
+        set(localized_name "${CMAKE_CURRENT_BINARY_DIR}/${language}.lproj/InfoPlist.strings")
+        configure_file(InfoPlist.strings "${localized_name}" COPYONLY)
+        set_source_files_properties("${localized_name}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/${language}.lproj")
+        target_sources(llavon-ime-lora-gui PRIVATE "${localized_name}")
+    endforeach()
     install(TARGETS llavon-ime-lora-gui BUNDLE DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(CODE "
         set(launcher \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/llavon-ime-lora-gui\")

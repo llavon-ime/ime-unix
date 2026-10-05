@@ -30,7 +30,7 @@ private:
     QList<Entry> entries_;
     QVBoxLayout* rows_;
     QScrollArea* scroll_;
-    QLabel* empty_;
+    QWidget* empty_;
 };
 
 } // namespace llavon::lora

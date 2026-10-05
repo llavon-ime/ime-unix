@@ -108,6 +108,9 @@ struct CoreTests {
         precondition(host.commits == ["你"])
         _ = core.sendKey(context, keyCode: 0x35, charactersIgnoringModifiers: "\u{1b}",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        // The other client's Return waits for the unavailable backend's reply.
+        queue.pumpUntilIdle()
+        precondition(otherHost.commits == ["你"])
         precondition(!core.hasPendingComposition)
         core.detach(other)
 
@@ -193,6 +196,7 @@ struct CoreTests {
                 }
                 _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                                  modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                queue.pumpUntilIdle()
                 precondition(host.commits.last == expected, "\(layout), smart=\(smart): \(host.commits)")
                 core.detach(context)
                 core.stop()
@@ -242,6 +246,7 @@ struct CoreTests {
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "你")
         core.detach(context)
         core.stop()
@@ -276,6 +281,7 @@ struct CoreTests {
             precondition(core.snapshot(context)?.caret == 9)
             _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                              modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            queue.pumpUntilIdle()
             precondition(host.commits.last == "你hello你好好")
             type(core, context, keys)
             var shift = KeyModifiers()
@@ -293,6 +299,7 @@ struct CoreTests {
             precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你你好，好")
             _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                              modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            queue.pumpUntilIdle()
             precondition(host.commits.last == "你你好，好")
             core.detach(context)
             core.stop()
@@ -326,6 +333,7 @@ struct CoreTests {
                          "\(layout): deleting wrong keys preserves Chinese")
             _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                              modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            queue.pumpUntilIdle()
             precondition(host.commits.last == "你好")
             if layout != "dachen_cp26" {
                 let longError = String(repeating: String(broken.first!), count: 24)
@@ -339,6 +347,7 @@ struct CoreTests {
                 precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你好")
                 _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                                  modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                queue.pumpUntilIdle()
                 precondition(host.commits.last == "你好")
             }
             core.detach(context)
@@ -363,21 +372,25 @@ struct CoreTests {
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "另外現在app沒有圖標欸")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "另外現在app沒有圖標欸")
         type(core, context, "o4]")
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "欸]")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "欸]")
         type(core, context, "j g n0 ")
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "巫師三")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "巫師三")
         type(core, context, "j g ")
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "j g ")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "j g ")
         precondition(core.reloadConfigJson(#"{"keyboard_layout":"ibm","smart_english":true,"shift_letter_keys":"directly_put_to_buffer"}"#))
         type(core, context, ".")
@@ -390,11 +403,13 @@ struct CoreTests {
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "readme.md")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "readme.md")
         type(core, context, "7a,")
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "你")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
         precondition(host.commits.last == "你")
         core.detach(context)
         core.stop()
