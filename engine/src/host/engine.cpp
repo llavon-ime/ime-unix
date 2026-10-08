@@ -12,6 +12,7 @@
 #include "engine/pending_model_preview.hpp"
 #include "host/render_state.hpp"
 #include "input/input_processor.hpp"
+#include "input/keypad.hpp"
 #include "input/mixed_input_decoder.hpp"
 #include "text/utf.hpp"
 #include "util/env.hpp"
@@ -174,7 +175,19 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
     if (key.sym == keysym::BackSpace) withdraw_recent_commit(context);
     else recent_commit_.reset();
     auto& session = find_or_create(context);
+    const auto normalized_key = normalize_key(key);
+    const bool submit = !session.symbol_menu.active() &&
+        ((is_return_keysym(static_cast<std::uint32_t>(normalized_key.sym)) && !normalized_key.has_shortcut_modifier() &&
+          !session.choosing_candidate() && !session.buffer.marked_range()) ||
+         (normalized_key.sym == U' ' && normalized_key.raw_has(InputKeyState::Shift)));
+    if (session.deferred_commit && submit) return true;
+    session.deferred_commit.reset();
     if (config_.smart_english) resync_context(context, session);
+    if (submit && !InputProcessor::composition_empty(session) &&
+        (session.prediction.pending || !pending_model_idle(context))) {
+        session.deferred_commit = key;
+        return true;
+    }
     const auto effect = processor_.process(key, session, config_);
     apply_effect(context, session, effect);
     if (!effect.handled) {
@@ -193,12 +206,14 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
 void Engine::select_candidate(ContextId context, int index) {
     auto* session = find(context);
     if (session == nullptr) return;
+    session->deferred_commit.reset();
     apply_effect(context, *session, processor_.select_candidate(*session, config_, index));
 }
 
 void Engine::select_symbol(ContextId context, int index, std::uint64_t epoch) {
     auto* session = find(context);
     if (session == nullptr) return;
+    session->deferred_commit.reset();
     apply_effect(context, *session, processor_.select_symbol(*session, config_, index, epoch));
 }
 
@@ -240,6 +255,7 @@ void Engine::deactivate(ContextId context) {
 void Engine::reset(ContextId context, InputResetReason reason, bool clear_context) {
     auto* session = find(context);
     if (session == nullptr) return;
+    session->deferred_commit.reset();
     pending_models_.erase(context);
     if (memory_context_) memory_context_->invalidate();
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
@@ -269,6 +285,7 @@ RenderState Engine::render_state(ContextId context) {
 }
 
 void Engine::set_config(Config config, bool settle_sessions) {
+    for (auto& [context, session] : sessions_) session->deferred_commit.reset();
     config_ = std::move(config);
     pending_models_.clear();
     apply_context_sources();
@@ -289,6 +306,7 @@ void Engine::set_transport_options(ServiceTransportOptions options) {
     // Late responses are ignored and each context opens a fresh session on
     // the next prediction.
     for (auto& [context, session] : sessions_) {
+        session->deferred_commit.reset();
         session->prediction.invalidate();
         session->prediction.session_id = {};
     }
@@ -302,6 +320,7 @@ void Engine::clear_context_text(ContextId context) {
     pending_models_.erase(context);
     auto* session = find(context);
     if (session != nullptr) {
+        session->deferred_commit.reset();
         session->context_text.clear();
         session->context_source = ContextSource::None;
     }
@@ -411,6 +430,14 @@ bool Engine::pending_model_idle(ContextId context) const {
     return it == pending_models_.end() || it->second->idle();
 }
 
+void Engine::finish_deferred_commit(ContextId context) {
+    auto* session = find(context);
+    if (!session || !session->deferred_commit || session->prediction.pending || !pending_model_idle(context)) return;
+    const auto key = *session->deferred_commit;
+    session->deferred_commit.reset();
+    apply_effect(context, *session, processor_.process(key, *session, config_));
+}
+
 std::uint64_t Engine::pending_model_requests(ContextId context) const {
     const auto it = pending_models_.find(context);
     return it == pending_models_.end() ? 0 : it->second->requests();
@@ -425,8 +452,12 @@ void Engine::update_pending_model(ContextId context) {
     }
     auto it = pending_models_.find(context);
     if (it == pending_models_.end()) {
+        const bool boundary_candidate = session->choosing_candidate() && session->candidate_view.cursor == 0 &&
+            session->candidate_view.page_size(config_.candidate_page_size, session->displayed_candidates.size()) >=
+                (session->mixed_decision.preview_path == 0 ? 3 : 4) &&
+            std::ranges::any_of(session->mixed_decision.result.paths, [](const auto& path) { return path.boundary_alternative; });
         if (session->pending_token.empty() || !session->mixed_decision.active() ||
-            session->mixed_decision.preview_path == 0 || session->choosing_candidate()) return;
+            (!boundary_candidate && (session->mixed_decision.preview_path == 0 || session->choosing_candidate()))) return;
         PendingModelPreview::Client client;
         client.session = [this, context] { return find(context); };
         client.config = [this]() -> const Config& { return config_; };
@@ -439,6 +470,11 @@ void Engine::update_pending_model(ContextId context) {
         client.sensitive = [this, context] { return host_.is_sensitive(context); };
         client.post = [this](auto body) { host_.post(std::move(body)); };
         client.redraw = [this, context] { host_.update_ui(context); };
+        const std::weak_ptr<bool> alive = alive_;
+        const std::weak_ptr<bool> context_alive = context_lifetimes_.at(context);
+        client.settled = [this, alive, context_alive, context] {
+            if (!alive.expired() && !context_alive.expired()) finish_deferred_commit(context);
+        };
         const auto tables = options_.transport.tables_dir.empty() ? options_.table_path.parent_path() :
                                                                   options_.transport.tables_dir;
         it = pending_models_.emplace(context, std::make_unique<PendingModelPreview>(
@@ -550,6 +586,7 @@ void Engine::open_prediction_session(ContextId context, std::uint64_t generation
             processor_.apply_phrase_override(*session);
             if (dirty) request_prediction(context, *session);
             host_.update_ui(context);
+            finish_deferred_commit(context);
         });
     });
 }
@@ -613,6 +650,7 @@ void Engine::handle_prediction_response(ContextId context, std::uint64_t generat
     if (dirty) request_prediction(context, *session);
     update_pending_model(context);
     host_.update_ui(context);
+    finish_deferred_commit(context);
 }
 
 void Engine::close_prediction_session(InputSession& session) {

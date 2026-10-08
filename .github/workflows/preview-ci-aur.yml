@@ -96,11 +96,19 @@ jobs:
           cmake --build build/fcitx5
           ctest --test-dir build/fcitx5 --output-on-failure
 
+  verify-aur:
+    name: Verify preview AUR package
+    if: github.ref == 'refs/heads/preview' || github.base_ref == 'preview'
+    uses: ./.github/workflows/verify-aur-install.yml
+    with:
+      package-name: llavon-ime-fcitx5-preview-git
+
   publish-aur:
     name: Publish preview package to AUR
     needs:
       - build-service
       - build-addon
+      - verify-aur
     if: github.event_name == 'push' && github.repository == 'llavon-ime/ime-unix' && github.ref == 'refs/heads/preview'
     runs-on: ubuntu-24.04
 

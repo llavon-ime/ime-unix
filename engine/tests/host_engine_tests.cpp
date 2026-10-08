@@ -201,6 +201,7 @@ bool test_shift_letter_reported_as_state(Engine& engine, ContextId context, Fake
     type(engine, context, u"su3");
     if (!engine.key_event(context, make_key(U',', shift))) return false;
     if (!engine.key_event(context, make_key(keysym::Return))) return false;
+    if (!host.pump_until([&] { return !engine.session(context)->deferred_commit; })) return false;
     const auto after_punctuation = host.commits();
     if (after_punctuation.size() != commits_before + 2) return false;
     return after_punctuation.back().second == u"你，";
@@ -226,6 +227,7 @@ bool test_keypad_digits_join_composition(Engine& engine, ContextId context, Fake
 
     // Enter commits the composition with the digit inside.
     if (!engine.key_event(context, make_key(keysym::Return))) return false;
+    if (!host.pump_until([&] { return !engine.session(context)->deferred_commit; })) return false;
     const auto commits = host.commits();
     if (commits.size() != commits_before + 1) return false;
     if (commits.back().second != u"你5") return false;
@@ -252,6 +254,7 @@ bool test_keypad_operator_joins_composition(Engine& engine, ContextId context, F
 
     // Enter commits the composition with the character inside.
     if (!engine.key_event(context, make_key(keysym::Return))) return false;
+    if (!host.pump_until([&] { return !engine.session(context)->deferred_commit; })) return false;
     const auto commits = host.commits();
     if (commits.size() != commits_before + 1) return false;
     if (commits.back().second != u"你.") return false;

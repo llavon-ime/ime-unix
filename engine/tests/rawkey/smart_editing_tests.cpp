@@ -316,8 +316,13 @@ RAWKEY_SUITE("smart editing order independent phonetics", smart_order_independen
         harness.type(keys);
         const auto shown = harness.preedit();
         if (std::string_view(layout) == "standard") RAWKEY_ASSERT(shown == "你");
+        // Compact keys also have a valid conventional interpretation (Hsu
+        // enf is ㄧㄣˇ). Its displayed Chinese character has the same deletion
+        // contract as the reordered ㄋㄧˇ alternative, not a raw-key deletion.
+        const bool displayed_chinese = shown != keys;
+        if (displayed_chinese) RAWKEY_ASSERT(utf8_to_u16(shown).size() == 1);
         harness.key("BackSpace");
-        if (shown == "你") RAWKEY_ASSERT(harness.composition_empty());
+        if (displayed_chinese) RAWKEY_ASSERT(harness.composition_empty());
         else RAWKEY_ASSERT(harness.preedit() == std::string(keys).substr(0, std::string(keys).size() - 1));
     }
     // All six slot orders of ㄓㄨㄥ, not a special case for ㄋㄧ.

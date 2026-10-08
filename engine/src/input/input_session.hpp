@@ -7,6 +7,7 @@
 
 #include "buffer/composition_buffer.hpp"
 #include "input/candidate_view.hpp"
+#include "input/input_key.hpp"
 #include "input/input_state.hpp"
 #include "input/mixed_input_decoder.hpp"
 #include "input/pending_token.hpp"
@@ -55,6 +56,9 @@ struct InputSession {
     std::u16string context_text;
     ContextSource context_source = ContextSource::None;
     PredictionState prediction;
+    // An explicit submission waits for both buffer and mixed-preview inference.
+    // Any later edit or lifecycle boundary cancels this intent.
+    std::optional<InputKey> deferred_commit;
 
     InputStateKind kind() const { return input_state_kind(state); }
     bool empty() const { return kind() == InputStateKind::Empty; }

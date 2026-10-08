@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -17,7 +18,8 @@
 
 namespace llavon::ime {
 
-// A single displayed mixed-input path, predicted asynchronously through the
+// A single displayed mixed-input path (or one explicit boundary candidate),
+// predicted asynchronously through the
 // existing service. Engine owns one coordinator per input context. All state
 // transitions run on the host thread; transport callbacks only post work.
 class PendingModelPreview {
@@ -29,6 +31,7 @@ public:
         std::function<bool()> sensitive;
         std::function<void(std::function<void()>)> post;
         std::function<void()> redraw;
+        std::function<void()> settled;
     };
 
     PendingModelPreview(Client client, const FallbackEngine& fallback,
@@ -54,6 +57,7 @@ private:
         int context_length = 0;
         BopomofoKeyboardLayout layout = BopomofoKeyboardLayout::Standard;
         bool sensitive = false;
+        bool candidate_only = false;
     };
     struct Job {
         Snapshot snapshot;
@@ -80,6 +84,7 @@ private:
     void advance(const std::shared_ptr<Job>& job);
     void reply(const std::shared_ptr<Job>& job, protocol::Message response);
     void finish(const std::shared_ptr<Job>& job, bool apply, bool failed = false);
+    void apply_candidate(const Snapshot& snapshot);
 
     Client client_;
     const FallbackEngine& fallback_;
@@ -91,8 +96,9 @@ private:
     std::shared_ptr<Lease> lease_ = std::make_shared<Lease>();
     std::shared_ptr<Job> active_;
     std::optional<Snapshot> wanted_;
-    std::optional<Snapshot> cache_;
-    std::optional<Snapshot> completed_;
+    // Keep explicit candidate work out of the automatic preview's cache.
+    std::array<std::optional<Snapshot>, 2> cache_;
+    std::array<std::optional<Snapshot>, 2> completed_;
 };
 
 }  // namespace llavon::ime

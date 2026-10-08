@@ -30,7 +30,7 @@ public:
         auto* header = new QHBoxLayout;
         number = new QLabel; number->setObjectName("phraseNumber"); number->setFixedWidth(22);
         word = new QLineEdit(phrase); word->setObjectName("phraseWord");
-        word->setPlaceholderText(QStringLiteral("輸入詞彙，例如：銀行")); word->setMinimumHeight(34);
+        word->setPlaceholderText(QStringLiteral("輸入詞彙，例如：李拉風")); word->setMinimumHeight(34);
         word->setMaximumWidth(280);
         remove = new QPushButton(QStringLiteral("刪除")); remove->setObjectName("removePhrase");
         remove->setProperty("quiet", true); remove->setProperty("destructive", true);
@@ -140,9 +140,16 @@ PhraseList::PhraseList(const QString& tablePath, QWidget* parent) : QWidget(pare
     scroll_ = new QScrollArea; scroll_->setObjectName("phraseScrollArea"); scroll_->setFrameShape(QFrame::NoFrame); scroll_->setWidgetResizable(true);
     auto* content = new QWidget; content->setObjectName("settingsForm"); content->setAttribute(Qt::WA_StyledBackground, true);
     rows_ = new QVBoxLayout(content); rows_->setContentsMargins(0, 0, 8, 0); rows_->setSpacing(10);
-    empty_ = new QLabel(QStringLiteral("加入第一個常用詞\n\n按「新增詞彙」，輸入詞彙並選擇每個字的讀音。"));
-    empty_->setAlignment(Qt::AlignCenter); empty_->setMinimumHeight(180);
-    empty_->setWordWrap(true); empty_->setProperty("role", "muted"); rows_->addWidget(empty_); rows_->addStretch();
+    empty_ = new QWidget; empty_->setObjectName("phraseEmptyState");
+    auto* emptyLayout = new QVBoxLayout(empty_); emptyLayout->setContentsMargins(16, 24, 16, 24); emptyLayout->setSpacing(12);
+    auto* title = new QLabel(QStringLiteral("加入常用詞"));
+    title->setProperty("role", "section"); title->setWordWrap(true); emptyLayout->addWidget(title);
+    auto* description = new QLabel(QStringLiteral("例如「李拉風」：ㄌㄧˇ-ㄌㄚ-ㄈㄥ。相同注音會優先使用指定寫法。"));
+    description->setObjectName("phraseEmptyDescription"); description->setTextFormat(Qt::PlainText);
+    description->setWordWrap(true); description->setProperty("role", "muted"); emptyLayout->addWidget(description);
+    auto* add = new QPushButton(QStringLiteral("新增我的常用詞")); add->setObjectName("addFirstPhrase"); add->setProperty("primary", true);
+    emptyLayout->addWidget(add, 0, Qt::AlignLeft); connect(add, &QPushButton::clicked, this, &PhraseList::addRow);
+    rows_->addWidget(empty_); rows_->addStretch();
     scroll_->setWidget(content); layout->addWidget(scroll_);
 }
 

@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -14,8 +17,15 @@ env:
   AUR_REPOSITORY: ssh://aur@aur.archlinux.org/llavon-ime-fcitx5-git.git
 
 jobs:
+  verify-aur:
+    name: Verify main AUR package
+    uses: ./.github/workflows/verify-aur-install.yml
+    with:
+      package-name: llavon-ime-fcitx5-git
+
   publish-aur:
     name: Publish package to AUR
+    needs: verify-aur
     if: github.repository == 'llavon-ime/ime-unix' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
 

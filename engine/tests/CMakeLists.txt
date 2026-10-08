@@ -72,6 +72,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/memory_format_tests.cpp
     rawkey/phrase_override_tests.cpp
     rawkey/prediction_integration_tests.cpp
+    rawkey/vulkan_pipeline_cache_tests.cpp
     rawkey/live_mixed_model_tests.cpp
     rawkey/punctuation_tests.cpp
     rawkey/shift_letter_tests.cpp

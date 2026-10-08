@@ -28,7 +28,9 @@ std::u16string lowercase(std::u16string_view word) {
 struct Data {
     struct PhrasePrefix {
         std::vector<char32_t> next;
+        std::vector<char32_t> common_pair_next;
         bool word = false;
+        double frequency = 0.0;
     };
     std::unordered_map<std::u16string, PhrasePrefix> chinese_phrases;
     std::unordered_map<std::u16string, double> words;
@@ -51,9 +53,15 @@ struct Data {
                     return ch >= u'\u3400' && ch <= u'\u9fff';
                 })) {
                     chinese_phrases[word].word = true;
+                    chinese_phrases[word].frequency = std::clamp(zipf / 8.0, 0.0, 1.0);
                     for (size_t length = 1; length < word.size(); ++length) {
                         auto& next = chinese_phrases[word.substr(0, length)].next;
                         const auto ch = static_cast<char32_t>(word[length]);
+                        if (std::ranges::find(next, ch) == next.end()) next.push_back(ch);
+                    }
+                    if (word.size() == 2 && zipf >= 4.0) {
+                        auto& next = chinese_phrases[word.substr(0, 1)].common_pair_next;
+                        const auto ch = static_cast<char32_t>(word[1]);
                         if (std::ranges::find(next, ch) == next.end()) next.push_back(ch);
                     }
                 }
@@ -98,6 +106,22 @@ const MixedLexicon& MixedLexicon::instance() {
 double MixedLexicon::english_frequency(std::u16string_view word) const {
     const auto it = data().words.find(lowercase(word));
     return it == data().words.end() ? 0.0 : std::clamp(it->second / 8.0, 0.0, 1.0);
+}
+
+double MixedLexicon::english_prefix_frequency(std::u16string_view prefix) const {
+    const auto it = data().prefixes.find(lowercase(prefix));
+    return it == data().prefixes.end() ? 0.0 : std::clamp(it->second / 8.0, 0.0, 1.0);
+}
+
+double MixedLexicon::chinese_phrase_frequency(std::u16string_view word) const {
+    const auto it = data().chinese_phrases.find(std::u16string(word));
+    return it == data().chinese_phrases.end() || !it->second.word ? 0.0 : it->second.frequency;
+}
+
+std::span<const char32_t> MixedLexicon::common_chinese_pair_extensions(char32_t first) const {
+    if (first > 0xFFFF) return {};
+    const auto it = data().chinese_phrases.find(std::u16string(1, static_cast<char16_t>(first)));
+    return it == data().chinese_phrases.end() ? std::span<const char32_t>{} : it->second.common_pair_next;
 }
 
 double MixedLexicon::english_score(std::u16string_view input, bool allow_prefix) const {

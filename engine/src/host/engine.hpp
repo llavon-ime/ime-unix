@@ -121,6 +121,7 @@ private:
 
     void request_prediction(ContextId context, InputSession& session);
     void update_pending_model(ContextId context);
+    void finish_deferred_commit(ContextId context);
     bool should_probe_memory(ContextId context, const InputSession& session) const;
     void open_prediction_session(ContextId context, std::uint64_t generation);
     void send_prediction(ContextId context, InputSession& session, std::uint64_t generation);

@@ -6,6 +6,8 @@
 #include "host_settings.hpp"
 #include "controls.hpp"
 #include "appearance.hpp"
+#include "guide.hpp"
+#include "guide_illustration.hpp"
 #include <QWheelEvent>
 #include <QAbstractItemView>
 #include <QVBoxLayout>
@@ -38,6 +40,7 @@
 #include <QWheelEvent>
 #include <QSpinBox>
 #include <QTabWidget>
+#include <QStackedWidget>
 #include <QPlainTextEdit>
 #include <QCryptographicHash>
 #include <QLocalServer>
@@ -66,6 +69,11 @@ private slots:
     void deferredPhrasePage();
     void settingsWithoutTrainingBackend();
     void deferredSettingGroups();
+    void featureGuide();
+    void guideIllustrations();
+    void guideDetailTopics();
+    void quietInterface();
+    void phraseEmptyDiscovery();
     void phraseLookup();
     void appearanceChanges();
     void hostSettingsMigration();
@@ -93,7 +101,7 @@ QFrame* phraseRow(QWidget& window, int index) {
         if (row->property("phraseIndex").toInt() == index) return row;
     qFatal("Missing phrase row %d", index);
 }
-void capture(Manager& window, const QString& name) {
+void capture(QWidget& window, const QString& name) {
     const auto directory = qEnvironmentVariable("LLAVON_UI_CAPTURE_DIR");
     if (directory.isEmpty()) return;
     QDir().mkpath(directory);
@@ -632,7 +640,8 @@ void NativeTests::deferredPhrasePage() {
     llavon::lora::SettingsStore store; store.loadPhrases(); store.savePhrases(QStringLiteral("拉風 ㄌㄚ-ㄈㄥ\n"));
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
     Manager window(&backend, {}, "settings"); window.show();
-    QCOMPARE(widget<QLabel>(window, "notice")->text(), QStringLiteral("設定已就緒"));
+    QVERIFY(widget<QLabel>(window, "notice")->text().isEmpty());
+    QVERIFY(!widget<QLabel>(window, "notice")->isVisible());
     QVERIFY(!window.findChild<llavon::lora::PhraseList*>("phraseList"));
     // An external edit made after launch is loaded on the first visit.
     store.savePhrases(QStringLiteral("銀行 ㄧㄣˊ-ㄏㄤˊ\n"));
@@ -708,6 +717,341 @@ void NativeTests::deferredSettingGroups() {
     QVERIFY(!page.isDirty());
 }
 
+void NativeTests::featureGuide() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    llavon::lora::SettingsStore store;
+    const auto saved = store.load(); store.save(saved);
+    QFile configuration(llavon::lora::SettingsStore::configPath()); QVERIFY(configuration.open(QIODevice::ReadOnly));
+    const auto before = configuration.readAll(); configuration.close();
+    QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+    {
+        Backend backend(directory.path() + "/missing-backend", {});
+        QSignalSpy errors(&backend, &Backend::error), ready(&backend, &Backend::ready);
+        Manager window(&backend, {}, "settings"); window.show();
+        QVERIFY(widget<QWidget>(window, "quickStart")->isVisible());
+        QVERIFY(!window.findChild<llavon::lora::GuidePage*>());
+        QCOMPARE(widget<QPushButton>(window, "skipQuickGuide")->text(), QStringLiteral("略過全部"));
+        capture(window, "30-feature-invitation");
+        click(window, "startQuickGuide");
+        auto* guide = widget<llavon::lora::GuidePage>(window, "usageGuide");
+        QVERIFY(guide->isVisible());
+        QVERIFY(guide->isWindow()); QCOMPARE(guide->windowModality(), Qt::NonModal);
+        QCOMPARE(widget<QListWidget>(window, "navigation")->currentRow(), 0);
+        auto* steps = widget<QStackedWidget>(window, "guideSteps");
+        auto* topics = widget<QTabWidget>(window, "guideTopics");
+        const auto advance = [&window] {
+            QCoreApplication::processEvents();
+            click(window, "guideNext");
+            QCoreApplication::processEvents();
+        };
+        QCOMPARE(steps->count(), 3); QCOMPARE(steps->currentIndex(), 0);
+        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
+        QVERIFY(!widget<QPushButton>(window, "guidePrevious")->isEnabled());
+        QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
+        capture(*guide, "31-feature-mixed-input");
+        click(window, "guideMixedFeature");
+        auto* smart = widget<QComboBox>(window, "setting_smart_english");
+        QCOMPARE(smart->currentData().toBool(), saved.value("smart_english").toBool());
+        QTRY_VERIFY(smart->isVisible());
+        click(window, "openGuide"); QCOMPARE(steps->currentIndex(), 0);
+        advance(); QCOMPARE(steps->currentIndex(), 1);
+        QTest::keyClick(guide, Qt::Key_Escape);
+        QTRY_VERIFY(!guide->isVisible()); QVERIFY(window.isVisible());
+        QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+        click(window, "openGuide");
+        QCOMPARE(window.findChildren<llavon::lora::GuidePage*>().size(), 1);
+        QCOMPARE(widget<llavon::lora::GuidePage>(window, "usageGuide"), guide);
+        QCOMPARE(steps->currentIndex(), 1);
+        QCOMPARE(widget<QListWidget>(window, "navigation")->currentRow(), 0);
+        capture(*guide, "32-feature-phrase-overrides");
+        const auto originalPalette = QApplication::palette();
+        for (const bool dark : {false, true}) {
+            auto palette = originalPalette; palette.setColor(QPalette::Window, dark ? QColor("#202124") : QColor("#f5f5f7"));
+            QApplication::setPalette(palette); QCoreApplication::processEvents();
+            capture(*guide, dark ? "32-feature-phrase-dark" : "32-feature-phrase-light");
+        }
+        QApplication::setPalette(originalPalette); QCoreApplication::processEvents();
+        click(window, "guidePrevious"); QCOMPARE(steps->currentIndex(), 0);
+        advance(); advance(); QCOMPARE(steps->currentIndex(), 2);
+        capture(*guide, "33-feature-personalization");
+        click(window, "guideRestart"); QCOMPARE(steps->currentIndex(), 0);
+        for (int index = 0; index < topics->count(); ++index) {
+            topics->setCurrentIndex(index);
+            QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
+            if (auto* area = qobject_cast<QScrollArea*>(topics->currentWidget())) {
+                QCoreApplication::processEvents(); QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
+            }
+        }
+        // Viewing every topic never enables recording or starts the helper.
+        QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
+        QVERIFY(!window.findChild<QTableWidget*>("records"));
+        QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
+        QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+        guide->resize(660, 480); capture(*guide, "34-guide-compact");
+        QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
+        click(window, "guideSkipAll");
+        QVERIFY(llavon::lora::QuickStartPreferences::dismissed());
+        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
+        QVERIFY(!guide->isVisible());
+        QVERIFY(configuration.open(QIODevice::ReadOnly)); QCOMPARE(configuration.readAll(), before); configuration.close();
+        QVERIFY(window.close());
+    }
+    {
+        Backend backend(directory.path() + "/missing-backend", {});
+        Manager window(&backend, {}, "settings"); window.show();
+        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
+        click(window, "openGuide");
+        QCOMPARE(widget<QStackedWidget>(window, "guideSteps")->currentIndex(), 0);
+        // A direct settings link keeps already edited fields intact.
+        window.showPage("settings");
+        auto* context = widget<QSpinBox>(window, "setting_context_length"); context->setValue(256);
+        click(window, "openGuide"); click(window, "guideMixedFeature");
+        QCOMPARE(context->value(), 256);
+        context->setValue(saved.value("context_length").toInt()); click(window, "saveSettings");
+        click(window, "openGuide");
+        for (int step = 0; step < 3; ++step) {
+            QCoreApplication::processEvents(); click(window, "guideNext"); QCoreApplication::processEvents();
+        }
+        QTRY_VERIFY(!widget<llavon::lora::GuidePage>(window, "usageGuide")->isVisible());
+        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
+        click(window, "openGuide"); QCOMPARE(widget<QStackedWidget>(window, "guideSteps")->currentIndex(), 0);
+        QVERIFY(window.close());
+        QVERIFY(!widget<llavon::lora::GuidePage>(window, "usageGuide")->isVisible());
+    }
+    // Skipping the initial invitation also persists, without building the guide.
+    Environment separate("XDG_CONFIG_HOME", (directory.path() + "/separate").toUtf8());
+    Backend backend(directory.path() + "/missing-backend", {});
+    Manager window(&backend, {}, "settings"); window.show();
+    click(window, "skipQuickGuide"); QVERIFY(llavon::lora::QuickStartPreferences::dismissed());
+    QVERIFY(!window.findChild<llavon::lora::GuidePage*>());
+    QVERIFY(!QFile::exists(llavon::lora::SettingsStore::configPath()));
+    QVERIFY(window.close());
+}
+
+void NativeTests::guideIllustrations() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    llavon::lora::SettingsStore store; const auto saved = store.load(); store.save(saved);
+    QFile file(llavon::lora::SettingsStore::configPath()); QVERIFY(file.open(QIODevice::ReadOnly));
+    const auto before = file.readAll(); file.close();
+    Backend backend(directory.path() + "/missing-backend", {});
+    QSignalSpy errors(&backend, &Backend::error), ready(&backend, &Backend::ready);
+    Manager window(&backend, {}, "settings"); window.show();
+    QVERIFY(!window.findChild<llavon::lora::GuideIllustration*>());
+    auto* context = widget<QSpinBox>(window, "setting_context_length");
+    const auto original = context->value(); context->setValue(original == 256 ? 128 : 256);
+    click(window, "openGuide"); auto* guide = widget<llavon::lora::GuidePage>(window, "usageGuide");
+    const QStringList names{"guideMixedIllustration", "guidePhraseIllustration", "guidePrivacyIllustration"};
+    for (int step = 0; step < names.size(); ++step) {
+        auto* scene = guide->findChild<llavon::lora::GuideIllustration*>(names[step]); QVERIFY(scene);
+        QVERIFY(scene->isVisible()); QVERIFY(scene->property("illustrationOnly").toBool());
+        QVERIFY(scene->findChildren<QLineEdit*>().isEmpty());
+        QVERIFY(scene->findChildren<QComboBox*>().isEmpty());
+        QVERIFY(scene->findChildren<QPushButton*>().isEmpty());
+        for (const int width : {780, 660, 900}) {
+            guide->resize(width, 720); QCoreApplication::processEvents();
+            const auto rendered = scene->grab(); QVERIFY(!rendered.isNull());
+            const auto targets = scene->targetRects(); QCOMPARE(targets.size(), 2);
+            for (const auto target : targets) {
+                QVERIFY(scene->rect().contains(target)); QVERIFY(target.width() >= 24); QVERIFY(target.height() >= 24);
+                // A click on the image must not edit data or give consent.
+                // Never synthesize a native Cocoa click outside the scroll
+                // viewport: that screen point may belong to a footer button.
+                if (scene->visibleRegion().contains(target.center()))
+                    QTest::mouseClick(scene, Qt::LeftButton, Qt::NoModifier, target.center());
+            }
+            auto* area = qobject_cast<QScrollArea*>(widget<QStackedWidget>(window, "guideSteps")->currentWidget()); QVERIFY(area);
+            QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
+        }
+        guide->resize(660, 480); QCoreApplication::processEvents();
+        capture(*guide, QStringLiteral("36-illustration-compact-%1").arg(step));
+        QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
+        guide->resize(780, 720); QCoreApplication::processEvents();
+        if (step < names.size() - 1) { click(window, "guideNext"); QCoreApplication::processEvents(); }
+    }
+    QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
+    QVERIFY(!window.findChild<QTableWidget*>("records"));
+    QVERIFY(!window.findChild<QPushButton*>("setup"));
+    QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
+    QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+    QCOMPARE(context->value(), original == 256 ? 128 : 256);
+    QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), before); file.close();
+    context->setValue(original); click(window, "saveSettings"); QVERIFY(window.close());
+}
+
+void NativeTests::guideDetailTopics() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    llavon::lora::SettingsStore store; store.save(store.load());
+    QFile configuration(llavon::lora::SettingsStore::configPath()); QVERIFY(configuration.open(QIODevice::ReadOnly));
+    const auto before = configuration.readAll(); configuration.close();
+    llavon::lora::GuidePage guide; llavon::lora::applyAppearance(&guide); guide.show();
+    QSignalSpy pageRequests(&guide, &llavon::lora::GuidePage::pageRequested);
+    QSignalSpy settingRequests(&guide, &llavon::lora::GuidePage::settingRequested);
+    auto* topics = guide.findChild<QTabWidget*>("guideTopics"); QVERIFY(topics); QCOMPARE(topics->count(), 6);
+    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 3);
+    QVERIFY(!guide.findChild<QPushButton*>("guideRecords"));
+    const QStringList names{"guideShortcutTopic", "guideMixedTopic", "guidePhraseTopic", "guidePrivacyTopic", "guideHelpTopic"};
+    const auto originalPalette = QApplication::palette();
+    const auto restorePalette = qScopeGuard([originalPalette] { QApplication::setPalette(originalPalette); });
+    for (int index = 1; index < topics->count(); ++index) {
+        topics->setCurrentIndex(index);
+        auto* area = qobject_cast<QScrollArea*>(topics->currentWidget()); QVERIFY(area);
+        QCOMPARE(area->objectName(), names[index - 1]);
+        if (index == 1) QCOMPARE(area->findChildren<QFrame*>("guideShortcutRow").size(), 10);
+        if (index >= 2 && index <= 4) QCOMPARE(area->findChildren<llavon::lora::GuideIllustration*>().size(), 1);
+        if (index == 4) QCOMPARE(area->findChildren<QWidget*>("guideFlowStage").size(), 3);
+        if (index == 5) QCOMPARE(area->findChildren<QFrame*>("guideHelpRow").size(), 2);
+        if (index >= 2 && index <= 4) {
+            auto* preview = area->findChild<llavon::lora::GuideIllustration*>();
+            area->ensureWidgetVisible(preview); QCoreApplication::processEvents();
+            for (const auto& target : preview->targetRects()) {
+                if (preview->visibleRegion().contains(target.center()))
+                    QTest::mouseClick(preview, Qt::LeftButton, Qt::NoModifier, target.center());
+            }
+        }
+        for (const bool dark : {false, true}) {
+            auto palette = originalPalette; palette.setColor(QPalette::Window, dark ? QColor("#202124") : QColor("#f5f5f7"));
+            QApplication::setPalette(palette); llavon::lora::applyAppearance(&guide); QCoreApplication::processEvents();
+            guide.resize(780, 720);
+            area->verticalScrollBar()->setValue(0);
+            capture(guide, QStringLiteral("70-topic-%1-%2").arg(index).arg(dark ? "dark" : "light"));
+        }
+        guide.resize(660, 480); QCoreApplication::processEvents();
+        capture(guide, QStringLiteral("71-topic-%1-compact").arg(index));
+        QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
+        auto* skip = guide.findChild<QPushButton*>("guideSkipAll"); QVERIFY(skip->isVisible());
+        QVERIFY(guide.rect().contains(QRect(skip->mapTo(&guide, QPoint()), skip->size())));
+        guide.resize(780, 720); QCoreApplication::processEvents();
+    }
+    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 6);
+    topics->setCurrentIndex(0); topics->setCurrentIndex(4);
+    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 6); // Reopening reuses the topic.
+    QCOMPARE(pageRequests.count(), 0); QCOMPARE(settingRequests.count(), 0);
+    QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
+    QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+    QVERIFY(configuration.open(QIODevice::ReadOnly)); QCOMPARE(configuration.readAll(), before); configuration.close();
+    for (const auto& entry : {QPair{2, QString("guideSmartEnglish")}, QPair{5, QString("guideKeyboard")}}) {
+        topics->setCurrentIndex(entry.first); QCoreApplication::processEvents();
+        auto* button = guide.findChild<QPushButton*>(entry.second); QVERIFY(button);
+        qobject_cast<QScrollArea*>(topics->currentWidget())->ensureWidgetVisible(button);
+        QCoreApplication::processEvents(); QVERIFY(button->visibleRegion().contains(button->rect().center()));
+        QTest::mouseClick(button, Qt::LeftButton);
+    }
+    QCOMPARE(settingRequests.count(), 2);
+    QCOMPARE(settingRequests.at(0).at(0).toString(), QStringLiteral("smart_english"));
+    QCOMPARE(settingRequests.at(1).at(0).toString(), QStringLiteral("keyboard_layout"));
+    for (const auto& entry : {QPair{3, QString("guidePhraseList")}, QPair{4, QString("guideRecords")}, QPair{5, QString("guideStatus")}}) {
+        topics->setCurrentIndex(entry.first); QCoreApplication::processEvents();
+        auto* button = guide.findChild<QPushButton*>(entry.second); QVERIFY(button);
+        qobject_cast<QScrollArea*>(topics->currentWidget())->ensureWidgetVisible(button);
+        QCoreApplication::processEvents(); QVERIFY(button->visibleRegion().contains(button->rect().center()));
+        QTest::mouseClick(button, Qt::LeftButton);
+    }
+    QCOMPARE(pageRequests.count(), 3);
+    QCOMPARE(pageRequests.at(0).at(0).toString(), QStringLiteral("phrases"));
+    QCOMPARE(pageRequests.at(1).at(0).toString(), QStringLiteral("records"));
+    QCOMPARE(pageRequests.at(2).at(0).toString(), QStringLiteral("about"));
+    QVERIFY(guide.close());
+}
+
+void NativeTests::quietInterface() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
+    Manager window(&backend, {}, "settings"); window.show();
+    auto* notice = widget<QLabel>(window, "notice");
+    QCOMPARE(window.windowTitle(), QStringLiteral("拉風輸入法"));
+    QVERIFY(!notice->isVisible()); QVERIFY(!widget<QLabel>(window, "settingsStatus")->isVisible());
+    const QStringList redundant{QStringLiteral("工作空間"), QStringLiteral("設定與個人化"),
+        QStringLiteral("個人資料儲存於此裝置"), QStringLiteral("設定儲存於此裝置"), QStringLiteral("已載入目前設定")};
+    for (auto* label : window.findChildren<QLabel*>()) if (label->isVisible()) QVERIFY(!redundant.contains(label->text()));
+    QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("輸入法設定"));
+    capture(window, "60-quiet-settings");
+    auto* context = widget<QSpinBox>(window, "setting_context_length");
+    const auto original = context->value(); context->setValue(original == 256 ? 128 : 256);
+    QVERIFY(widget<QLabel>(window, "settingsStatus")->isVisible());
+    QCOMPARE(widget<QLabel>(window, "settingsStatus")->text(), QStringLiteral("尚未儲存"));
+    click(window, "saveSettings");
+    QTRY_VERIFY(widget<QLabel>(window, "settingsStatus")->text().startsWith(QStringLiteral("已儲存")));
+    QVERIFY(widget<QLabel>(window, "settingsStatus")->isVisible());
+    QVERIFY(!widget<QPushButton>(window, "saveSettings")->toolTip().isEmpty());
+    click(window, "reloadSettings"); QVERIFY(!widget<QLabel>(window, "settingsStatus")->isVisible());
+    window.showPage("phrases");
+    auto* checked = widget<QLabel>(window, "phraseCheckStatus");
+    QVERIFY(!checked->isVisible()); QVERIFY(!widget<QLabel>(window, "phraseStatus")->isVisible());
+    click(window, "checkPhrases"); QVERIFY(checked->isVisible()); QCOMPARE(checked->text(), QStringLiteral("檢查通過"));
+    click(window, "addFirstPhrase"); QVERIFY(checked->isVisible());
+    click(window, "savePhrases");
+    QVERIFY(widget<QLabel>(window, "phraseStatus")->isVisible());
+    QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
+    auto* row = phraseRow(window, 0); row->findChild<QLineEdit*>("phraseWord")->setText(QStringLiteral("李拉風"));
+    const QStringList readings{QStringLiteral("ㄌㄧˇ"), QStringLiteral("ㄌㄚ"), QStringLiteral("ㄈㄥ")};
+    for (int index = 0; index < readings.size(); ++index) {
+        auto* reading = row->findChild<QComboBox*>(QStringLiteral("phraseReading_%1").arg(index)); QVERIFY(reading);
+        reading->setCurrentIndex(reading->findData(readings[index]));
+    }
+    QVERIFY(!checked->isVisible()); QVERIFY(widget<QLabel>(window, "phraseStatus")->isVisible());
+    click(window, "savePhrases");
+    QTRY_VERIFY(widget<QLabel>(window, "phraseStatus")->text().startsWith(QStringLiteral("已儲存")));
+    click(window, "reloadPhrases");
+    QTRY_VERIFY(widget<QLabel>(window, "phraseStatus")->text().startsWith(QStringLiteral("已重新載入")));
+    window.showPage("settings"); window.showPage("phrases");
+    QVERIFY(!widget<QLabel>(window, "phraseStatus")->isVisible()); QVERIFY(!checked->isVisible());
+    capture(window, "61-quiet-phrases");
+    QSignalSpy refreshed(&window, &Manager::refreshed);
+    window.showPage("training"); QTRY_VERIFY_WITH_TIMEOUT(refreshed.count() > 0, 10000);
+    QVERIFY(!notice->isVisible()); QVERIFY(!widget<QPlainTextEdit>(window, "jobLog")->isVisible());
+    capture(window, "62-quiet-training");
+    window.showPage("records"); capture(window, "63-quiet-records");
+    window.showPage("history");
+    auto* graph = widget<llavon::lora::HistoryGraph>(window, "history");
+    QVERIFY(graph->toolTip().contains(QStringLiteral("拖曳")));
+    QVERIFY(graph->accessibleDescription().contains(QStringLiteral("縮放")));
+    capture(window, "64-quiet-history");
+    // A quiet idle workspace must still surface errors, including on other pages.
+    backend.error(QStringLiteral("測試錯誤")); QVERIFY(notice->isVisible());
+    QCOMPARE(notice->text(), QStringLiteral("測試錯誤"));
+    window.showPage("settings"); QVERIFY(notice->isVisible());
+    QVERIFY(window.close());
+}
+
+void NativeTests::phraseEmptyDiscovery() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    Backend backend(directory.path() + "/missing-backend", {});
+    Manager window(&backend, {}, "settings"); window.show();
+    click(window, "openGuide"); click(window, "guideNext"); click(window, "guidePhrases");
+    auto* list = widget<llavon::lora::PhraseList>(window, "phraseList");
+    auto* empty = widget<QWidget>(window, "phraseEmptyState"); QVERIFY(empty->isVisible());
+    QVERIFY(widget<QLabel>(window, "phraseEmptyDescription")->text().contains(QStringLiteral("李拉風")));
+    QVERIFY(list->text().isEmpty()); QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
+    capture(window, "35-phrase-discovery");
+    click(window, "addFirstPhrase"); QVERIFY(!empty->isVisible());
+    auto* row = phraseRow(window, 0); auto* word = row->findChild<QLineEdit*>("phraseWord");
+    QVERIFY(word->text().isEmpty()); word->setText(QStringLiteral("李拉風"));
+    const QStringList readings{QStringLiteral("ㄌㄧˇ"), QStringLiteral("ㄌㄚ"), QStringLiteral("ㄈㄥ")};
+    for (int index = 0; index < readings.size(); ++index) {
+        auto* reading = row->findChild<QComboBox*>(QStringLiteral("phraseReading_%1").arg(index)); QVERIFY(reading);
+        const auto selected = reading->findData(readings[index]); QVERIFY(selected >= 0); reading->setCurrentIndex(selected);
+    }
+    QVERIFY(list->errors().isEmpty()); QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
+    click(window, "savePhrases");
+    llavon::lora::SettingsStore store;
+    QCOMPARE(store.loadPhrases(), QStringLiteral("李拉風 ㄌㄧˇ-ㄌㄚ-ㄈㄥ\n"));
+    click(window, "openGuide"); QCOMPARE(widget<QStackedWidget>(window, "guideSteps")->currentIndex(), 1);
+    click(window, "guidePhrases"); QVERIFY(!empty->isVisible());
+    QTest::mouseClick(phraseRow(window, 0)->findChild<QPushButton*>("removePhrase"), Qt::LeftButton);
+    QVERIFY(empty->isVisible()); click(window, "savePhrases"); QVERIFY(store.loadPhrases().isEmpty());
+    QVERIFY(window.close());
+}
+
 void NativeTests::appearanceChanges() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
@@ -755,8 +1099,8 @@ void NativeTests::hostSettingsMigration() {
     auto* status = page->findChild<QLabel*>("hostStatus");
     auto* instructions = page->findChild<QLabel*>("updateInstructions"); QVERIFY(instructions);
     QVERIFY(instructions->text().contains(QStringLiteral("不會自動安裝")));
-    QVERIFY(instructions->text().contains(QStringLiteral("顯示安裝提示")));
-    QVERIFY(instructions->text().contains(QStringLiteral("按鈕會改為「安裝並重新啟動…」")));
+    QVERIFY(instructions->toolTip().contains(QStringLiteral("顯示安裝提示")));
+    QVERIFY(instructions->toolTip().contains(QStringLiteral("按鈕會改為「安裝並重新啟動…」")));
     QVERIFY(instructions->text().contains(QStringLiteral("管理員授權")));
     QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("尚未連接")), 5000);
     QVERIFY(!check->isEnabled()); QVERIFY(!automatic->isEnabled());
@@ -814,6 +1158,7 @@ void NativeTests::controlInteractions() {
     const auto restore = qScopeGuard([original] { QApplication::setPalette(original); });
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
     Manager window(&backend); window.show(); backend.start(); window.showPage("settings");
+    click(window, "skipQuickGuide"); // This suite exercises controls, not the first-use invitation.
     widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
     auto* keyboard = widget<QComboBox>(window, "setting_keyboard_layout");
     auto* save = widget<QPushButton>(window, "saveSettings");

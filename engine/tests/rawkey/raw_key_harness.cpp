@@ -218,6 +218,13 @@ void Harness::key(const Key& key) {
     const auto before = host_.commits().size();
     (void)engine_->key_event(context_, key.input_key());
     drain();
+    // Offline suites have no backend to release. Let its asynchronous failure
+    // settle a deferred submission before asserting their fallback baseline.
+    // Scripted/real backend sockets keep fully asynchronous raw-key behaviour.
+    if (session() && session()->deferred_commit && options_.service_path.empty() &&
+        !fs::exists(options_.socket_path)) {
+        RAWKEY_ASSERT(pump_until([&] { return !session()->deferred_commit; }));
+    }
     const auto after = commits();
     if (pending_commit_ && after.size() > before) {
         RAWKEY_ASSERT(after.back() == *pending_commit_);
@@ -232,6 +239,10 @@ void Harness::key(std::string_view spec) {
 bool Harness::key_accepted(const Key& key) {
     const bool accepted = engine_->key_event(context_, key.input_key());
     drain();
+    if (session() && session()->deferred_commit && options_.service_path.empty() &&
+        !fs::exists(options_.socket_path)) {
+        RAWKEY_ASSERT(pump_until([&] { return !session()->deferred_commit; }));
+    }
     return accepted;
 }
 

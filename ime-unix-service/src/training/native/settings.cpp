@@ -165,14 +165,15 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
         auto* instructions = new QLabel(QStringLiteral("詞彙與讀音")); instructions->setProperty("role", "section");
         instructions->setWordWrap(true); toolbar->addWidget(instructions, 1);
         auto* add = new QPushButton(QStringLiteral("＋ 新增詞彙")); add->setObjectName("addPhrase"); toolbar->addWidget(add);
+        add->setToolTip(QStringLiteral("每筆 2–8 個字，多音字需選擇讀音；一聲不標調。"));
         layout->addLayout(toolbar);
         phraseList_ = new PhraseList(tablePath); phraseList_->setObjectName("phraseList"); layout->addWidget(phraseList_, 1);
         connect(add, &QPushButton::clicked, phraseList_, &PhraseList::addRow);
         connect(phraseList_, &PhraseList::changed, this, [this] { changed(); checkPhrases(); });
         checkStatus_ = new QLabel; checkStatus_->setWordWrap(true); checkStatus_->setTextFormat(Qt::PlainText);
         checkStatus_->setObjectName("phraseCheckStatus"); layout->addWidget(checkStatus_);
-        auto* tableLocation = new QLabel(QStringLiteral("依注音表選音 · 多音字需手動選擇 · 一聲不標調"));
-        tableLocation->setToolTip(phraseList_->tablePath()); tableLocation->setProperty("role", "muted"); layout->addWidget(tableLocation);
+        phraseList_->setToolTip(phraseList_->tablePath());
+        phraseList_->setAccessibleDescription(add->toolTip());
     } else {
         auto* tabs = new QTabWidget; tabs->setObjectName("settingsGroups"); layout->addWidget(tabs, 1);
         auto& groups = groupLayouts_;
@@ -192,19 +193,16 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
         });
         buildGroup(tabs->tabText(0));
     }
-    auto* location = new QLabel(phrases ? QStringLiteral("phrase_overrides.txt") : QStringLiteral("設定儲存於此裝置"));
-    location->setToolTip(phrases ? SettingsStore::phrasesPath() : SettingsStore::configPath());
-    location->setTextFormat(Qt::PlainText); location->setWordWrap(true); location->setProperty("role", "muted");
-    location->setTextInteractionFlags(Qt::TextSelectableByMouse);
     status_ = new QLabel; status_->setWordWrap(true); status_->setProperty("role", "muted"); status_->setObjectName(phrases ? "phraseStatus" : "settingsStatus"); layout->addWidget(status_);
     auto* actions = new QHBoxLayout;
     auto* saveButton = new QPushButton(QStringLiteral("儲存並套用")); saveButton->setProperty("primary", true);
     saveButton->setObjectName(phrases ? "savePhrases" : "saveSettings"); saveButton->setMinimumHeight(36);
+    saveButton->setToolTip(phrases ? SettingsStore::phrasesPath() : SettingsStore::configPath());
     auto* reloadButton = new QPushButton(QStringLiteral("重新載入")); reloadButton->setObjectName(phrases ? "reloadPhrases" : "reloadSettings");
-    actions->addWidget(location); actions->addStretch(); actions->addWidget(reloadButton); actions->addWidget(saveButton); layout->addLayout(actions);
+    actions->addStretch(); actions->addWidget(reloadButton); actions->addWidget(saveButton); layout->addLayout(actions);
     if (phrases) {
-        auto* check = new QPushButton(QStringLiteral("檢查全部")); check->setObjectName("checkPhrases"); actions->insertWidget(2, check);
-        connect(check, &QPushButton::clicked, this, [this] { checkPhrases(); });
+        auto* check = new QPushButton(QStringLiteral("檢查全部")); check->setObjectName("checkPhrases"); actions->insertWidget(1, check);
+        connect(check, &QPushButton::clicked, this, [this] { checkPhrases(true); });
     }
     connect(saveButton, &QPushButton::clicked, this, &SettingsPage::save);
     connect(reloadButton, &QPushButton::clicked, this, [this] {
@@ -272,17 +270,37 @@ void SettingsPage::buildGroup(const QString& group) {
     loading_ = wasLoading;
 }
 
-bool SettingsPage::checkPhrases() {
+void SettingsPage::revealField(const QString& key) {
+    auto* tabs = findChild<QTabWidget*>("settingsGroups");
+    if (!tabs) return;
+    for (const auto item : SettingsStore::schema().value("fields").toArray()) {
+        const auto field = item.toObject();
+        if (field.value("key").toString() != key) continue;
+        const auto group = field.value("group").toString();
+        for (int index = 0; index < tabs->count(); ++index) if (tabs->tabText(index) == group) {
+            tabs->setCurrentIndex(index);
+            if (auto* input = fields_.value(key)) {
+                if (auto* area = qobject_cast<QScrollArea*>(tabs->widget(index))) area->ensureWidgetVisible(input);
+                input->setFocus(Qt::OtherFocusReason);
+            }
+            return;
+        }
+    }
+}
+
+bool SettingsPage::checkPhrases(bool explicitCheck) {
     const auto errors = phraseList_->errors();
     checkStatus_->setProperty("validation", errors.isEmpty() ? "valid" : "invalid");
     checkStatus_->style()->unpolish(checkStatus_); checkStatus_->style()->polish(checkStatus_);
     auto summary = errors.mid(0, 3).join('\n');
     if (errors.size() > 3) summary += QStringLiteral("\n另有 %1 個問題，請修正後再檢查。").arg(errors.size() - 3);
-    checkStatus_->setText(errors.isEmpty() ? QStringLiteral("查表檢查通過 · 字音相符，沒有重複的注音組合。") : summary);
+    checkStatus_->setText(errors.isEmpty() ? (explicitCheck ? QStringLiteral("檢查通過") : QString()) : summary);
+    checkStatus_->setVisible(!checkStatus_->text().isEmpty());
     return errors.isEmpty();
 }
 
-void SettingsPage::changed() { if (!loading_) { dirty_ = true; status_->setText(QStringLiteral("有尚未儲存的修改")); } }
+void SettingsPage::showStatus(const QString& message) { status_->setText(message); status_->setVisible(!message.isEmpty()); }
+void SettingsPage::changed() { if (!loading_) { dirty_ = true; showStatus(QStringLiteral("尚未儲存")); } }
 void SettingsPage::fill(const QJsonObject& values) {
     for (auto it = fields_.cbegin(); it != fields_.cend(); ++it) {
         const auto value = values.value(it.key());
@@ -306,8 +324,8 @@ bool SettingsPage::reload() {
     try {
         if (phrases_) phraseList_->loadText(store_.loadPhrases());
         else { original_ = store_.load(); fill(original_); }
-        dirty_ = false; status_->setText(QStringLiteral("已載入目前設定"));
-    } catch (const std::exception& error) { loaded = false; status_->setText(QString::fromUtf8(error.what())); }
+        dirty_ = false; showStatus({});
+    } catch (const std::exception& error) { loaded = false; showStatus(QString::fromUtf8(error.what())); }
     loading_ = false;
     if (phrases_) checkPhrases();
     return loaded;
@@ -316,7 +334,7 @@ void SettingsPage::save() {
     try {
         bool runtime = false;
         if (phrases_) {
-            if (!checkPhrases()) { status_->setText(QStringLiteral("尚未儲存，請先修正上方查表問題。")); return; }
+            if (!checkPhrases()) { showStatus(QStringLiteral("尚未儲存，請先修正上方查表問題。")); return; }
             store_.savePhrases(phraseList_->text());
         }
         else {
@@ -326,7 +344,7 @@ void SettingsPage::save() {
             store_.save(updated); original_ = updated;
         }
         dirty_ = false; notifyHost(runtime);
-    } catch (const std::exception& error) { status_->setText(QString::fromUtf8(error.what())); }
+    } catch (const std::exception& error) { showStatus(QString::fromUtf8(error.what())); }
 }
 
 void SettingsPage::notifyHost(bool restartService, bool saved) {
@@ -334,14 +352,14 @@ void SettingsPage::notifyHost(bool restartService, bool saved) {
 #ifdef Q_OS_MACOS
     Q_UNUSED(restartService)
     const auto result = notify_post("org.llavon-ime.lora.model-changed");
-    status_->setText(action + (result == NOTIFY_STATUS_OK ? QStringLiteral("，已通知輸入法重新載入。") : QStringLiteral("；切換輸入法後套用。")));
+    showStatus(action + (result == NOTIFY_STATUS_OK ? QStringLiteral("並套用") : QStringLiteral("；切換輸入法後套用。")));
 #else
     const auto message = QDBusMessage::createMethodCall("org.fcitx.Fcitx5", "/controller", "org.fcitx.Fcitx.Controller1", "ReloadAddonConfig");
     auto call = message; call << "llavon-ime";
     auto* watcher = new QDBusPendingCallWatcher(QDBusConnection::sessionBus().asyncCall(call, 2000), this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, restartService, action] {
         QDBusPendingReply<> reply = *watcher; watcher->deleteLater();
-        status_->setText(action + (reply.isError() ? QStringLiteral("；Fcitx5 尚未回應，請重新啟動輸入法以套用。") : QStringLiteral("，Fcitx5 已重新載入設定。")));
+        showStatus(action + (reply.isError() ? QStringLiteral("；Fcitx5 尚未回應，請重新啟動輸入法以套用。") : QStringLiteral("並套用")));
         if (restartService && !reply.isError()) {
             auto* socket = new QLocalSocket(this);
             connect(socket, &QLocalSocket::connected, socket, [socket] {

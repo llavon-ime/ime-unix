@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
 #endif
     for (int index = 1; index < argc; ++index) {
         if (std::string_view(argv[index]) == "--help" || std::string_view(argv[index]) == "-h") {
-            std::puts("Llavon native settings and personalization\n"
+            std::puts("拉風輸入法\n"
                       "  --state-dir PATH   Training state directory\n"
                       "  --db PATH          Override training database\n"
                       "  --cli PATH         Override manager CLI\n"
@@ -95,6 +95,8 @@ int main(int argc, char** argv) {
     trace("qt-ready");
     QCoreApplication::setApplicationName("llavon-ime-lora-gui");
     QCoreApplication::setOrganizationName("llavon-ime");
+    // The internal name remains the QSettings identity; only rename the UI.
+    QGuiApplication::setApplicationDisplayName(QStringLiteral("拉風輸入法"));
 #ifndef Q_OS_MACOS
     QGuiApplication::setDesktopFileName(QStringLiteral("llavon-ime-lora"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/native/AppIcon.png")));

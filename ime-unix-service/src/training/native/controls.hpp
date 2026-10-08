@@ -3,6 +3,9 @@
 #include <QComboBox>
 
 namespace llavon::lora {
+// Shared by the real data page and its read-only guide illustration.
+QWidget* recordingCredentials(QWidget* parent = nullptr);
+
 // Keep standard Qt keyboard/accessibility behavior, with one desktop popup
 // presentation on Cocoa and xcb. Scrolling the page never changes a choice.
 class NativeComboBox final : public QComboBox {

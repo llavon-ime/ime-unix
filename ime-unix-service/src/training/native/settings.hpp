@@ -36,6 +36,7 @@ public:
     explicit SettingsPage(bool phrases, QWidget* parent = nullptr, const QString& tablePath = {});
     bool isDirty() const { return dirty_; }
     bool reload();
+    void revealField(const QString& key);
 private:
     void fill(const QJsonObject& values);
     void buildGroup(const QString& group);
@@ -43,7 +44,8 @@ private:
     void save();
     void changed();
     void notifyHost(bool restartService, bool saved = true);
-    bool checkPhrases();
+    bool checkPhrases(bool explicitCheck = false);
+    void showStatus(const QString& message);
     SettingsStore store_;
     bool phrases_, dirty_ = false, loading_ = false;
     QMap<QString, QWidget*> fields_;

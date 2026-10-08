@@ -35,9 +35,15 @@ void applyAppearance(QWidget* window) {
     QString css = QStringLiteral(R"(
         QWidget { color: $text; font-size: 13px; font-weight: 400; }
         QMainWindow, QScrollArea, QStackedWidget, QWidget#settingsForm, QWidget#trainingContent { background: $background; }
+        QDialog#usageGuide { background: $background; }
         QWidget#sidebar { background: $sidebar; border-right: 1px solid $border; }
         QLabel[role="brand"] { font-size: 20px; font-weight: 600; }
         QLabel[role="title"] { font-size: 24px; font-weight: 600; }
+        QLabel[role="guideAnnotation"] { color: $accent; font-size: 13px; font-weight: 500; }
+        QLabel[role="guideExample"] { font-size: 19px; font-weight: 500; }
+        QLabel[role="guideTopicTitle"] { font-size: 20px; font-weight: 600; }
+        QLabel[role="guideKey"] { background: $surface; border: 1px solid $border; border-bottom-width: 2px; border-radius: 6px; padding: 6px 10px; font-weight: 500; }
+        QFrame#guideShortcutRow, QFrame#guideHelpRow { border: none; border-bottom: 1px solid $border; }
         QLabel[role="section"] { font-size: 14px; font-weight: 600; }
         QLabel[role="muted"], QLabel[role="eyebrow"] { color: $secondary; }
         QLabel[role="eyebrow"] { font-size: 11px; }
@@ -97,7 +103,7 @@ void applyAppearance(QWidget* window) {
         QTabBar::tab { background: $sidebar; padding: 8px 16px; margin: 4px 2px 14px 0; border: 1px solid transparent; border-radius: 6px; color: $secondary; }
         QTabBar::tab:selected { background: $surface; border-color: $border; color: $text; font-weight: 500; }
         QTabBar::tab:hover { color: $accent; }
-        QFrame#settingRow, QFrame#phraseRow, QFrame#resourceRow { background: $surface; border: 1px solid $border; border-radius: 9px; }
+        QFrame#settingRow, QFrame#phraseRow, QFrame#resourceRow, QFrame#quickStart { background: $surface; border: 1px solid $border; border-radius: 9px; }
         QLabel#phraseNumber { color: $secondary; font-size: 11px; }
         QLabel[validation="valid"] { color: $success; font-size: 12px; }
         QLabel[validation="invalid"] { color: $error; font-size: 12px; }

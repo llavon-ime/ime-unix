@@ -60,11 +60,28 @@ std::optional<PendingModelPreview::Snapshot> PendingModelPreview::capture() cons
     auto* session = client_.session();
     const auto& config = client_.config();
     if (!session || !config.smart_english || !config.smart_model_preview || session->pending_token.empty() ||
-        !session->mixed_decision.active() || session->choosing_candidate() || session->mixed_decision.preview_path == 0) {
+        !session->mixed_decision.active()) {
         return std::nullopt;
     }
     Snapshot result;
     result.preview = session->mixed_decision.preview_path;
+    result.candidate_only = session->choosing_candidate();
+    if (result.candidate_only) {
+        // Opening the panel explicitly asks for alternatives. Only enrich the
+        // tagged boundary repair, and stop as soon as the user navigates away
+        // from the initial row. Never change a candidate under their cursor.
+        if (session->candidate_view.cursor != 0) return std::nullopt;
+        const int required_rows = session->mixed_decision.preview_path == 0 ? 3 : 4;
+        if (session->candidate_view.page_size(config.candidate_page_size, session->displayed_candidates.size()) < required_rows) {
+            return std::nullopt;  // Do not infer a suggestion the panel cannot show.
+        }
+        const auto& paths = session->mixed_decision.result.paths;
+        const auto repair = std::ranges::find_if(paths, [](const auto& path) {
+            return path.boundary_alternative && !path.boundary_model_refined;
+        });
+        if (repair == paths.end()) return std::nullopt;
+        result.preview = static_cast<std::size_t>(repair - paths.begin());
+    } else if (result.preview == 0) return std::nullopt;
     if (result.preview >= session->mixed_decision.result.paths.size()) return std::nullopt;
     result.path = session->mixed_decision.result.paths[result.preview];
     result.raw = session->pending_token.raw;
@@ -95,7 +112,8 @@ std::optional<PendingModelPreview::Snapshot> PendingModelPreview::capture() cons
 
 bool PendingModelPreview::compatible(const Snapshot& a, const Snapshot& b) {
     return a.context == b.context && a.buffer_revision == b.buffer_revision && a.caret == b.caret &&
-           a.layout == b.layout && a.sensitive == b.sensitive && a.context_length == b.context_length;
+           a.layout == b.layout && a.sensitive == b.sensitive && a.context_length == b.context_length &&
+           a.candidate_only == b.candidate_only;
 }
 
 bool PendingModelPreview::fresh(const Snapshot& snapshot) const {
@@ -108,17 +126,26 @@ void PendingModelPreview::on_input() {
     auto current = capture();
     if (!current) {
         wanted_.reset();
-        cache_.reset();
-        completed_.reset();
+        // A panel navigation cancels inference, but need not throw away a
+        // valid automatic result when Escape later returns to the same raw.
+        if (const auto* session = client_.session(); session && session->choosing_candidate()) return;
+        cache_ = {};
+        completed_ = {};
         return;
     }
-    if (cache_ && compatible(*cache_, *current)) {
+    const auto slot = current->candidate_only ? 1U : 0U;
+    auto& cache = cache_[slot];
+    const auto& completed = completed_[slot];
+    if (current->candidate_only && cache && compatible(*cache, *current) &&
+        cache->raw == current->raw && cache->query == current->query) {
+        apply_candidate(*cache);
+    } else if (!current->candidate_only && cache && compatible(*cache, *current)) {
         auto& path = client_.session()->mixed_decision.result.paths[current->preview];
         const auto before = path.rendered;
-        const auto count = std::min(path.segments.size(), cache_->path.segments.size());
+        const auto count = std::min(path.segments.size(), cache->path.segments.size());
         for (std::size_t i = 0; i < count; ++i) {
             auto& segment = path.segments[i];
-            const auto& cached = cache_->path.segments[i];
+            const auto& cached = cache->path.segments[i];
             if (segment.kind != cached.kind || segment.begin != cached.begin || segment.end != cached.end ||
                 segment.reading != cached.reading || segment.raw != cached.raw ||
                 segment.consumed_boundary != cached.consumed_boundary) break;
@@ -128,7 +155,7 @@ void PendingModelPreview::on_input() {
         current->path = path;
         if (path.rendered != before) client_.redraw();
     }
-    if (completed_ && compatible(*completed_, *current) && completed_->query == current->query) return;
+    if (completed && compatible(*completed, *current) && completed->query == current->query) return;
     wanted_ = std::move(current);
     if (!active_) start_latest();
 }
@@ -254,21 +281,51 @@ void PendingModelPreview::reply(const std::shared_ptr<Job>& job, protocol::Messa
 
 void PendingModelPreview::finish(const std::shared_ptr<Job>& job, bool apply, bool failed) {
     if (active_ != job) return;
+    const std::weak_ptr<bool> alive = alive_;
+    const auto slot = job->snapshot.candidate_only ? 1U : 0U;
     if (apply && fresh(job->snapshot)) {
-        client_.session()->mixed_decision.result.paths[job->snapshot.preview] = job->snapshot.path;
-        cache_ = job->snapshot;
-        completed_ = job->snapshot;
-        client_.redraw();
+        if (job->snapshot.candidate_only) apply_candidate(job->snapshot);
+        else {
+            client_.session()->mixed_decision.result.paths[job->snapshot.preview] = job->snapshot.path;
+            client_.redraw();
+        }
+        cache_[slot] = job->snapshot;
+        completed_[slot] = job->snapshot;
     } else if (failed) {
         // Preserve the current fallback preview, and avoid retrying the same
         // failed query for every unfinished key. The next reading may retry.
-        completed_ = job->snapshot;
+        completed_[slot] = job->snapshot;
     }
     active_.reset();
     if (wanted_) {
-        if (completed_ && compatible(*completed_, *wanted_) && completed_->query == wanted_->query) wanted_.reset();
+        const auto& completed = completed_[wanted_->candidate_only ? 1U : 0U];
+        if (completed && compatible(*completed, *wanted_) && completed->query == wanted_->query) wanted_.reset();
         else start_latest();
     }
+    if (alive.expired()) return;
+    // The callback may submit the composition and update/destroy this preview.
+    // Keep a local callable and do not access coordinator state afterwards.
+    const auto settled = idle() ? client_.settled : std::function<void()>{};
+    if (settled) settled();
+}
+
+void PendingModelPreview::apply_candidate(const Snapshot& snapshot) {
+    auto& paths = client_.session()->mixed_decision.result.paths;
+    // A model is another suggestion, not permission to remove a correctly
+    // ranked dictionary phrase. Preserve that original explicit choice.
+    const auto previous = std::ranges::find_if(paths, [](const auto& path) { return path.boundary_model_refined; });
+    if (std::ranges::any_of(paths, [&](const auto& path) { return path.rendered == snapshot.path.rendered; })) {
+        if (previous != paths.end() && previous->rendered != snapshot.path.rendered) {
+            paths.erase(previous);
+            client_.redraw();
+        }
+        return;
+    }
+    auto refined = snapshot.path;
+    refined.boundary_model_refined = true;
+    if (previous == paths.end()) paths.push_back(std::move(refined));
+    else *previous = std::move(refined);
+    client_.redraw();
 }
 
 }  // namespace llavon::ime

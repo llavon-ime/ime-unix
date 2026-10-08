@@ -1,0 +1,171 @@
+name: Verify AUR build and clean install
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: AUR package directory name under packaging/aur
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PACKAGE_NAME: ${{ inputs.package-name }}
+
+jobs:
+  build-package:
+    name: Build AUR package with makepkg
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container: archlinux:base-devel
+
+    steps:
+      - name: Install packaging prerequisites
+        run: pacman -Syu --noconfirm git sudo
+
+      - name: Checkout package recipe
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare unprivileged package builder
+        run: |
+          set -euo pipefail
+          case "${PACKAGE_NAME}" in
+            llavon-ime-fcitx5-git|llavon-ime-fcitx5-preview-git) ;;
+            *) echo "Unsupported AUR package: ${PACKAGE_NAME}" >&2; exit 1 ;;
+          esac
+          useradd --create-home --shell /bin/bash builder
+          install -d -o builder -g builder /home/builder/aur-package
+          cp "packaging/aur/${PACKAGE_NAME}/PKGBUILD" \
+             "packaging/aur/${PACKAGE_NAME}/.SRCINFO" /home/builder/aur-package/
+          chown builder:builder /home/builder/aur-package/PKGBUILD \
+                                /home/builder/aur-package/.SRCINFO
+          printf 'builder ALL=(root) NOPASSWD: /usr/bin/pacman\n' > /etc/sudoers.d/aur-builder
+          chmod 440 /etc/sudoers.d/aur-builder
+          visudo -cf /etc/sudoers.d/aur-builder
+
+      - name: Check AUR metadata
+        run: |
+          set -euo pipefail
+          su - builder -c 'cd /home/builder/aur-package && makepkg --printsrcinfo > generated.SRCINFO'
+          diff -u /home/builder/aur-package/.SRCINFO /home/builder/aur-package/generated.SRCINFO
+
+      - name: Pin CI source to the tested commit
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          recipe=/home/builder/aur-package/PKGBUILD
+          # Only the CI copy changes. A moving branch would otherwise test a
+          # newer push instead of this run (or ignore pull-request changes).
+          test "$(grep -Ec '#branch=(main|preview)"$' "${recipe}")" -eq 1
+          sed -i "s/#branch=\(main\|preview\)/#commit=${GITHUB_SHA}/" "${recipe}"
+          chown builder:builder "${recipe}"
+
+      - name: Build, check and package with declared dependencies
+        run: |
+          set -euo pipefail
+          su - builder -c '
+            set -euo pipefail
+            cd /home/builder/aur-package
+            export CMAKE_BUILD_PARALLEL_LEVEL=2 VCPKG_MAX_CONCURRENCY=2
+            makepkg --syncdeps --noconfirm --cleanbuild --log
+          '
+
+      - name: Verify packaged source revision
+        run: |
+          set -euo pipefail
+          actual_sha="$(su - builder -c 'git -C /home/builder/aur-package/src/ime-unix rev-parse HEAD')"
+          test "${actual_sha}" = "${GITHUB_SHA}"
+
+      - name: Upload installable AUR packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-package-${{ inputs.package-name }}
+          path: /home/builder/aur-package/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload AUR build and test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aur-logs-${{ inputs.package-name }}
+          path: |
+            /home/builder/aur-package/*.log
+            /home/builder/aur-package/generated.SRCINFO
+            /home/builder/aur-package/src/**/Testing/Temporary/*.log
+            /home/builder/aur-package/src/**/vcpkg-manifest-install.log
+            /home/builder/aur-package/src/**/CMakeConfigureLog.yaml
+            /home/builder/aur-package/src/ime-unix/vcpkg/buildtrees/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  verify-clean-install:
+    name: Verify clean AUR install
+    needs: build-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # No build tools, makedepends, source tree or vcpkg cache are carried over.
+    container: archlinux:base
+
+    steps:
+      - name: Download built AUR packages
+        uses: actions/download-artifact@v4
+        with:
+          name: aur-package-${{ inputs.package-name }}
+          path: packages
+
+      - name: Install package and declared runtime dependencies
+        working-directory: packages
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm
+          shopt -s nullglob
+          packages=("${PACKAGE_NAME}"-[0-9]*.pkg.tar.zst)
+          test "${#packages[@]}" -eq 1
+          pacman -U --noconfirm "${packages[@]}"
+          pacman -Q "${PACKAGE_NAME}"
+          pacman -Qkk "${PACKAGE_NAME}"
+
+      - name: Verify installed runtime and resources
+        run: |
+          set -euo pipefail
+          binaries=(
+            /usr/bin/llavon-ime-unix-service
+            /usr/bin/llavon-ime-lora
+            /usr/bin/llavon-ime-lora-gui
+            /usr/bin/llavon-ime-lora-backend
+            /usr/bin/atspi_probe
+            /usr/lib/fcitx5/llavon-ime-addon.so
+          )
+          for binary in "${binaries[@]}"; do
+            test -x "${binary}"
+            dependencies="$(ldd "${binary}")"
+            printf '%s\n%s\n' "${binary}" "${dependencies}"
+            if grep -q 'not found' <<< "${dependencies}"; then
+              echo "Unresolved runtime dependency in ${binary}" >&2
+              exit 1
+            fi
+          done
+          /usr/bin/llavon-ime-unix-service --help
+          /usr/bin/llavon-ime-lora-gui --help
+          test -x /usr/bin/llavon-ime-settings
+          test -x /usr/bin/llavon-ime-phrases
+          test -s /usr/share/fcitx5/addon/llavon-ime.conf
+          test -s /usr/share/fcitx5/inputmethod/llavon-ime.conf
+          test -s /usr/share/llavon-ime/tables/bopomofo_char.json
+          test -s /usr/share/llavon-ime/models/llavon-ime-llama-250m-Q4_K_M.gguf
+          test -s /usr/share/applications/llavon-ime-lora.desktop
+          test -s "/usr/share/licenses/${PACKAGE_NAME}/llavon-ime/LICENSE"
+          test -s "/usr/share/licenses/${PACKAGE_NAME}/llavon-ime-model/NOTICE"
+          if [[ "${PACKAGE_NAME}" == llavon-ime-fcitx5-preview-git ]]; then
+            test -s /usr/lib/llavon-ime/tools/lora/trainer-release.json
+            /usr/lib/llavon-ime/tools/lora/llavon-lora --version --json
+          fi
