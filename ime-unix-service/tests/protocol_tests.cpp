@@ -89,6 +89,41 @@ bool core_runtime_test() {
     return !runtime.loaded();
 }
 
+bool vulkan_pipeline_cache_config_test() {
+    using ime::unix_service::detail::resolve_vulkan_pipeline_cache_dir;
+#ifdef __APPLE__
+    const auto expected = std::filesystem::path("/home/test/Library/Caches/llavon-ime/vulkan");
+    if (resolve_vulkan_pipeline_cache_dir("/cache", "/home/test") != expected ||
+        !resolve_vulkan_pipeline_cache_dir("/cache", "").empty()) return false;
+#else
+    if (resolve_vulkan_pipeline_cache_dir("/cache", "/home/test") != "/cache/llavon-ime/vulkan" ||
+        resolve_vulkan_pipeline_cache_dir("/cache", "") != "/cache/llavon-ime/vulkan") return false;
+    const auto expected = std::filesystem::path("/home/test/.cache/llavon-ime/vulkan");
+#endif
+    if (resolve_vulkan_pipeline_cache_dir("", "/home/test") != expected ||
+        resolve_vulkan_pipeline_cache_dir("relative-cache", "/home/test") != expected ||
+        !resolve_vulkan_pipeline_cache_dir("", "").empty() ||
+        !resolve_vulkan_pipeline_cache_dir("relative-cache", "relative-home").empty()) return false;
+
+    ime::unix_service::RuntimeConfig config;
+    config.model_path = "/models/test.gguf";
+    config.tables_dir = "/tables";
+    config.vulkan_pipeline_cache_dir = "/cache/拉風/vulkan";
+    config.context_length = 256;
+    config.threads = 2;
+    config.gpu_layers = 0;
+    const auto core_config = config.to_core_config();
+    if (core_config.model_path != config.model_path || core_config.tables_dir != config.tables_dir ||
+        core_config.vulkan_pipeline_cache_dir != config.vulkan_pipeline_cache_dir ||
+        core_config.context_length != 256 || core_config.threads != 2 || core_config.gpu_layers != 0 ||
+        core_config.inference_device.backend != llavon::ime::core::InferenceBackend::automatic) return false;
+
+    // Explicitly disabling the cache is preserved; loading/inference must not
+    // depend on being able to create a cache directory.
+    config.vulkan_pipeline_cache_dir.clear();
+    return config.to_core_config().vulkan_pipeline_cache_dir.empty();
+}
+
 class MockEngine final : public ime::unix_service::ISessionEngine {
 public:
     std::vector<std::vector<char32_t>> predict(const ime::unix_service::protocol::PredictRequest& request) override {
@@ -502,7 +537,8 @@ bool sqlite_exception_test() {
 int main() {
     struct Case { const char* name; bool (*run)(); };
     const Case cases[] = {{"protocol", protocol_test}, {"core-adapter", core_adapter_test},
-                          {"core-runtime", core_runtime_test}, {"session", session_test}, {"commit", commit_test},
+                          {"core-runtime", core_runtime_test}, {"vulkan-pipeline-cache-config", vulkan_pipeline_cache_config_test},
+                          {"session", session_test}, {"commit", commit_test},
                           {"lora-lca", lora_lca_test}, {"sqlite-exception", sqlite_exception_test}};
     bool good = true;
     for (const auto& item : cases) {

@@ -23,6 +23,7 @@ void print_usage(const char* exe) {
               << "  --context-length N       (default 512)\n"
               << "  --threads N              (default 8)\n"
               << "  --gpu-layers auto|N      (default auto)\n"
+              << "  --vulkan-pipeline-cache-dir PATH (default per-user cache; empty disables)\n"
               << "  --max-sessions N         (default 8)\n"
               << "  --max-idle-sessions N    (default 4)\n"
               << "  --max-concurrent-predictions N (default 2)\n"
@@ -101,6 +102,8 @@ int main(int argc, char* argv[]) {
                 options.runtime.model_path = require_value("--model");
             } else if (argument == "--tables") {
                 options.runtime.tables_dir = require_value("--tables");
+            } else if (argument == "--vulkan-pipeline-cache-dir") {
+                options.runtime.vulkan_pipeline_cache_dir = require_value("--vulkan-pipeline-cache-dir");
             } else if (argument == "--context-length") {
                 options.runtime.context_length = static_cast<std::uint32_t>(positive_number(require_value("--context-length"), "--context-length"));
             } else if (argument == "--threads") {
@@ -134,6 +137,8 @@ int main(int argc, char* argv[]) {
         // applies the values the frontend has now instead of the ones it had
         // when it created its transport. They win over the command line.
         if (const char* value = env_value("LLAVON_IME_MODEL_PATH")) options.runtime.model_path = value;
+        if (const char* value = std::getenv("LLAVON_IME_VULKAN_PIPELINE_CACHE_DIR"))
+            options.runtime.vulkan_pipeline_cache_dir = value;
         if (const char* value = env_value("LLAVON_IME_CONTEXT_LENGTH"))
             options.runtime.context_length = static_cast<std::uint32_t>(positive_number(value, "--context-length"));
         if (const char* value = env_value("LLAVON_IME_THREADS"))
