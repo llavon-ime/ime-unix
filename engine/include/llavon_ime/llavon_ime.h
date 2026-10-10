@@ -176,6 +176,10 @@ int lv_engine_reload_config_json(lv_engine* engine, const char* json, size_t len
 /* Re-reads the phrase overrides file without restarting the engine. */
 void lv_engine_reload_phrase_overrides(lv_engine* engine);
 
+/* Restart only prediction transport; composition and frontend contexts survive.
+ * Uses current config, preserving a model_path explicitly supplied at creation. */
+int lv_engine_restart_prediction_service(lv_engine* engine);
+
 /* Schema of every configurable field (key, label, group, kind, bounds, default
    and choices), for host settings UIs. Returns the JSON length; copies into
    buffer when it is non-NULL, NUL-terminated and truncated to capacity. */

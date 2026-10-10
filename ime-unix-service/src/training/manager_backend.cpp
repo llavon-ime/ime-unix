@@ -1,4 +1,7 @@
 #include "commit_store.hpp"
+#include "job_process.hpp"
+#include "manager_model_policy.hpp"
+#include "manager_database.hpp"
 #include "gpu_vendor.hpp"
 #include "lora_history_lca.hpp"
 #include "lora_presets.hpp"
@@ -1597,156 +1600,13 @@ std::string last_log(const fs::path& path) {
     return data;
 }
 
-fs::path config_file() {
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) throw std::runtime_error("HOME is not set");
-#ifdef __APPLE__
-    const fs::path root = std::getenv("XDG_CONFIG_HOME") ? fs::path(std::getenv("XDG_CONFIG_HOME")) : fs::path(home) / ".config";
-    return root / "llavon-ime" / "config.json";
-#else
-    if (const char* value = std::getenv("LLAVON_IME_CONFIG_PATH"); value && *value) return value;
-    const fs::path root = std::getenv("XDG_CONFIG_HOME") ? fs::path(std::getenv("XDG_CONFIG_HOME")) : fs::path(home) / ".config";
-    return root / "fcitx5" / "conf" / "llavon-ime.conf";
-#endif
-}
+using ime::unix_service::manager::configured_model_path;
+using ime::unix_service::manager::use_model;
+using ime::unix_service::manager::use_base_model;
+using ime::unix_service::manager::trainer_path;
+using ime::unix_service::manager::trainer_ready;
 
-// The model the input method currently points at; the history uses it to mark
-// the run that is already loaded (Windows shows 載入成功 the same way).
-std::string configured_model_path() {
-    try {
-        const auto config = config_file();
-        std::ifstream input(config);
-        if (!input) return {};
-#ifdef __APPLE__
-        return json::parse(input).value("model_path", std::string{});
-#else
-        std::string line;
-        while (std::getline(input, line)) {
-            if (!line.starts_with("ModelPath=")) continue;
-            auto value = trim(line.substr(std::string("ModelPath=").size()));
-            if (value.size() >= 2 && value.front() == '"' && value.back() == '"') value = value.substr(1, value.size() - 2);
-            std::string unescaped;
-            for (std::size_t index = 0; index < value.size(); ++index) {
-                if (value[index] == '\\' && index + 1 < value.size()) ++index;
-                unescaped += value[index];
-            }
-            return unescaped;
-        }
-        return {};
-#endif
-    } catch (...) { return {}; }
-}
-
-// Sets or clears the configured model path. Clearing removes the entry so the
-// input method falls back to its installed default model, i.e. the base model
-// a training history node offers to apply.
-void write_model_path(const std::optional<std::string>& path) {
-    const auto config = config_file();
-    fs::create_directories(config.parent_path());
-    const auto temporary = fs::path(config.string() + ".lora.partial");
-#ifdef __APPLE__
-    json values = json::object();
-    if (fs::is_regular_file(config)) values = json::parse(std::ifstream(config));
-    if (!values.is_object()) throw std::runtime_error("invalid input method settings");
-    if (path) values["model_path"] = *path;
-    else values.erase("model_path");
-    { std::ofstream output(temporary, std::ios::trunc); output << values.dump(2) << '\n';
-      if (!output) throw std::runtime_error("cannot save input method settings"); }
-#else
-    std::vector<std::string> lines;
-    std::ifstream input(config);
-    std::string line;
-    while (std::getline(input, line)) {
-        if (!line.starts_with("ModelPath=")) lines.push_back(line);
-    }
-    { std::ofstream output(temporary, std::ios::trunc);
-      for (const auto& value : lines) output << value << '\n';
-      if (path) {
-          // Fcitx INI accepts quoted paths with spaces and backslashes.
-          std::string escaped;
-          for (char ch : *path) {
-              if (ch == '\\' || ch == '"') escaped += '\\';
-              escaped += ch;
-          }
-          output << "ModelPath=\"" << escaped << "\"\n";
-      }
-      if (!output) throw std::runtime_error("cannot save input method settings"); }
-#endif
-    if (::chmod(temporary.c_str(), 0600) != 0) throw std::runtime_error("cannot protect input method settings");
-    fs::rename(temporary, config);
-#ifdef __APPLE__
-    (void)::notify_post("org.llavon-ime.lora.model-changed");
-#else
-    const auto child = ::fork();
-    if (child == 0) { ::execlp("fcitx5-remote", "fcitx5-remote", "-r", static_cast<char*>(nullptr)); _exit(127); }
-    if (child > 0) { int status; while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {} }
-#endif
-}
-
-void use_model(const fs::path& path) { write_model_path(path.string()); }
-void use_base_model() { write_model_path(std::nullopt); }
-
-bool has_pinned_trainer_stamp(const fs::path& executable) {
-    try {
-        return nlohmann::json::parse(std::ifstream(executable.parent_path() / "trainer-release.json")).at("commit")
-               == LLAVON_IME_LORA_PINNED_COMMIT;
-    } catch (...) { return false; }
-}
-
-// TorchSharp needs the native libraries next to the executable; a stale
-// installation that only carries the executable must not look ready.
-bool has_trainer_libraries(const fs::path& directory, int depth = 0) {
-    std::error_code error;
-    for (const auto& entry : fs::directory_iterator(directory, error)) {
-        const auto name = entry.path().filename().string();
-        if (name.ends_with(".so") || name.find(".so.") != std::string::npos || name.ends_with(".dylib")) return true;
-        if (depth < 3 && entry.is_directory() && has_trainer_libraries(entry.path(), depth + 1)) return true;
-    }
-    return false;
-}
-
-bool trainer_usable(const fs::path& executable) {
-    return fs::is_regular_file(executable) && has_pinned_trainer_stamp(executable) &&
-           has_trainer_libraries(executable.parent_path());
-}
-
-fs::path trainer_path(const fs::path& state) {
-    if (const char* override = std::getenv("LLAVON_IME_LORA_CLI_PATH"); override && *override)
-        return fs::absolute(override);
-    const auto managed = state / "tools" / "lora" / "llavon-lora";
-    const auto system = fs::path(LLAVON_IME_INSTALLED_LORA_TRAINER_PATH);
-    if (trainer_usable(managed)) return managed;
-    if (trainer_usable(system)) return system;
-    return fs::is_regular_file(managed) ? managed : system;
-}
-
-bool trainer_ready(const fs::path& executable, const fs::path& state) {
-    if (!fs::is_regular_file(executable) || ::access(executable.c_str(), X_OK) != 0) return false;
-    const auto managed = state / "tools" / "lora" / "llavon-lora";
-    const auto system = fs::path(LLAVON_IME_INSTALLED_LORA_TRAINER_PATH);
-    if (executable != managed && executable != system) return true;  // explicit development override
-    return trainer_usable(executable);
-}
-
-json query_database(const fs::path& path, const char* sql, int columns) {    if (!fs::is_regular_file(path)) return json::array();
-    const auto owned_db = ime::unix_service::sqlite::open(path, SQLITE_OPEN_READONLY);
-    auto* db = owned_db.get();
-    sqlite3_busy_timeout(db, 1000);
-    const auto owned_stmt = ime::unix_service::sqlite::prepare(db, sql);
-    auto* stmt = owned_stmt.get();
-    json result = json::array();
-    int rc;
-    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        json row = json::array();
-        for (int i = 0; i < columns; ++i) {
-            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, i));
-            row.push_back(text ? text : "");
-        }
-        result.push_back(std::move(row));
-    }
-    if (rc != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
-    return result;
-}
+using ime::unix_service::manager::query_database;
 
 struct Options {
     fs::path state, db, cli, tables, trainer;
@@ -1758,24 +1618,7 @@ struct Options {
     int idle_seconds = 120;
 };
 
-// The encrypted store helpers need a live connection, and the manager keeps no
-// long-lived handle; one connection serves each request.
-class DatabaseHandle {
-public:
-    explicit DatabaseHandle(const fs::path& path) {
-        if (!fs::is_regular_file(path)) throw std::runtime_error("找不到訓練資料庫");
-        db_ = ime::unix_service::sqlite::open(path, SQLITE_OPEN_READWRITE);
-        sqlite3_busy_timeout(db_.get(), 1000);
-        ime::unix_service::initialize_commit_database(db_.get());
-    }
-    ~DatabaseHandle() = default;
-    DatabaseHandle(const DatabaseHandle&) = delete;
-    DatabaseHandle& operator=(const DatabaseHandle&) = delete;
-    sqlite3* get() const { return db_.get(); }
-
-private:
-    ime::unix_service::sqlite::Database db_;
-};
+using ime::unix_service::manager::DatabaseHandle;
 
 // Windows exposes the same override for its dev/test asset root.
 fs::path assets_root(const Options& options) {
@@ -1829,10 +1672,7 @@ Options parse_options(int argc, char** argv) {
 
 struct Job {
     std::string kind, state = "idle";
-    pid_t pid = -1;
     fs::path log, output;
-    bool cancelling = false;
-    Clock::time_point cancel_started{};
 };
 
 class Gui {
@@ -1886,11 +1726,7 @@ public:
                 std::cout << response.dump() << std::endl;
             }
         }
-        if (job_.pid >= 0) {
-            (void)::kill(-job_.pid, SIGTERM);
-            for (int i = 0; i < 25 && job_.pid >= 0; ++i) { ::usleep(100000); update_job(); }
-            if (job_.pid >= 0) { (void)::kill(-job_.pid, SIGKILL); (void)::waitpid(job_.pid, nullptr, 0); }
-        }
+        process_.terminate();
         ::close(lock_);
         return 0;
     }
@@ -1999,7 +1835,7 @@ public:
         last_seen_ = Clock::now();
         while (!stop_requested) {
             update_job();
-            if (job_.pid < 0 && watch_self_) {
+            if (!process_.running() && watch_self_) {
                 // Reinstalling the manager must take effect without closing the
                 // page: replace this process with the new binary when the file
                 // changed on disk. A running job is never interrupted, and a
@@ -2014,7 +1850,7 @@ public:
                     }
                 }
             }
-            if (job_.pid < 0 && Clock::now() - last_seen_ > std::chrono::seconds(options_.idle_seconds)) break;
+            if (!process_.running() && Clock::now() - last_seen_ > std::chrono::seconds(options_.idle_seconds)) break;
             pollfd descriptor{listen_, POLLIN, 0};
             const auto ready = ::poll(&descriptor, 1, 500);
             if (ready < 0 && errno != EINTR) throw std::runtime_error("GUI socket poll failed");
@@ -2028,15 +1864,7 @@ public:
             catch (const std::exception& error) { respond(client, 400, "application/json", json{{"error", error.what()}}.dump()); }
             ::close(client);
         }
-        if (job_.pid >= 0) {
-            (void)::kill(-job_.pid, SIGTERM);
-            for (int i = 0; i < 20; ++i) {
-                update_job();
-                if (job_.pid < 0) break;
-                ::usleep(100000);
-            }
-            if (job_.pid >= 0) { (void)::kill(-job_.pid, SIGKILL); (void)::waitpid(job_.pid, nullptr, 0); }
-        }
+        process_.terminate();
         return 0;
     }
 #endif
@@ -2072,15 +1900,9 @@ private:
 
 #endif
     void update_job() {
-        if (job_.pid < 0) return;
-        if (job_.cancelling && Clock::now() - job_.cancel_started > std::chrono::seconds(5))
-            (void)::kill(-job_.pid, SIGKILL);
-        int status;
-        const auto ended = ::waitpid(job_.pid, &status, WNOHANG);
-        if (ended == 0) return;
-        if (ended < 0 && errno == EINTR) return;
-        job_.state = job_.cancelling ? "cancelled" :
-                     (ended > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? "completed" : "failed");
+        const auto completed = process_.poll();
+        if (!completed) return;
+        job_.state = process_.cancelling() ? "cancelled" : (*completed ? "completed" : "failed");
         if (job_.kind == "install" && job_.state == "completed" && !std::getenv("LLAVON_IME_LORA_CLI_PATH"))
             options_.trainer = options_.state / "tools" / "lora" / "llavon-lora";
         // A re-export requested by an apply is applied as soon as it succeeds.
@@ -2094,7 +1916,6 @@ private:
                 std::cerr << "LoRA manager: cannot apply the re-exported model: " << error.what() << '\n';
             }
         }
-        job_.pid = -1;
     }
 
     // The training password never reaches argv or the environment: it travels
@@ -2102,99 +1923,28 @@ private:
     void start_job(const std::string& kind, std::vector<std::string> args, fs::path output,
                    const std::string& password = {}) {
         update_job();
-        if (job_.pid >= 0) throw std::runtime_error("已有工作進行中");
+        if (process_.running()) throw std::runtime_error("已有工作進行中");
         job_ = Job{.kind = kind, .state = "running", .log = options_.state / "gui-job.log", .output = std::move(output)};
-        std::ofstream(job_.log, std::ios::trunc).close();
-        int password_pipe[2] = {-1, -1};
-        if (!password.empty() && ::pipe(password_pipe) != 0) throw std::runtime_error("cannot pass the training password");
-        const pid_t child = ::fork();
-        if (child < 0) {
-            if (password_pipe[0] >= 0) { ::close(password_pipe[0]); ::close(password_pipe[1]); }
-            throw std::runtime_error("cannot start CLI");
-        }
-        if (child == 0) {
-            ::setsid();
-            if (password_pipe[0] >= 0) {
-                // Descriptor 3 is the contract with the CLI; keep it when the
-                // pipe already landed there.
-                if (password_pipe[0] != 3 && ::dup2(password_pipe[0], 3) < 0) _exit(127);
-                if (password_pipe[0] != 3) ::close(password_pipe[0]);
-                ::close(password_pipe[1]);
-            }
-            if (kind == "train" || kind == "export")
-                ::setenv("LLAVON_IME_LORA_CLI_PATH", options_.trainer.c_str(), 1);
-            const int log = ::open(job_.log.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
-            if (log < 0 || ::dup2(log, STDOUT_FILENO) < 0 || ::dup2(log, STDERR_FILENO) < 0) _exit(127);
-            ::close(log);
-            std::vector<std::string> strings{options_.cli.string()};
-            strings.insert(strings.end(), args.begin(), args.end());
-            std::vector<char*> argv;
-            for (auto& item : strings) argv.push_back(item.data());
-            argv.push_back(nullptr);
-            ::execv(argv[0], argv.data());
-            _exit(127);
-        }
-        if (password_pipe[0] >= 0) {
-            ::close(password_pipe[0]);
-            std::string line = password + "\n";
-            const auto written = ::write(password_pipe[1], line.data(), line.size());
-            const bool complete = written == static_cast<ssize_t>(line.size());
-            if (written > 0) sodium_memzero(line.data(), static_cast<std::size_t>(written));
-            ::close(password_pipe[1]);
-            if (!complete) { (void)::kill(-child, SIGTERM); (void)::waitpid(child, nullptr, 0); job_.pid = -1;
-                             throw std::runtime_error("cannot pass the training password"); }
-        }
-        job_.pid = child;
+        try {
+            process_.launch(options_.cli, args, job_.log, password,
+                kind == "train" || kind == "export" ? std::optional<fs::path>(options_.trainer) : std::nullopt);
+        } catch (...) { job_.state = "failed"; throw; }
     }
 
     // Runs the manager CLI synchronously and returns its captured output; the
     // trainable-record count behind the confirmation dialog uses this.
     std::string run_cli_capture(const std::vector<std::string>& args, const std::string& password) {
         const auto output = options_.state / "gui-count.out";
-        int password_pipe[2] = {-1, -1};
-        if (!password.empty() && ::pipe(password_pipe) != 0)
-            throw std::runtime_error("cannot pass the training password");
-        const pid_t child = ::fork();
-        if (child < 0) {
-            if (password_pipe[0] >= 0) { ::close(password_pipe[0]); ::close(password_pipe[1]); }
-            throw std::runtime_error("cannot start CLI");
-        }
-        if (child == 0) {
-            if (password_pipe[0] >= 0) {
-                if (password_pipe[0] != 3 && ::dup2(password_pipe[0], 3) < 0) _exit(127);
-                if (password_pipe[0] != 3) ::close(password_pipe[0]);
-                ::close(password_pipe[1]);
-            }
-            const int log = ::open(output.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0600);
-            if (log < 0 || ::dup2(log, STDOUT_FILENO) < 0 || ::dup2(log, STDERR_FILENO) < 0) _exit(127);
-            ::close(log);
-            std::vector<std::string> strings{options_.cli.string()};
-            strings.insert(strings.end(), args.begin(), args.end());
-            std::vector<char*> argv;
-            for (auto& item : strings) argv.push_back(item.data());
-            argv.push_back(nullptr);
-            ::execv(argv[0], argv.data());
-            _exit(127);
-        }
-        if (password_pipe[0] >= 0) {
-            ::close(password_pipe[0]);
-            std::string line = password + "\n";
-            const auto written = ::write(password_pipe[1], line.data(), line.size());
-            const bool complete = written == static_cast<ssize_t>(line.size());
-            if (written > 0) sodium_memzero(line.data(), static_cast<std::size_t>(written));
-            ::close(password_pipe[1]);
-            if (!complete) {
-                (void)::kill(-child, SIGTERM);
-                (void)::waitpid(child, nullptr, 0);
-                throw std::runtime_error("cannot pass the training password");
-            }
-        }
-        int status = 0;
-        while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+        ime::unix_service::JobProcess capture;
+        capture.launch(options_.cli, args, output, password);
+        std::optional<bool> completed;
+        const auto deadline = Clock::now() + std::chrono::minutes(2);
+        while (!(completed = capture.poll()) && Clock::now() < deadline) ::usleep(10000);
+        if (!completed) { capture.terminate(); throw std::runtime_error("count timed out"); }
         const auto text = last_log(output);
         std::error_code ignored;
         fs::remove(output, ignored);
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        if (!*completed)
             throw std::runtime_error(text.empty() ? std::string("count failed") : trim(text));
         return text;
     }
@@ -2243,7 +1993,7 @@ private:
     // Keeps the LoRA models and the training history; only the conversation
     // records and the derived keys go away.
     void forget_conversation_data() {
-        if (job_.pid >= 0) throw std::runtime_error("請先等待目前工作結束或取消");
+        if (process_.running()) throw std::runtime_error("請先等待目前工作結束或取消");
         ime::unix_service::CommitStore store(db_);
         store.reset_conversation_data();
         cipher_.reset();
@@ -2477,7 +2227,7 @@ private:
                 int trained = 0;
                 if (std::sscanf(data.c_str() + count, "trainable=%d", &trained) == 1) job_records = trained;
             }
-        } else if (job_.kind == "fetch" && job_.pid >= 0) {
+        } else if (job_.kind == "fetch" && process_.running()) {
             const auto assets = assets_root(options_);
             if (fs::exists(assets)) {
                 for (const auto& entry : fs::directory_iterator(assets)) {
@@ -2486,7 +2236,7 @@ private:
                     if (fs::is_regular_file(part)) progress = std::to_string(fs::file_size(part) / 1048576) + " MiB 已下載";
                 }
             }
-        } else if (job_.kind == "install" && job_.pid >= 0) {
+        } else if (job_.kind == "install" && process_.running()) {
             const auto partial = options_.state / "tools" / "lora" / "trainer.tar.gz.partial";
             if (fs::is_regular_file(partial)) progress = std::to_string(fs::file_size(partial) / 1048576) + " MiB 已下載";
         }
@@ -2731,13 +2481,10 @@ private:
             start_job("train", std::move(args), output, password);
         } else if (request.path == "/api/cancel") {
             update_job();
-            if (job_.pid < 0) throw std::runtime_error("沒有執行中的工作");
-            job_.cancelling = true;
-            job_.cancel_started = Clock::now();
-            if (::kill(-job_.pid, SIGTERM) != 0 && errno != ESRCH) throw std::runtime_error("無法取消工作");
+            process_.cancel();
         } else if (request.path == "/api/use-model") {
             update_job();
-            if (job_.pid >= 0) throw std::runtime_error("請等待目前工作完成");
+            if (process_.running()) throw std::runtime_error("請等待目前工作完成");
             const auto id = body.at("id").get<std::string>();
             if (id == "base") {
                 // Applying the base model clears the configured path, so the
@@ -2788,6 +2535,7 @@ private:
     std::string token_;
 #endif
     Job job_;
+    ime::unix_service::JobProcess process_;
     Clock::time_point last_seen_{};
     json readings_cache_ = json::object();
     bool readings_loaded_ = false;

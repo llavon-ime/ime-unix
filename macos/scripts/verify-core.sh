@@ -49,6 +49,7 @@ swiftc -O -parse-as-library \
     "${ROOT_DIR}"/macos/Core/EngineCore.swift \
     "${ROOT_DIR}"/macos/Tests/CoreTests.swift \
     "${BUILD_DIR}/engine/libllavon_ime_engine.a" \
+    "${BUILD_DIR}/engine/protocol/libllavon_ime_protocol.a" \
     "${STANDARD_LIBRARY_FLAG}" \
     -o "${BUILD_DIR}/core-tests"
 

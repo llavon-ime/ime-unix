@@ -79,6 +79,7 @@ struct lv_engine {
     RenderState render;
     lv_render_info info = {};
     std::string config_json;
+    bool model_path_override = false;
 };
 
 namespace {
@@ -202,36 +203,23 @@ int lv_engine_create(const lv_engine_options* options, const lv_host* host, lv_e
             engine_options.config = load_config();
         }
 
-        ServiceTransportOptions transport;
+        auto transport = service_options_from_config(engine_options.config);
         if (options->socket_path != nullptr) transport.socket_path = options->socket_path;
         if (options->service_path != nullptr) transport.service_path = options->service_path;
         if (options->model_path != nullptr) {
             transport.model_path = options->model_path;
-        } else if (!engine_options.config.model_path.empty()) {
-            // No host-provided path: use the configured one, like the fcitx5
-            // addon does, so a path saved in the settings takes effect.
-            transport.model_path = engine_options.config.model_path;
         }
         if (options->tables_dir != nullptr) transport.tables_dir = options->tables_dir;
         // Unset numeric options come from the effective config, so the service
         // runs with the same values the engine itself uses. The fcitx5 addon
         // derives its transport from load_config() the same way.
-        const auto configured = [](int value) {
-            return value > 0 ? static_cast<std::uint32_t>(value) : 0U;
-        };
-        transport.context_length = options->context_length != 0
-                                      ? options->context_length
-                                      : configured(engine_options.config.context_length);
-        transport.threads = options->threads != 0 ? options->threads
-                                                  : configured(engine_options.config.thread_count);
-        transport.gpu_layers = options->gpu_layers != LV_GPU_LAYERS_FROM_CONFIG
-                                   ? options->gpu_layers
-                                   : engine_options.config.gpu_layers;
-        transport.idle_timeout_seconds = options->idle_timeout_seconds != 0
-                                             ? options->idle_timeout_seconds
-                                             : configured(engine_options.config.idle_timeout_seconds);
+        if (options->context_length != 0) transport.context_length = options->context_length;
+        if (options->threads != 0) transport.threads = options->threads;
+        if (options->gpu_layers != LV_GPU_LAYERS_FROM_CONFIG) transport.gpu_layers = options->gpu_layers;
+        if (options->idle_timeout_seconds != 0) transport.idle_timeout_seconds = options->idle_timeout_seconds;
         transport.auto_start = options->auto_start_service != 0;
         engine_options.transport = transport;
+        engine->model_path_override = options->model_path != nullptr;
 
         engine->engine = std::make_unique<Engine>(std::move(engine_options), engine->bridge);
         *out = engine.release();
@@ -385,9 +373,13 @@ int lv_engine_reload_config_json(lv_engine* engine, const char* json, size_t len
     if (engine == nullptr || engine->engine == nullptr || json == nullptr) return -1;
     try {
         const auto parsed = nlohmann::json::parse(json, json + length);
+        const auto before = service_options_from_config(engine->engine->config());
         // A plain reload from disk: refresh the config without settling the
         // sessions, mirroring the fcitx5 addon's reload_config().
         engine->engine->set_config(config_from_json(parsed), false);
+        const auto after = service_options_from_config(engine->engine->config());
+        if (!same_service_runtime(before, after))
+            engine->engine->restart_prediction_service(engine->model_path_override);
         return 0;
     } catch (...) {
         return -1;
@@ -404,6 +396,14 @@ size_t lv_engine_config_json(lv_engine* engine, char* buffer, size_t capacity) {
 void lv_engine_reload_phrase_overrides(lv_engine* engine) {
     if (engine == nullptr || engine->engine == nullptr) return;
     engine->engine->reload_phrase_overrides();
+}
+
+int lv_engine_restart_prediction_service(lv_engine* engine) {
+    if (engine == nullptr || engine->engine == nullptr) return -1;
+    try {
+        engine->engine->restart_prediction_service(engine->model_path_override);
+        return 0;
+    } catch (...) { return -1; }
 }
 
 size_t lv_config_schema_json(char* buffer, size_t capacity) {

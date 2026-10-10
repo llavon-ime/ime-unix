@@ -167,14 +167,9 @@ std::filesystem::path default_table_path() {    if (const char* override = env_w
 }
 
 ServiceTransportOptions default_transport_options() {
-    ServiceTransportOptions options;
     const auto config = load_config();
+    auto options = service_options_from_config(config);
     options.tables_dir = default_table_path().parent_path();
-    options.model_path = config.model_path;
-    options.context_length = static_cast<std::uint32_t>(config.context_length);
-    options.threads = static_cast<std::uint32_t>(config.thread_count);
-    options.gpu_layers = config.gpu_layers;
-    options.idle_timeout_seconds = static_cast<std::uint32_t>(config.idle_timeout_seconds);
     if (const char* model = env_with_legacy("LLAVON_IME_MODEL_PATH", "IME_FCITX5_MODEL_PATH")) {
         options.model_path = model;
     }
@@ -384,7 +379,10 @@ void ImeEngine::reloadConfig() {
 void ImeEngine::reload_config() {
     const auto config = load_config();
     const auto transport = default_transport_options();
-    if (transport.model_path != active_service_model_path_) {
+    const auto previous = service_options_from_config(engine_->config());
+    if (transport.model_path != active_service_model_path_ ||
+        transport.context_length != previous.context_length || transport.threads != previous.threads ||
+        transport.gpu_layers != previous.gpu_layers || transport.idle_timeout_seconds != previous.idle_timeout_seconds) {
         // Restart the prediction service with the newly selected model. The
         // engine is kept: rebuilding it would tear down the accessibility
         // backend, and libatspi cannot be re-initialized in the same process.
@@ -525,7 +523,7 @@ HostContext ImeEngine::surrounding_text(ContextId context) {
             const std::size_t bounded = std::min(static_cast<std::size_t>(offset), scalars.size());
             std::size_t units = 0;
             for (std::size_t i = 0; i < bounded; ++i) {
-                units += scalars[i] > 0xFFFF ? 2 : 1;
+                units += scalars[i] > 0xFFFF ? 2U : 1U;
             }
             return units;
         };
@@ -549,7 +547,21 @@ bool ImeEngine::is_sensitive(ContextId context) {
 std::string ImeEngine::program(ContextId context) {
     auto* input_context_ptr = input_context(context);
     if (input_context_ptr == nullptr) return {};
-    return input_context_ptr->program();
+    const auto name = input_context_ptr->program();
+    if (!name.empty() && name.find('.') == std::string::npos) return name;
+#if defined(__linux__)
+    // GTK D-Bus-activated clients can omit their program name or report a
+    // desktop ID such as org.gnome.Terminal. Resolve the executable owning
+    // the actual X11 focus so the process search and layout agree.
+    const int pid = input_context_ptr->display().starts_with("x11:") ? focused_x11_pid() : 0;
+    if (pid > 1) {
+        std::error_code error;
+        const auto executable = std::filesystem::read_symlink(
+            std::filesystem::path("/proc") / std::to_string(pid) / "exe", error);
+        if (!error) return executable.filename().string();
+    }
+#endif
+    return name;
 }
 
 int ImeEngine::focused_probe_process(ContextId context) {
@@ -566,7 +578,7 @@ int ImeEngine::focused_probe_process(ContextId context) {
 std::vector<int> ImeEngine::probe_processes(ContextId context) {
     auto* input_context_ptr = input_context(context);
     if (input_context_ptr == nullptr) return {};
-    const std::string program = input_context_ptr->program();
+    const std::string program = this->program(context);
     if (program.empty()) return {};
 #if defined(__linux__)
     // Focus is additional evidence, not a prerequisite. Wayland and some

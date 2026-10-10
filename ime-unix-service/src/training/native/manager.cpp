@@ -577,10 +577,12 @@ void Manager::refresh() {
     refreshPending_ = 5;
     const auto done = [this] { if (--refreshPending_ == 0) emit refreshed(); };
     backend_->request("/api/state", {}, [this, done](const QJsonValue& value) {
-        if (value.isObject()) renderState(value.toObject()); done();
+        if (value.isObject()) renderState(value.toObject());
+        done();
     });
     backend_->request("/api/protection", {}, [this, done](const QJsonValue& value) {
-        if (value.isObject()) renderProtection(value.toObject()); done();
+        if (value.isObject()) renderProtection(value.toObject());
+        done();
     });
     backend_->request("/api/pending-count", {}, [this, done](const QJsonValue& value) {
         if (value.isObject()) {
@@ -589,16 +591,19 @@ void Manager::refresh() {
             const QStringList names{QStringLiteral("未訓練"), QStringLiteral("已訓練"), QStringLiteral("已排除")};
             const QStringList keys{"count", "trained", "excluded"};
             for (int i = 0; i < 3; ++i) filter_->setItemText(i, names[i] + "  " + QString::number(totals.value(keys[i]).toInt()));
-        } done();
+        }
+        done();
     });
     const QString path = QStringLiteral("/api/records?state=%1&offset=%2&manual=%3")
         .arg(filter_->currentData().toString()).arg(offset_).arg(manualView_->isChecked() ? 1 : 0);
     // The existing filter parser accepts manual=1; omit the parameter otherwise.
     backend_->request(manualView_->isChecked() ? path : path.left(path.lastIndexOf('&')), {}, [this, done](const QJsonValue& value) {
-        if (value.isObject()) renderRecords(value.toObject()); done();
+        if (value.isObject()) renderRecords(value.toObject());
+        done();
     });
     backend_->request("/api/history", {}, [this, done](const QJsonValue& value) {
-        if (value.isObject()) renderHistory(value.toObject()); done();
+        if (value.isObject()) renderHistory(value.toObject());
+        done();
     });
 }
 
@@ -623,16 +628,16 @@ void Manager::act(const QString& path, const QJsonObject& body, Backend::Reply r
     }, true);
 }
 
-void Manager::renderProtection(const QJsonObject& data) {
-    protection_ = data;
-    const bool configured = data.value("configured").toBool(), unlocked = data.value("unlocked").toBool();
+void Manager::renderProtection(const QJsonObject& protection) {
+    protection_ = protection;
+    const bool configured = protection.value("configured").toBool(), unlocked = protection.value("unlocked").toBool();
     collection_->setText(!configured ? QStringLiteral("收集尚未啟用。請妥善保存資料密碼。") :
-        QStringLiteral("%1 · %2").arg(data.value("enabled").toBool() ? QStringLiteral("正在加密收集") : QStringLiteral("已暫停收集"),
+        QStringLiteral("%1 · %2").arg(protection.value("enabled").toBool() ? QStringLiteral("正在加密收集") : QStringLiteral("已暫停收集"),
                                    unlocked ? QStringLiteral("已解鎖檢視") : QStringLiteral("文字已鎖定")));
     password_->setVisible(!unlocked); confirmation_->setVisible(!configured); setup_->setVisible(!configured);
     unlock_->setVisible(configured && !unlocked); lock_->setVisible(unlocked);
     recording_->setVisible(configured); forget_->setVisible(configured);
-    recording_->setText(data.value("enabled").toBool() ? QStringLiteral("暫停收集") : QStringLiteral("恢復收集"));
+    recording_->setText(protection.value("enabled").toBool() ? QStringLiteral("暫停收集") : QStringLiteral("恢復收集"));
     trainPassword_->setVisible(configured);
     trainPasswordLabel_->setVisible(configured);
 }
@@ -646,9 +651,9 @@ void Manager::updateRecordActions() {
     exclude_->setEnabled(enabled); delete_->setEnabled(enabled);
 }
 
-void Manager::renderRecords(const QJsonObject& data) {
+void Manager::renderRecords(const QJsonObject& recordPage) {
     const auto selected = selectedRecord();
-    const auto rows = data.value("rows").toArray();
+    const auto rows = recordPage.value("rows").toArray();
     records_->setRowCount(static_cast<int>(rows.size()));
     int index = 0;
     for (const auto value : rows) {
@@ -671,30 +676,30 @@ void Manager::renderRecords(const QJsonObject& data) {
         if (id == selected) records_->selectRow(index);
         ++index;
     }
-    const int total = data.value("total").toInt();
+    const int total = recordPage.value("total").toInt();
     emptyRecords_->setVisible(rows.isEmpty());
     emptyRecords_->setText(protection_.value("configured").toBool() ? QStringLiteral("尚無符合篩選的紀錄") : QStringLiteral("尚無輸入紀錄"));
     pageInfo_->setText(total ? QStringLiteral("%1–%2 / %3 筆").arg(offset_ + 1).arg(offset_ + rows.size()).arg(total) : QString());
     pageInfo_->setVisible(total > 0);
-    previous_->setEnabled(offset_ > 0); next_->setEnabled(data.value("has_more").toBool());
+    previous_->setEnabled(offset_ > 0); next_->setEnabled(recordPage.value("has_more").toBool());
     updateRecordActions();
 }
 
-void Manager::renderState(const QJsonObject& data) {
+void Manager::renderState(const QJsonObject& state) {
     const auto oldJob = state_.value("job").toObject();
-    state_ = data;
-    const auto job = data.value("job").toObject();
+    state_ = state;
+    const auto job = state.value("job").toObject();
     running_ = job.value("state") == "running";
     bool updateBusy = false;
 #ifdef Q_OS_LINUX
     updateBusy = updates_ && updates_->busy();
 #endif
-    model_->setText(data.value("model_ready").toBool() ? QStringLiteral("已就緒 · %1").arg(data.value("revision").toString().left(12)) : QStringLiteral("尚未下載 · 訓練需要未量化的 checkpoint"));
-    trainer_->setText(data.value("trainer_ready").toBool() ? QStringLiteral("已就緒 · %1").arg(data.value("trainer_version").toString()) : QStringLiteral("尚未安裝，或版本與目前輸入法不符"));
-    if (data.value("model_update_available").isBool()) model_->setText(model_->text() + (data.value("model_update_available").toBool() ? QStringLiteral(" · 有更新") : QStringLiteral(" · 已是固定版本")));
-    if (data.value("trainer_update_available").isBool()) trainer_->setText(trainer_->text() + (data.value("trainer_update_available").toBool() ? QStringLiteral(" · 有更新") : QStringLiteral(" · 已是固定版本")));
+    model_->setText(state.value("model_ready").toBool() ? QStringLiteral("已就緒 · %1").arg(state.value("revision").toString().left(12)) : QStringLiteral("尚未下載 · 訓練需要未量化的 checkpoint"));
+    trainer_->setText(state.value("trainer_ready").toBool() ? QStringLiteral("已就緒 · %1").arg(state.value("trainer_version").toString()) : QStringLiteral("尚未安裝，或版本與目前輸入法不符"));
+    if (state.value("model_update_available").isBool()) model_->setText(model_->text() + (state.value("model_update_available").toBool() ? QStringLiteral(" · 有更新") : QStringLiteral(" · 已是固定版本")));
+    if (state.value("trainer_update_available").isBool()) trainer_->setText(trainer_->text() + (state.value("trainer_update_available").toBool() ? QStringLiteral(" · 有更新") : QStringLiteral(" · 已是固定版本")));
     const QMap<QString, QString> devices{{"apple", "Apple Silicon / Metal"}, {"amd", "AMD / ROCm"}, {"nvidia", "NVIDIA / CUDA"}, {"none", "CPU"}};
-    device_->setText(QStringLiteral("訓練裝置 · %1").arg(devices.value(data.value("gpu").toString(), QStringLiteral("自動偵測"))));
+    device_->setText(QStringLiteral("訓練裝置 · %1").arg(devices.value(state.value("gpu").toString(), QStringLiteral("自動偵測"))));
     device_->setToolTip(QStringLiteral("後端由訓練器自動選擇"));
     const QMap<QString, QString> kinds{{"fetch", QStringLiteral("下載基礎模型")}, {"install", QStringLiteral("安裝訓練器")},
         {"train", QStringLiteral("個人化訓練")}, {"export", QStringLiteral("匯出模型")}, {"check", QStringLiteral("檢查模型版本")}, {"trainer-check", QStringLiteral("檢查訓練器版本")}};
@@ -733,7 +738,7 @@ void Manager::renderState(const QJsonObject& data) {
         } else scroll->setValue(position);
     }
     cancel_->setEnabled(running_ && !actionPending_);
-    start_->setEnabled(!running_ && !actionPending_ && !updateBusy && data.value("trainer_ready").toBool() && data.value("model_ready").toBool());
+    start_->setEnabled(!running_ && !actionPending_ && !updateBusy && state.value("trainer_ready").toBool() && state.value("model_ready").toBool());
     for (auto* widget : jobButtons_) widget->setEnabled(!running_ && !actionPending_ && !updateBusy);
     findChild<QPushButton*>("applyModel")->setEnabled(!running_ && !actionPending_ && !history_->selectedId().isEmpty());
     updateRecordActions();
@@ -744,13 +749,13 @@ void Manager::renderState(const QJsonObject& data) {
 QString Manager::selectedRun() const {
     return history_->selectedId();
 }
-void Manager::renderHistory(const QJsonObject& data) {
+void Manager::renderHistory(const QJsonObject& history) {
     const auto oldBase = base_->currentData().toString();
     const bool first = base_->count() == 1 && base_->currentData(Qt::UserRole + 1).isNull();
     const QSignalBlocker blocker(base_);
     base_->clear(); base_->addItem(QStringLiteral("Base model · 從頭開始"), "");
     historyRuns_.clear();
-    const auto runs = data.value("runs").toArray();
+    const auto runs = history.value("runs").toArray();
     for (const auto value : runs) {
         const auto run = value.toObject(); const auto id = text(run.value("id"));
         const auto title = QStringLiteral("#%1 · %2").arg(id, timeLabel(run.value("completed_at").toString()));
@@ -769,8 +774,8 @@ void Manager::renderHistory(const QJsonObject& data) {
         }
     }
     base_->setItemData(0, false, Qt::UserRole + 1);
-    ancestor_->setVisible(!data.value("common_ancestor").isNull());
-    ancestor_->setProperty("runId", text(data.value("common_ancestor")));
+    ancestor_->setVisible(!history.value("common_ancestor").isNull());
+    ancestor_->setProperty("runId", text(history.value("common_ancestor")));
 }
 
 QJsonObject Manager::trainingRequest() const {

@@ -478,7 +478,7 @@ private:
         // returns false can find the stale flag and report success.
         if (!ok) running_.store(false);
         {
-            std::lock_guard lock(ready_mutex_);
+            std::lock_guard<std::mutex> lock(ready_mutex_);
             ready_ = true;
             ready_ok_ = ok;
         }
@@ -518,14 +518,14 @@ private:
         }
         attempted_.store(true);
         {
-            std::lock_guard lock(ready_mutex_);
+            std::lock_guard<std::mutex> lock(ready_mutex_);
             ready_ = false;
             ready_ok_ = false;
         }
         running_.store(true);
         backend_thread_ = std::jthread([this]() { run(); });
 
-        std::unique_lock lock(ready_mutex_);
+        std::unique_lock<std::mutex> lock(ready_mutex_);
         if (!ready_cv_.wait_for(lock, std::chrono::seconds(5), [this]() { return ready_; })) {
             running_.store(false);
         }

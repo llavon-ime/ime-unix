@@ -121,3 +121,47 @@ RAWKEY_SUITE("native Alt tab shortcut cannot select an IME candidate", native_al
     RAWKEY_ASSERT(harness.composition_empty());
     RAWKEY_ASSERT(harness.host().commits() == committed);
 }
+
+RAWKEY_SUITE("native composition survives a shortcut until genuine original focus settlement", native_authoritative_focus_boundary) {
+    Harness harness;
+    harness.type("su3");
+    RAWKEY_ASSERT(harness.preedit() == "你");
+    RAWKEY_ASSERT(!harness.key_accepted("Alt+Tab"));
+    RAWKEY_ASSERT(harness.preedit() == "你");
+    RAWKEY_ASSERT(harness.commits().empty());
+    // An unverified native focus notification must not call focus_out. The
+    // desktop raw controls independently verify that GTK/compositor gate.
+    harness.key("Return");
+    RAWKEY_ASSERT(harness.last_commit() == "你");
+    harness.type("cl3");
+    RAWKEY_ASSERT(harness.preedit() == "好");
+    harness.focus_out();
+    const auto original = harness.host().commits();
+    RAWKEY_ASSERT(original.size() == 2);
+    RAWKEY_ASSERT(original[0].first == 1 && original[0].second == u"你");
+    RAWKEY_ASSERT(original[1].first == 1 && original[1].second == u"好");
+    harness.use_context(2);
+    harness.focus_out();
+    RAWKEY_ASSERT(harness.host().commits() == original);
+    RAWKEY_ASSERT(harness.composition_empty());
+}
+
+RAWKEY_SUITE("native retired reader reset cannot revive a complete old reading", native_retired_reader_reset) {
+    Harness harness;
+    harness.type("su3");
+    RAWKEY_ASSERT(harness.preedit() == "你");
+    RAWKEY_ASSERT(harness.commits().empty());
+    harness.reset();
+    RAWKEY_ASSERT(harness.composition_empty());
+    // The transport raw controls independently reject the retired reader's
+    // queued keys. Only new physical keys may reach this fresh native lifetime.
+    harness.type("cl3");
+    RAWKEY_ASSERT(harness.preedit() == "好");
+    harness.key("Return");
+    RAWKEY_ASSERT(harness.commits().size() == 1);
+    RAWKEY_ASSERT(harness.last_commit() == "好");
+    const auto original = harness.host().commits();
+    harness.focus_out();
+    RAWKEY_ASSERT(harness.host().commits() == original);
+    RAWKEY_ASSERT(harness.composition_empty());
+}

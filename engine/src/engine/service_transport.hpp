@@ -10,10 +10,12 @@
 #include <functional>
 #include <mutex>
 #include <optional>
-#include <queue>
+#include <deque>
 #include <thread>
 
 namespace llavon::ime {
+
+struct Config;
 
 struct ServiceTransportOptions {
     std::filesystem::path socket_path;
@@ -28,7 +30,19 @@ struct ServiceTransportOptions {
     std::size_t max_concurrent_predictions = 2;
     std::uint32_t idle_timeout_seconds = 1800;
     bool auto_start = true;
+    std::chrono::milliseconds connect_timeout{1000};
+    std::chrono::milliseconds handshake_timeout{5000};
+    std::chrono::milliseconds request_timeout{30000};
+    // The first prediction after connecting may load a model and prepare GPU pipelines.
+    std::chrono::milliseconds cold_prediction_timeout{120000};
+    std::size_t max_pending_requests = 128;
 };
+
+// Keep frontend runtime policy in one place. Platform paths and explicit model
+// overrides are supplied by the host, not inferred from its UI toolkit.
+ServiceTransportOptions service_options_from_config(const Config& config, ServiceTransportOptions options = {},
+                                                   bool preserve_model_path = false);
+bool same_service_runtime(const ServiceTransportOptions& left, const ServiceTransportOptions& right);
 
 class ServiceTransport final {
 public:
@@ -83,10 +97,11 @@ private:
     ServiceTransportOptions options_;
     mutable std::mutex mutex_;
     std::condition_variable_any condition_;
-    std::queue<Pending> queue_;
+    std::deque<Pending> queue_;
     std::optional<protocol::ServiceEpoch> epoch_;
     bool stopping_ = false;
     bool connected_ = false;
+    bool cold_prediction_ = true;
     int socket_fd_ = -1;
     std::chrono::steady_clock::time_point spawn_backoff_until_{};
     std::jthread worker_;

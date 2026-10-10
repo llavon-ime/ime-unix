@@ -24,6 +24,7 @@ int main() {
     if (run_suite("buffer", run_buffer_tests) != EXIT_SUCCESS) return EXIT_FAILURE;
     if (run_suite("protocol", run_protocol_tests) != EXIT_SUCCESS) return EXIT_FAILURE;
     if (run_suite("service-transport", run_service_transport_tests) != EXIT_SUCCESS) return EXIT_FAILURE;
+    if (run_suite("transport-resilience", run_transport_resilience_tests) != EXIT_SUCCESS) return EXIT_FAILURE;
     if (run_suite("keypad", run_keypad_tests) != EXIT_SUCCESS) return EXIT_FAILURE;
     if (run_suite("input-state", run_input_state_tests) != EXIT_SUCCESS) return EXIT_FAILURE;
     if (run_suite("input-key", run_input_key_tests) != EXIT_SUCCESS) return EXIT_FAILURE;

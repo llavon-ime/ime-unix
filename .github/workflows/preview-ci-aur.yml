@@ -43,6 +43,7 @@ jobs:
             autoconf autoconf-archive automake libtool \
             cmake \
             curl \
+            dbus python3 \
             ninja-build \
             libsqlite3-dev \
             qt6-base-dev qt6-base-dev-tools \
@@ -68,6 +69,7 @@ jobs:
           cmake -S ime-unix-service -B build/ime-unix-service -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
             -DIME_UNIX_SERVICE_BUILD_TESTS=ON
           cmake --build build/ime-unix-service
           ctest --test-dir build/ime-unix-service --output-on-failure
@@ -92,9 +94,24 @@ jobs:
           set -euo pipefail
           cmake -S fcitx5 -B build/fcitx5 -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
             -DLLAVON_IME_BUILD_TESTS=ON
           cmake --build build/fcitx5
           ctest --test-dir build/fcitx5 --output-on-failure
+
+      - name: Build and test memory helper with strict warnings
+        run: |
+          set -euo pipefail
+          for debug in OFF ON; do
+            build_dir="build/memscan-${debug}"
+            cmake -S memscan -B "${build_dir}" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLAVON_IME_DEBUG="${debug}" \
+              -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
+              -DLLAVON_IME_MEMSCAN_BUILD_TESTS=ON
+            cmake --build "${build_dir}"
+            ctest --test-dir "${build_dir}" --output-on-failure
+          done
 
   verify-aur:
     name: Verify preview AUR package

@@ -41,8 +41,6 @@ int run_service_transport_tests() {
     epoch[0] = 0x42;
     protocol::SessionId session{};
     session[0] = 0x19;
-    std::mutex mutex;
-    std::condition_variable condition;
     bool server_ok = true;
     std::thread server_thread([&]() {
         try {
@@ -69,7 +67,6 @@ int run_service_transport_tests() {
         } catch (...) {
             server_ok = false;
         }
-        condition.notify_one();
     });
 
     ServiceTransportOptions options;
@@ -79,12 +76,12 @@ int run_service_transport_tests() {
     std::condition_variable callback_condition;
     std::vector<protocol::Message> responses;
     transport.open_session([&](protocol::Message response) {
-        std::lock_guard lock(callback_mutex);
+        std::lock_guard<std::mutex> lock(callback_mutex);
         responses.push_back(std::move(response));
         callback_condition.notify_one();
     });
     {
-        std::unique_lock lock(callback_mutex);
+        std::unique_lock<std::mutex> lock(callback_mutex);
         if (!callback_condition.wait_for(lock, std::chrono::seconds(2), [&]() { return responses.size() >= 1; })) {
             transport.stop();
             server_thread.join();
@@ -97,12 +94,12 @@ int run_service_transport_tests() {
         return EXIT_FAILURE;
     }
     transport.predict(session, 1, 7, {}, {{false, u"ㄋㄧˇ", 0}}, [&](protocol::Message response) {
-        std::lock_guard lock(callback_mutex);
+        std::lock_guard<std::mutex> lock(callback_mutex);
         responses.push_back(std::move(response));
         callback_condition.notify_one();
     });
     {
-        std::unique_lock lock(callback_mutex);
+        std::unique_lock<std::mutex> lock(callback_mutex);
         if (!callback_condition.wait_for(lock, std::chrono::seconds(2), [&]() { return responses.size() >= 2; })) {
             transport.stop();
             server_thread.join();
@@ -133,7 +130,7 @@ int run_service_transport_tests() {
             const auto status_message = protocol::decode(receive_frame(connection));
             if (!std::holds_alternative<protocol::StatusRequest>(status_message)) server_ok = false;
             {
-                std::unique_lock lock(delayed_mutex);
+                std::unique_lock<std::mutex> lock(delayed_mutex);
                 status_received = true;
                 delayed_condition.notify_one();
                 delayed_condition.wait(lock, [&]() { return release_status; });
@@ -160,7 +157,7 @@ int run_service_transport_tests() {
         shutdown_callback = value != nullptr && value->code == protocol::ErrorCode::ServiceShuttingDown;
     });
     {
-        std::unique_lock lock(delayed_mutex);
+        std::unique_lock<std::mutex> lock(delayed_mutex);
         if (!delayed_condition.wait_for(lock, std::chrono::seconds(2), [&]() { return status_received; })) {
             delayed_transport.stop();
             delayed_server_thread.join();
@@ -170,7 +167,7 @@ int run_service_transport_tests() {
     std::thread release_thread([&]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         {
-            std::lock_guard lock(delayed_mutex);
+            std::lock_guard<std::mutex> lock(delayed_mutex);
             release_status = true;
         }
         delayed_condition.notify_one();
@@ -243,12 +240,12 @@ int run_service_transport_tests() {
     std::condition_variable restart_condition;
     std::vector<protocol::Message> restart_responses;
     const auto restart_callback = [&](protocol::Message response) {
-        std::lock_guard lock(restart_mutex);
+        std::lock_guard<std::mutex> lock(restart_mutex);
         restart_responses.push_back(std::move(response));
         restart_condition.notify_one();
     };
     const auto wait_for_restart_response = [&](std::size_t count) {
-        std::unique_lock lock(restart_mutex);
+        std::unique_lock<std::mutex> lock(restart_mutex);
         return restart_condition.wait_for(lock, std::chrono::seconds(2),
                                           [&]() { return restart_responses.size() >= count; });
     };

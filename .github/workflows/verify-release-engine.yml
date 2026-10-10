@@ -1,0 +1,39 @@
+name: Verify release input behavior
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact release tag to test, not the moving branch head
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  engine:
+    name: Shared engine (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: recursive
+      - name: Install Linux engine dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ nlohmann-json3-dev libatspi2.0-dev libglib2.0-dev
+      - name: Install macOS engine dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja pkg-config
+      - name: Run common engine and raw-key suites on release source
+        run: bash scripts/verify-engine-tests.sh
+      - name: Verify Swift and C ABI integration
+        if: runner.os == 'macOS'
+        run: bash macos/scripts/verify-core.sh

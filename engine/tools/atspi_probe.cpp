@@ -66,7 +66,7 @@ std::string reachable_bus_socket() {
     return connect_unix(path) ? path : std::string();
 }
 
-gint idle_source = 0;
+guint idle_source = 0;
 AtspiAccessible* pending_source = nullptr;
 
 bool is_password_text(AtspiAccessible* obj) {
@@ -178,7 +178,8 @@ void print_snapshot(AtspiAccessible* obj, const char* why) {
     std::u16string utf16;
     if (raw != nullptr) {
         try {
-            utf16 = llavon::ime::utf8_prefix_tail(raw, request_end - request_start, kWindowCodeUnits);
+            utf16 = llavon::ime::utf8_prefix_tail(
+                raw, static_cast<std::size_t>(request_end - request_start), kWindowCodeUnits);
         } catch (const std::runtime_error&) {
             std::printf("[%s] malformed UTF-8 from the accessibility bus\n", why);
         }

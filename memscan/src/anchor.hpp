@@ -23,6 +23,9 @@ enum class Encoding : std::uint8_t {
     Utf32Cell16Le,
     Utf32Cell20Le,
     Utf32Cell24Le,
+    // Same stride as Kitty, but attrs.clean is not a continuation marker.
+    // This is a decoding schema, never an input-field identity credential.
+    FootCell12Le,
 };
 
 // Bytes per screen cell for the cell encodings; 0 for the byte encodings.

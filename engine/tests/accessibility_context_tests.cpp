@@ -266,6 +266,9 @@ bool test_concurrent_access() {
 }
 
 bool test_failed_start_is_not_retried() {
+    // Exercise a controlled failure, never initialize a real desktop backend
+    // in this host-free suite (libatspi aborts without an accessibility bus).
+    ScopedEnv library("LLAVON_IME_ATSPI_LIBRARY", "/nonexistent/llavon-ime-libatspi.so.0");
     ScopedEnv disable("LLAVON_IME_DISABLE_ATSPI", nullptr);
     ScopedEnv sample("LLAVON_IME_CONTEXT_SAMPLE_FILE", nullptr);
     ScopedEnv legacy("LLAVON_IME_ATSPI_SAMPLE_FILE", nullptr);

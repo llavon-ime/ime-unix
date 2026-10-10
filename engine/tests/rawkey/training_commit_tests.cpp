@@ -261,6 +261,7 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
     UnixSocketServer server;
     server.bind_listen(socket);
     std::atomic<bool> discarded{false};
+    std::atomic<bool> recorded{false};
     std::atomic<bool> matched{true};
     std::promise<void> commit_requested;
     auto requested = commit_requested.get_future();
@@ -292,6 +293,7 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
                         session, request->request_id, request->buffer_revision, {{U'你'}}}));
                 } else if (const auto* record = std::get_if<protocol::RecordCommitRequest>(&message)) {
                     committed_id = record->event_id;
+                    recorded = true;
                     connection.send_all(protocol::encode(protocol::RecordCommitResponse{record->event_id, true}));
                 } else if (const auto* discard = std::get_if<protocol::DiscardCommitRequest>(&message)) {
                     matched = discard->event_id == committed_id;
@@ -328,8 +330,12 @@ RAWKEY_SUITE("training commit discard transport", training_commit_discard_transp
             return false;
         };
         harness.set_surrounding("早安你", 3, 3);
-        harness.key("BackSpace");
-        completed = wait_for(discarded);
+        // Test correction of a record that really crossed the wire. If it is
+        // still queued, transport is allowed to cancel the pair without sending.
+        if (wait_for(recorded)) {
+            harness.key("BackSpace");
+            completed = wait_for(discarded);
+        }
         harness.detach();
     }
     if (!discarded.load()) {

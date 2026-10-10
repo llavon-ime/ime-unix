@@ -41,7 +41,8 @@ struct Options {
 std::string json_escape(std::string_view input) {
     std::string output;
     output.reserve(input.size() + 8);
-    for (const unsigned char value : input) {
+    for (const char character : input) {
+        const auto value = static_cast<unsigned char>(character);
         switch (value) {
             case '"': output += "\\\""; break;
             case '\\': output += "\\\\"; break;
@@ -124,7 +125,8 @@ std::vector<llavon::memscan::Encoding> preferred_encodings(std::string_view prog
         list.push_back(cell);
         return list;
     };
-    if (has("kitty") || has("foot")) return with(Encoding::Utf32Cell12Le);
+    if (has("foot")) return with(Encoding::FootCell12Le);
+    if (has("kitty")) return with(Encoding::Utf32Cell12Le);
     if (has("konsole")) return with(Encoding::Utf32Cell16Le);
     if (has("alacritty")) return with(Encoding::Utf32Cell24Le);
     if (has("gnome-terminal") || has("vte") || has("xfce4-terminal") ||
@@ -151,13 +153,15 @@ void serve() {
             const auto request = nlohmann::json::parse(line);
             const auto pids = request.at("pids").get<std::vector<int>>();
             if (pids.empty() || pids.size() > 16) throw std::runtime_error("invalid pids");
-            // Priming only resets the soft-dirty baseline, so the first real
-            // scan is a changed-pages scan instead of a full one.
+            // Prime can run after the client already wrote its first preedit.
+            // Resetting dirty bits is not an input-order receipt: the first
+            // anchored request must still inspect existing writable memory.
             if (request.value("prime", false)) {
                 nlohmann::json primed = nlohmann::json::array();
                 for (const int pid : pids) {
                     const bool ready = llavon::memscan::reset_soft_dirty(pid);
-                    changed_only[pid] = ready;
+                    changed_only[pid] = false;
+                    next_address[pid] = 0;
                     if (ready) primed.push_back(pid);
                 }
 #ifdef LLAVON_IME_DEBUG

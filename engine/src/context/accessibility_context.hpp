@@ -80,7 +80,7 @@ public:
     // The engine may tighten the sampling bound without rebuilding the
     // backend: libatspi must never be re-initialised inside one process.
     void set_max_code_units(size_t max_code_units) {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         max_code_units_ = max_code_units;
     }
 

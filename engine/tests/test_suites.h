@@ -6,6 +6,7 @@ int run_bopomofo_tests();
 int run_buffer_tests();
 int run_protocol_tests();
 int run_service_transport_tests();
+int run_transport_resilience_tests();
 int run_keypad_tests();
 int run_input_state_tests();
 int run_input_key_tests();

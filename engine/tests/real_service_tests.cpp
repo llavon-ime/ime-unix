@@ -23,18 +23,18 @@ using namespace llavon::ime;
 class Waiter {
 public:
     void push(protocol::Message message) {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         messages_.push_back(std::move(message));
         condition_.notify_all();
     }
 
     bool wait_for(size_t count, std::chrono::milliseconds timeout) {
-        std::unique_lock lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         return condition_.wait_for(lock, timeout, [&]() { return messages_.size() >= count; });
     }
 
     protocol::Message at(size_t index) {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return messages_.at(index);
     }
 

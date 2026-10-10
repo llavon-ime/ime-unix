@@ -167,5 +167,7 @@ jobs:
           test -s "/usr/share/licenses/${PACKAGE_NAME}/llavon-ime-model/NOTICE"
           if [[ "${PACKAGE_NAME}" == llavon-ime-fcitx5-preview-git ]]; then
             test -s /usr/lib/llavon-ime/tools/lora/trainer-release.json
+            # Execute the installed trainer, not just its pre-package staging
+            # copy: makepkg stripping can destroy the appended .NET bundle.
             /usr/lib/llavon-ime/tools/lora/llavon-lora --version --json
           fi

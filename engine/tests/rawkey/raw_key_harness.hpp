@@ -208,6 +208,7 @@ private:
 
 // Entry point for the runner's exec-based memory-context test client.
 int committed_client_main(std::string_view format, int commands, int responses);
+int memory_client_main(std::string_view specification, int commands, int responses);
 
 class SuiteRegistrar {
 public:

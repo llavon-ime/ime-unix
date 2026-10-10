@@ -48,6 +48,7 @@ if(NOT DEFINED LLAVON_IME_INSTALLED_MEMSCAN_PATH)
         CACHE FILEPATH "Installed memory probe helper used by the context fallback")
 endif()
 
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../common/protocol" "${CMAKE_CURRENT_BINARY_DIR}/protocol")
 add_library(llavon_ime_engine STATIC)
 set_target_properties(llavon_ime_engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(llavon_ime_engine PUBLIC
@@ -98,10 +99,10 @@ target_sources(llavon_ime_engine PRIVATE
     src/input/ascii_tokenizer.cpp
     src/input/keypad.cpp
     src/input/input_processor.cpp
+    src/input/commit_sample.cpp
     src/input/mixed_input_decoder.cpp
     src/input/mixed_lexicon.cpp
     src/input/punctuation.cpp
-    src/protocol/protocol.cpp
     src/symbol/symbol_menu.cpp
     src/phrase_override/phrase_override_store.cpp
     src/context/accessibility_context.cpp
@@ -111,13 +112,14 @@ if(NOT WIN32)
     target_sources(llavon_ime_engine PRIVATE
         src/engine/service_transport.cpp
         src/ipc/unix_socket.cpp
+        src/ipc/socket_io.cpp
     )
 endif()
-target_link_libraries(llavon_ime_engine PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
+target_link_libraries(llavon_ime_engine PUBLIC llavon_ime_protocol nlohmann_json::nlohmann_json Threads::Threads)
 if(ATSPI_FOUND AND ATSPI_GLIB_FOUND AND NOT WIN32 AND NOT APPLE)
     target_sources(llavon_ime_engine PRIVATE src/atspi/atspi_context_provider.cpp)
     target_compile_definitions(llavon_ime_engine PRIVATE LLAVON_IME_HAVE_ATSPI=1)
-    target_include_directories(llavon_ime_engine PRIVATE ${ATSPI_INCLUDE_DIRS})
+    target_include_directories(llavon_ime_engine SYSTEM PRIVATE ${ATSPI_INCLUDE_DIRS})
     # libatspi is loaded at runtime with dlopen so the addon still loads on
     # systems without at-spi2-core; only glib/gio are hard dependencies.
     target_link_libraries(llavon_ime_engine PRIVATE PkgConfig::ATSPI_GLIB ${CMAKE_DL_LIBS})

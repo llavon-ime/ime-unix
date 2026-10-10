@@ -12,7 +12,9 @@
 #include <limits>
 #include <optional>
 #include <sstream>
+#include <span>
 #include <string_view>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -56,10 +58,11 @@ TextRun trailing_text_run(const std::string& text) {
     // identical or sequential non-ASCII code points is a byte stream read
     // with the wrong width, never a caret's context.
     constexpr std::size_t kExaminedTail = 32;
-    const std::size_t examined = std::min<std::size_t>(run.length, kExaminedTail);
+    const std::size_t examined = std::min(static_cast<std::size_t>(run.length), kExaminedTail);
     const std::size_t examined_start = codepoints.size() - examined;
     std::size_t identical = 1;
     std::size_t consecutive = 1;
+    std::int64_t previous_delta = 0;
     for (std::size_t index = std::max(start, examined_start) + 1; index < codepoints.size();
          ++index) {
         const bool non_ascii = codepoints[index] >= 0x80;
@@ -68,16 +71,55 @@ TextRun trailing_text_run(const std::string& text) {
         } else {
             identical = 1;
         }
-        if (non_ascii && codepoints[index] == codepoints[index - 1] + 1) {
-            if (++consecutive >= 6) run.suspicious = true;
+        // GTK glyph/cache tables can decode as CJK with a fixed 8-byte stride,
+        // not just consecutive Unicode values. A long arithmetic progression
+        // near the anchor is equally strong evidence of a misread byte stream.
+        const auto delta = static_cast<std::int64_t>(codepoints[index]) -
+                           static_cast<std::int64_t>(codepoints[index - 1]);
+        if (non_ascii && codepoints[index - 1] >= 0x80 && delta != 0 &&
+            delta >= -64 && delta <= 64) {
+            consecutive = delta == previous_delta ? consecutive + 1 : 2;
+            if (consecutive >= 6) run.suspicious = true;
         } else {
             consecutive = 1;
         }
+        previous_delta = delta;
     }
     return run;
 }
 
 constexpr std::size_t kPageBytes = 4096;
+
+// clear_refs accepts "4" even on kernels/architectures without soft-dirty
+// tracking. Check the actual pagemap bit before relying on an empty dirty set;
+// otherwise every composition written on such a host becomes a false miss.
+bool soft_dirty_supported() {
+    static const bool supported = [] {
+        const long page_bytes = ::sysconf(_SC_PAGESIZE);
+        if (page_bytes <= 0) return false;
+        const auto size = static_cast<std::size_t>(page_bytes);
+        void* page = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (page == MAP_FAILED) return false;
+        *static_cast<volatile unsigned char*>(page) = 1;
+        const int pagemap = ::open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+        std::uint64_t entry = 0;
+        const auto address = reinterpret_cast<std::uintptr_t>(page);
+        const off_t offset = static_cast<off_t>((address / size) * sizeof(entry));
+        std::ofstream clear("/proc/self/clear_refs");
+        clear << "4\n" << std::flush;
+        const bool reset = clear.good() && pagemap >= 0 &&
+            ::pread(pagemap, &entry, sizeof(entry), offset) == sizeof(entry) &&
+            (entry & (1ull << 55)) == 0;
+        *static_cast<volatile unsigned char*>(page) = 2;
+        const bool readable = reset &&
+            ::pread(pagemap, &entry, sizeof(entry), offset) == sizeof(entry);
+        if (pagemap >= 0) ::close(pagemap);
+        ::munmap(page, size);
+        return readable && (entry & (1ull << 55)) != 0;
+    }();
+    return supported;
+}
 
 // A real screen grid repeats its cell attributes; a denser buffer read with a
 // wider stride stores the skipped characters there instead, so the attribute
@@ -374,22 +416,38 @@ char32_t read_cell_codepoint(const std::byte* bytes) {
 // second character. Kitty marks its continuation in the attributes, Konsole
 // fills it with an unreal placeholder, VTE repeats the code point in a
 // fragment cell, so those cells are skipped for every grid.
-std::string decode_utf32_cell(const std::vector<std::byte>& bytes, std::size_t cell) {
+std::string decode_utf32_cell(const std::vector<std::byte>& bytes, std::size_t cell,
+                              bool foot = false) {
     std::string output;
+    bool previous_wide = false;
     for (std::size_t offset = 0; offset + cell <= bytes.size(); offset += cell) {
         const char32_t codepoint = read_cell_codepoint(bytes.data() + offset);
+        // A cleared cell is a document boundary, not arbitrary padding to
+        // discard. Only the single unreal cell immediately after a wide
+        // Konsole glyph can be its continuation. Skipping every zero-flagged
+        // cell joins unrelated heap strings and lets a wider, wrong stride
+        // score higher than the real row.
+        if (codepoint == 0) {
+            const bool cleared = std::ranges::all_of(
+                std::span<const std::byte>(bytes).subspan(offset, cell),
+                [](std::byte value) { return value == std::byte{0}; });
+            if (!(cell == 16 && previous_wide && !cleared && bytes[offset + 14] == std::byte{0} &&
+                  bytes[offset + 15] == std::byte{0})) append_utf8(output, 0);
+            previous_wide = false;
+            continue;
+        }
         // Continuation cells: kitty marks them in the attributes, foot uses a
         // spacer code point above the Unicode range.
-        if (codepoint > 0x10FFFF) continue;
-        if (cell == 12 && (static_cast<unsigned char>(bytes[offset + 8]) & 0x01) != 0) continue;
-        if (cell == 20 && (static_cast<unsigned char>(bytes[offset + 4]) & 0x10) != 0) continue;
-        if (cell == 16 && bytes[offset + 14] == std::byte{0} &&
-            bytes[offset + 15] == std::byte{0}) {
+        if (codepoint > 0x10FFFF ||
+            (cell == 12 && !foot && (static_cast<unsigned char>(bytes[offset + 8]) & 0x01) != 0) ||
+            (cell == 20 && (static_cast<unsigned char>(bytes[offset + 4]) & 0x10) != 0)) {
+            previous_wide = false;
             continue;
         }
         // Empty cells decode to NUL, which trims the heap bytes before a row
         // in decode_window.
         append_utf8(output, codepoint);
+        previous_wide = codepoint > 0x2000;
     }
     return output;
 }
@@ -401,6 +459,7 @@ std::string decode(const std::vector<std::byte>& bytes, Encoding encoding) {
         case Encoding::Utf32Le: return decode_utf32le(bytes);
         case Encoding::Utf32Cell8Le: return decode_utf32_cell(bytes, 8);
         case Encoding::Utf32Cell12Le: return decode_utf32_cell(bytes, 12);
+        case Encoding::FootCell12Le: return decode_utf32_cell(bytes, 12, true);
         case Encoding::Utf32Cell16Le: return decode_utf32_cell(bytes, 16);
         case Encoding::Utf32Cell20Le: return decode_utf32_cell(bytes, 20);
         case Encoding::Utf32Cell24Le: return decode_utf32_cell(bytes, 24);
@@ -417,6 +476,7 @@ std::size_t unit_size(Encoding encoding) {
         case Encoding::Utf32Le: return 4;
         case Encoding::Utf32Cell8Le: return 4;
         case Encoding::Utf32Cell12Le: return 4;
+        case Encoding::FootCell12Le: return 4;
         case Encoding::Utf32Cell16Le: return 4;
         case Encoding::Utf32Cell20Le: return 4;
         case Encoding::Utf32Cell24Le: return 4;
@@ -432,12 +492,13 @@ constexpr std::size_t kCellBytes = 12;
 // the characters after the first one, whose cell supplied the byte pattern,
 // and returns how many cells the whole composition occupies.
 std::optional<std::size_t> verify_cell12(pid_t pid, std::uintptr_t address,
-                                         const std::vector<char32_t>& codepoints) {
+                                          const std::vector<char32_t>& codepoints,
+                                          bool foot = false) {
     if (codepoints.empty()) return std::nullopt;
     // A match that starts at the continuation cell of a wide character would
     // report the composition one cell late and leak its first character into
     // the context. Only the first cell of a character may start a match.
-    if (address >= kCellBytes) {
+    if (!foot && address >= kCellBytes) {
         const auto previous = read_memory(pid, address - kCellBytes, kCellBytes);
         const auto current = read_memory(pid, address, kCellBytes);
         if (previous.size() == kCellBytes && current.size() == kCellBytes) {
@@ -470,7 +531,7 @@ std::optional<std::size_t> verify_cell12(pid_t pid, std::uintptr_t address,
             // kitty repeats the code point and flags the second cell; foot
             // stores a spacer above the Unicode range.
             wide = following > 0x10FFFF ||
-                   (following == value && value > 0x2000 &&
+                    (!foot && following == value && value > 0x2000 &&
                     offset + kCellBytes + 8 < bytes.size() &&
                     (static_cast<unsigned char>(bytes[offset + kCellBytes + 8]) & 0x01) != 0);
         }
@@ -691,7 +752,7 @@ bool same_uid(pid_t pid) {
 }
 
 bool reset_soft_dirty(pid_t pid) {
-    if (!same_uid(pid)) return false;
+    if (!soft_dirty_supported() || !same_uid(pid)) return false;
     std::ofstream clear("/proc/" + std::to_string(pid) + "/clear_refs");
     if (!clear) return false;
     clear << "4\n";
@@ -810,8 +871,8 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                 if (size == 0) return std::vector<std::byte>{};
                 if (from >= area_start && from <= area_end && size <= area_end - from) {
                     const auto offset = static_cast<std::size_t>(from - area_start);
-                    return std::vector<std::byte>(area.begin() + offset,
-                                                  area.begin() + offset + size);
+                    const auto slice = std::span<const std::byte>(area).subspan(offset, size);
+                    return std::vector<std::byte>(slice.begin(), slice.end());
                 }
                 return read_memory(pid, from, size);
             };
@@ -872,7 +933,8 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                                 continue;
                             }
                         }
-                        const auto cells = verify_cell12(pid, address, anchor.codepoints);
+                        const auto cells = verify_cell12(pid, address, anchor.codepoints,
+                                                         encoding == Encoding::FootCell12Le);
                         if (!cells) continue;
                         match_bytes = *cells * kCellBytes;
                     } else {
@@ -1028,13 +1090,13 @@ std::optional<Match> scan_pid(pid_t pid, const Anchor& anchor, std::size_t befor
                             // one closest to the validated address. In
                             // particular, an old copy inside a narrow hint
                             // must not crowd out the adjacent document row.
-                            const auto distance = [&](std::uintptr_t address) {
+                            const auto distance = [&](std::uintptr_t candidate_address) {
                                 std::uintptr_t nearest = std::numeric_limits<std::uintptr_t>::max();
                                 for (const auto& hint : hints) {
                                     if (hint.pid != pid || hint.match_address == 0) continue;
-                                    const auto delta = address > hint.match_address
-                                                           ? address - hint.match_address
-                                                           : hint.match_address - address;
+                                    const auto delta = candidate_address > hint.match_address
+                                                           ? candidate_address - hint.match_address
+                                                           : hint.match_address - candidate_address;
                                     nearest = std::min(nearest, delta);
                                 }
                                 return nearest;

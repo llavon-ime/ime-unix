@@ -1,4 +1,4 @@
-#include "protocol.hpp"
+#include "llavon_protocol/protocol.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -96,7 +96,8 @@ public:
         const auto size = read_u32();
         if (size > kMaxUtf8StringBytes) fail(std::string("UTF-8 field is too large: ") + field);
         require(size);
-        std::string result(reinterpret_cast<const char*>(bytes_.data() + offset_), size);
+        const auto begin = bytes_.begin() + static_cast<std::ptrdiff_t>(offset_);
+        std::string result(begin, begin + static_cast<std::ptrdiff_t>(size));
         offset_ += size;
         if (!valid_utf8(result)) fail(std::string("invalid UTF-8: ") + field);
         return result;

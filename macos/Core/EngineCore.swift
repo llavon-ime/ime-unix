@@ -144,6 +144,12 @@ class EngineCore {
         lv_engine_reload_phrase_overrides(engine)
     }
 
+    @discardableResult
+    func restartPredictionService() -> Bool {
+        guard let engine else { return false }
+        return lv_engine_restart_prediction_service(engine) == 0
+    }
+
     // MARK: - Contexts
 
     func allocateContext() -> UInt64 {

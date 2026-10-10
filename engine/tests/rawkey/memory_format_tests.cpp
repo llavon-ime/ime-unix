@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <nlohmann/json.hpp>
 #include <signal.h>
 #include <string>
 #include <string_view>
@@ -78,6 +79,16 @@ std::string encode_utf16(std::string_view input) {
     return output;
 }
 
+std::string encode_utf32(std::string_view input) {
+    std::string output;
+    for (const char32_t codepoint : codepoints(input)) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            output.push_back(static_cast<char>((codepoint >> shift) & 0xff));
+        }
+    }
+    return output;
+}
+
 // How a format stores a wide character's continuation cell.
 enum class Continuation { KittyFlag, Spacer, Blank, VteFragment };
 
@@ -120,6 +131,10 @@ std::string cell_bytes(std::string_view format, char32_t codepoint, bool continu
                                           0x00, 0x00, 0x00, 0x00};
     for (std::size_t index = 4; index < cell; ++index) {
         unsigned char value = attributes[index - 4];
+        // Installed Foot's attrs.clean bit must not be interpreted as Kitty's
+        // continuation flag. This remains a synthetic persistent-grid fixture,
+        // not Foot's temporary renderer overlay or native field authority.
+        if (format == "foot" && index == 8) value = 0x01;
         if (continuation && style == Continuation::KittyFlag && index == 8) value = 0x01;
         // VTE repeats the code point in the fragment cell and flags it in the
         // low attribute byte.
@@ -132,6 +147,7 @@ std::string cell_bytes(std::string_view format, char32_t codepoint, bool continu
 std::string encode_composition(std::string_view format, std::string_view text) {
     if (format == "utf8") return std::string(text);
     if (format == "utf16") return encode_utf16(text);
+    if (format == "utf32") return encode_utf32(text);
     std::string output;
     for (const char32_t codepoint : codepoints(text)) {
         output += cell_bytes(format, codepoint, false);
@@ -146,6 +162,7 @@ std::string encode_composition(std::string_view format, std::string_view text) {
 std::string encode_suffix(std::string_view format, std::string_view text) {
     if (format == "utf8") return std::string(text);
     if (format == "utf16") return encode_utf16(text);
+    if (format == "utf32") return encode_utf32(text);
     std::string output;
     for (const char32_t codepoint : codepoints(text)) {
         output += cell_bytes(format, codepoint, false);
@@ -160,6 +177,7 @@ std::string format_prefix(std::string_view format, std::string_view text = "docu
     // cell does in a real terminal row.
     if (format == "utf8") return std::string("\0", 1) + std::string(text);
     if (format == "utf16") return encode_utf16(std::string("\0", 1)) + encode_utf16(text);
+    if (format == "utf32") return encode_utf32(std::string("\0", 1)) + encode_utf32(text);
     std::string output(format_cell(format), '\0');
     for (const char value : text) {
         output += cell_bytes(format, static_cast<unsigned char>(value), false);
@@ -167,9 +185,10 @@ std::string format_prefix(std::string_view format, std::string_view text = "docu
     return output;
 }
 
-FormatClient spawn_client(std::string_view format, std::string_view suffix = {},
-                           bool preedit_prefix = false,
-                           std::string_view document = "document prefix ") {
+// A frontend is a separate executable, not a forked copy of the IME's heap.
+// Exec each fixture so earlier suites' document/preedit strings cannot occupy
+// the bounded candidate slots and hide the actual client buffer.
+FormatClient spawn_memory_client(const nlohmann::json& specification) {
     int commands[2], responses[2];
     if (::pipe(commands) != 0) return {};
     if (::pipe(responses) != 0) {
@@ -178,44 +197,74 @@ FormatClient spawn_client(std::string_view format, std::string_view suffix = {},
         return {};
     }
     const pid_t pid = ::fork();
-    if (pid == 0) {
-        allow_memory_probe();
+    if (pid < 0) {
+        ::close(commands[0]);
         ::close(commands[1]);
         ::close(responses[0]);
-        const std::string suffix_bytes = encode_suffix(format, suffix);
-        std::string buffer = format_prefix(format, document);
-        const std::size_t composition_start = buffer.size();
-        constexpr std::size_t kCompositionBytes = 1024;
-        buffer.append(kCompositionBytes + suffix_bytes.size(), '\0');
-        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
-        (void)::write(responses[1], &address, sizeof(address));
-        char step = 0;
-        while (::read(commands[0], &step, 1) == 1) {
-            std::string composition;
-            if (step == '1') composition = encode_composition(format, "ㄋ");
-            if (step == '2') composition = encode_composition(format, "ㄋㄧ");
-            if (step == '3') composition = encode_composition(format, "你");
-            if (step == '4') composition = encode_composition(format, "ㄋㄧㄨ");
-            if (step == '5') composition = encode_composition(format, "ㄋㄧㄣ");
-            if (preedit_prefix && (step == '4' || step == '5' || step == '6')) {
-                const std::string last = step == '4' ? "ㄋ" : step == '5' ? "ㄋㄧ" : "你";
-                composition = encode_composition(format, "你") + encode_composition(format, last);
-            }
-            std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
-                        static_cast<std::ptrdiff_t>(kCompositionBytes + suffix_bytes.size()), '\0');
-            std::copy(composition.begin(), composition.end(),
-                      buffer.begin() + static_cast<std::ptrdiff_t>(composition_start));
-            std::copy(suffix_bytes.begin(), suffix_bytes.end(),
-                      buffer.begin() + static_cast<std::ptrdiff_t>(composition_start + composition.size()));
-            (void)::write(responses[1], &step, 1);
-        }
-        ::_exit(0);
+        ::close(responses[1]);
+        return {};
+    }
+    if (pid == 0) {
+        ::close(commands[1]);
+        ::close(responses[0]);
+        const std::string serialized = specification.dump();
+#if defined(__linux__)
+        const std::string command_fd = std::to_string(commands[0]);
+        const std::string response_fd = std::to_string(responses[1]);
+        ::execl("/proc/self/exe", "llavon_ime_rawkey_tests", "--memory-client",
+                serialized.c_str(), command_fd.c_str(), response_fd.c_str(), nullptr);
+        ::_exit(127);
+#else
+        ::_exit(memory_client_main(serialized, commands[0], responses[1]));
+#endif
     }
     ::close(commands[0]);
     ::close(responses[1]);
     std::uintptr_t address = 0;
     if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
     return {pid, commands[1], responses[0]};
+}
+
+int run_format_client(std::string_view format, std::string_view suffix, bool preedit_prefix,
+                      std::string_view document,
+                      int commands, int responses) {
+    allow_memory_probe();
+    const std::string suffix_bytes = encode_suffix(format, suffix);
+    std::string buffer = format_prefix(format, document);
+    const std::size_t composition_start = buffer.size();
+    constexpr std::size_t kCompositionBytes = 1024;
+    buffer.append(kCompositionBytes + suffix_bytes.size(), '\0');
+    const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+    if (::write(responses, &address, sizeof(address)) != sizeof(address)) return 1;
+    char step = 0;
+    while (::read(commands, &step, 1) == 1) {
+        std::string composition;
+        if (step == '1') composition = encode_composition(format, "ㄋ");
+        if (step == '2') composition = encode_composition(format, "ㄋㄧ");
+        if (step == '3') composition = encode_composition(format, "你");
+        if (step == '4') composition = encode_composition(format, "ㄋㄧㄨ");
+        if (step == '5') composition = encode_composition(format, "ㄋㄧㄣ");
+        if (step == '7') composition = encode_composition(format, "ㄋㄧㄥ");
+        if (preedit_prefix && (step == '4' || step == '5' || step == '6')) {
+            const std::string last = step == '4' ? "ㄋ" : step == '5' ? "ㄋㄧ" : "你";
+            composition = encode_composition(format, "你") + encode_composition(format, last);
+        }
+        std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
+                    static_cast<std::ptrdiff_t>(kCompositionBytes + suffix_bytes.size()), '\0');
+        std::copy(composition.begin(), composition.end(),
+                  buffer.begin() + static_cast<std::ptrdiff_t>(composition_start));
+        std::copy(suffix_bytes.begin(), suffix_bytes.end(),
+                  buffer.begin() + static_cast<std::ptrdiff_t>(composition_start + composition.size()));
+        if (::write(responses, &step, 1) != 1) return 1;
+    }
+    return 0;
+}
+
+FormatClient spawn_client(std::string_view format, std::string_view suffix = {},
+                            bool preedit_prefix = false,
+                            std::string_view document = "document prefix ") {
+    return spawn_memory_client({{"kind", "format"}, {"format", format}, {"suffix", suffix},
+                                {"preedit_prefix", preedit_prefix}, {"document", document}});
 }
 
 // A client that never draws the composition into its document (Konsole, VTE):
@@ -242,7 +291,7 @@ int run_committed_client(std::string_view format, int commands, int responses) {
     buffer.append(256, '\0');
     [[maybe_unused]] auto* held = new std::string(std::move(buffer));
     const auto address = reinterpret_cast<std::uintptr_t>(held->data());
-    (void)::write(responses, &address, sizeof(address));
+    if (::write(responses, &address, sizeof(address)) != sizeof(address)) return 1;
     char step = 0;
     while (::read(commands, &step, 1) == 1) {
         if (step == '4') {
@@ -251,7 +300,7 @@ int run_committed_client(std::string_view format, int commands, int responses) {
             std::copy(committed.begin(), committed.end(),
                       held->begin() + static_cast<std::ptrdiff_t>(committed_at));
         }
-        (void)::write(responses, &step, 1);
+        if (::write(responses, &step, 1) != 1) return 1;
     }
     return 0;
 }
@@ -290,166 +339,126 @@ FormatClient spawn_committed_client(std::string_view format) {
 
 // A client whose buffer never changes: a static string that starts with the
 // composition, like a path or message elsewhere in the process.
+int run_static_client(std::string_view format, std::string_view text, int commands, int responses) {
+    allow_memory_probe();
+    const std::string buffer = format_prefix(format) + encode_suffix(format, text);
+    const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+    if (::write(responses, &address, sizeof(address)) != sizeof(address)) return 1;
+    char step = 0;
+    while (::read(commands, &step, 1) == 1) {
+        if (::write(responses, &step, 1) != 1) return 1;
+    }
+    return 0;
+}
+
 FormatClient spawn_static_client(std::string_view format, std::string_view text) {
-    int commands[2], responses[2];
-    if (::pipe(commands) != 0) return {};
-    if (::pipe(responses) != 0) {
-        ::close(commands[0]);
-        ::close(commands[1]);
-        return {};
-    }
-    const pid_t pid = ::fork();
-    if (pid == 0) {
-        allow_memory_probe();
-        ::close(commands[1]);
-        ::close(responses[0]);
-        std::string buffer = format_prefix(format) + encode_suffix(format, text);
-        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
-        (void)::write(responses[1], &address, sizeof(address));
-        char step = 0;
-        while (::read(commands[0], &step, 1) == 1) {
-            (void)::write(responses[1], &step, 1);
-        }
-        ::_exit(0);
-    }
-    ::close(commands[0]);
-    ::close(responses[1]);
-    std::uintptr_t address = 0;
-    if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
-    return {pid, commands[1], responses[0]};
+    return spawn_memory_client({{"kind", "static"}, {"format", format}, {"text", text}});
 }
 
 // A buffer that the scanner can read with the wrong width and get
 // plausible-looking text from.
-enum class Decoy { Repeated, Consecutive };
+enum class Decoy { Repeated, Consecutive, GlyphStride };
 
 // A client that keeps its composition in one format while another buffer
 // holds a misread-prone byte pattern followed by the composition in UTF-16.
 // Reading that buffer as UTF-16 decodes repeated ASCII pairs into one
 // repeated CJK code point (or sequential bytes into sequential code points),
 // exactly what a terminal's byte stream can look like.
+int run_decoy_client(std::string_view format, Decoy decoy, int commands, int responses) {
+    allow_memory_probe();
+    std::string buffer = format_prefix(format);
+    const std::size_t composition_start = buffer.size();
+    constexpr std::size_t kCompositionBytes = 1024;
+    buffer.append(kCompositionBytes, '\0');
+    std::string decoy_buffer;
+    for (int index = 0; index < 60; ++index) {
+        const char32_t codepoint = decoy == Decoy::Repeated ? 0x557Cu :
+            static_cast<char32_t>(0x4E00 + index * (decoy == Decoy::GlyphStride ? 8 : 1));
+        decoy_buffer.push_back(static_cast<char>(codepoint & 0xff));
+        decoy_buffer.push_back(static_cast<char>((codepoint >> 8) & 0xff));
+    }
+    const std::size_t decoy_composition = decoy_buffer.size();
+    decoy_buffer.append(64, '\0');
+    [[maybe_unused]] auto* held = new std::string(std::move(decoy_buffer));
+    const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+    if (::write(responses, &address, sizeof(address)) != sizeof(address)) return 1;
+    char step = 0;
+    while (::read(commands, &step, 1) == 1) {
+        std::string composition_text;
+        if (step == '1') composition_text = "ㄋ";
+        if (step == '2') composition_text = "ㄋㄧ";
+        if (step == '3') composition_text = "你";
+        std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
+                    static_cast<std::ptrdiff_t>(kCompositionBytes), '\0');
+        const std::string composition = encode_composition(format, composition_text);
+        std::copy(composition.begin(), composition.end(),
+                  buffer.begin() + static_cast<std::ptrdiff_t>(composition_start));
+        const std::string utf16 = encode_utf16(composition_text);
+        std::fill(held->begin() + static_cast<std::ptrdiff_t>(decoy_composition), held->end(), '\0');
+        std::copy(utf16.begin(), utf16.end(),
+                  held->begin() + static_cast<std::ptrdiff_t>(decoy_composition));
+        if (::write(responses, &step, 1) != 1) return 1;
+    }
+    return 0;
+}
+
 FormatClient spawn_decoy_client(std::string_view format, Decoy decoy) {
-    int commands[2], responses[2];
-    if (::pipe(commands) != 0) return {};
-    if (::pipe(responses) != 0) {
-        ::close(commands[0]);
-        ::close(commands[1]);
-        return {};
-    }
-    const pid_t pid = ::fork();
-    if (pid == 0) {
-        allow_memory_probe();
-        ::close(commands[1]);
-        ::close(responses[0]);
-        std::string buffer = format_prefix(format);
-        const std::size_t composition_start = buffer.size();
-        constexpr std::size_t kCompositionBytes = 1024;
-        buffer.append(kCompositionBytes, '\0');
-        std::string decoy_buffer;
-        for (int index = 0; index < 60; ++index) {
-            const char32_t codepoint =
-                decoy == Decoy::Repeated ? 0x557Cu : static_cast<char32_t>(0x4E00 + index);
-            decoy_buffer.push_back(static_cast<char>(codepoint & 0xff));
-            decoy_buffer.push_back(static_cast<char>((codepoint >> 8) & 0xff));
-        }
-        const std::size_t decoy_composition = decoy_buffer.size();
-        decoy_buffer.append(64, '\0');
-        [[maybe_unused]] auto* held = new std::string(std::move(decoy_buffer));
-        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
-        (void)::write(responses[1], &address, sizeof(address));
-        char step = 0;
-        while (::read(commands[0], &step, 1) == 1) {
-            std::string composition_text;
-            if (step == '1') composition_text = "ㄋ";
-            if (step == '2') composition_text = "ㄋㄧ";
-            if (step == '3') composition_text = "你";
-            std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
-                        static_cast<std::ptrdiff_t>(kCompositionBytes), '\0');
-            const std::string composition = encode_composition(format, composition_text);
-            std::copy(composition.begin(), composition.end(),
-                      buffer.begin() + static_cast<std::ptrdiff_t>(composition_start));
-            const std::string utf16 = encode_utf16(composition_text);
-            std::fill(held->begin() + static_cast<std::ptrdiff_t>(decoy_composition), held->end(),
-                      '\0');
-            std::copy(utf16.begin(), utf16.end(),
-                      held->begin() + static_cast<std::ptrdiff_t>(decoy_composition));
-            (void)::write(responses[1], &step, 1);
-        }
-        ::_exit(0);
-    }
-    ::close(commands[0]);
-    ::close(responses[1]);
-    std::uintptr_t address = 0;
-    if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
-    return {pid, commands[1], responses[0]};
+    return spawn_memory_client({{"kind", "decoy"}, {"format", format},
+                                {"decoy", static_cast<int>(decoy)}});
 }
 
 // A client with a terminal grid row and a plain UTF-32 copy of the same row:
 // reading the plain copy with a cell stride drops every other character, and
 // that misread must not win over the real grid row.
-FormatClient spawn_plain_copy_client() {
-    int commands[2], responses[2];
-    if (::pipe(commands) != 0) return {};
-    if (::pipe(responses) != 0) {
-        ::close(commands[0]);
-        ::close(commands[1]);
-        return {};
+int run_plain_copy_client(int commands, int responses) {
+    allow_memory_probe();
+    const std::string row = "watch 程式 ";
+    std::string buffer(12, '\0');
+    for (const char32_t codepoint : codepoints(row)) {
+        buffer += cell_bytes("cell12", codepoint, false);
+        if (codepoint > 0x2000) buffer += cell_bytes("cell12", codepoint, true);
     }
-    const pid_t pid = ::fork();
-    if (pid == 0) {
-        allow_memory_probe();
-        ::close(commands[1]);
-        ::close(responses[0]);
-        const std::string row = "watch 程式 ";
-        std::string buffer(12, '\0');
-        for (const char32_t codepoint : codepoints(row)) {
-            buffer += cell_bytes("cell12", codepoint, false);
-            if (codepoint > 0x2000) buffer += cell_bytes("cell12", codepoint, true);
+    const std::size_t composition_start = buffer.size();
+    constexpr std::size_t kCompositionBytes = 1024;
+    buffer.append(kCompositionBytes, '\0');
+    // The plain copy holds the same row text: read with a cell stride it
+    // drops every other character, and that misread must not be used.
+    std::string plain;
+    for (const char32_t codepoint : codepoints(row)) {
+        for (int shift = 0; shift < 32; shift += 8) {
+            plain.push_back(static_cast<char>((codepoint >> shift) & 0xff));
         }
-        const std::size_t composition_start = buffer.size();
-        constexpr std::size_t kCompositionBytes = 1024;
-        buffer.append(kCompositionBytes, '\0');
-        // The plain copy holds the same row text: read with a cell stride it
-        // drops every other character, and that misread must not be used.
-        std::string plain;
-        for (const char32_t codepoint : codepoints(row)) {
+    }
+    const std::size_t plain_composition = plain.size();
+    plain.append(1024, '\0');
+    [[maybe_unused]] auto* held = new std::string(std::move(plain));
+    const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
+    if (::write(responses, &address, sizeof(address)) != sizeof(address)) return 1;
+    char step = 0;
+    while (::read(commands, &step, 1) == 1) {
+        std::string composition_text;
+        if (step == '1') composition_text = "ㄋ";
+        if (step == '2') composition_text = "ㄋㄧ";
+        if (step == '3') composition_text = "你";
+        std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
+                    static_cast<std::ptrdiff_t>(kCompositionBytes), '\0');
+        const std::string composition = encode_composition("cell12", composition_text);
+        std::copy(composition.begin(), composition.end(),
+                  buffer.begin() + static_cast<std::ptrdiff_t>(composition_start));
+        std::fill(held->begin() + static_cast<std::ptrdiff_t>(plain_composition), held->end(), '\0');
+        std::size_t offset = plain_composition;
+        for (const char32_t codepoint : codepoints(composition_text)) {
             for (int shift = 0; shift < 32; shift += 8) {
-                plain.push_back(static_cast<char>((codepoint >> shift) & 0xff));
+                (*held)[offset++] = static_cast<char>((codepoint >> shift) & 0xff);
             }
         }
-        const std::size_t plain_composition = plain.size();
-        plain.append(1024, '\0');
-        [[maybe_unused]] auto* held = new std::string(std::move(plain));
-        const auto address = reinterpret_cast<std::uintptr_t>(buffer.data());
-        (void)::write(responses[1], &address, sizeof(address));
-        char step = 0;
-        while (::read(commands[0], &step, 1) == 1) {
-            std::string composition_text;
-            if (step == '1') composition_text = "ㄋ";
-            if (step == '2') composition_text = "ㄋㄧ";
-            if (step == '3') composition_text = "你";
-            std::fill_n(buffer.begin() + static_cast<std::ptrdiff_t>(composition_start),
-                        static_cast<std::ptrdiff_t>(kCompositionBytes), '\0');
-            const std::string composition = encode_composition("cell12", composition_text);
-            std::copy(composition.begin(), composition.end(),
-                      buffer.begin() + static_cast<std::ptrdiff_t>(composition_start));
-            std::fill(held->begin() + static_cast<std::ptrdiff_t>(plain_composition), held->end(),
-                      '\0');
-            std::size_t offset = plain_composition;
-            for (const char32_t codepoint : codepoints(composition_text)) {
-                for (int shift = 0; shift < 32; shift += 8) {
-                    (*held)[offset++] = static_cast<char>((codepoint >> shift) & 0xff);
-                }
-            }
-            (void)::write(responses[1], &step, 1);
-        }
-        ::_exit(0);
+        if (::write(responses, &step, 1) != 1) return 1;
     }
-    ::close(commands[0]);
-    ::close(responses[1]);
-    std::uintptr_t address = 0;
-    if (::read(responses[0], &address, sizeof(address)) != sizeof(address)) address = 0;
-    return {pid, commands[1], responses[0]};
+    return 0;
+}
+
+FormatClient spawn_plain_copy_client() {
+    return spawn_memory_client({{"kind", "plain-copy"}, {"format", "cell12"}});
 }
 
 bool advance(FormatClient& client, char step) {
@@ -458,10 +467,44 @@ bool advance(FormatClient& client, char step) {
            ::read(client.responses, &ack, 1) == 1 && ack == step;
 }
 
+bool wait_for_probe(Harness& harness, std::size_t completed,
+                    std::chrono::milliseconds timeout = std::chrono::seconds(5),
+                    bool require_context = false) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    // Unverified probes do not necessarily post work to the frontend. A single
+    // long pump_until would sleep to its timeout even after the probe finished,
+    // falsely reporting the timeout as scan latency. Poll at 1ms while still
+    // running all normal host callbacks.
+    do {
+        if (harness.pump_until([&] {
+                return harness.memory_probe_count() > completed &&
+                       (!require_context || !harness.context_text().empty());
+            },
+                               std::chrono::milliseconds(1))) return true;
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+
 }  // namespace
 
 int committed_client_main(std::string_view format, int commands, int responses) {
     return run_committed_client(format, commands, responses);
+}
+
+int memory_client_main(std::string_view specification, int commands, int responses) {
+    const auto spec = nlohmann::json::parse(specification);
+    const auto format = spec.at("format").get<std::string>();
+    if (spec.at("kind") == "plain-copy") return run_plain_copy_client(commands, responses);
+    if (spec.at("kind") == "static") {
+        return run_static_client(format, spec.at("text").get<std::string>(), commands, responses);
+    }
+    if (spec.at("kind") == "decoy") {
+        return run_decoy_client(format, static_cast<Decoy>(spec.at("decoy").get<int>()),
+                                commands, responses);
+    }
+    return run_format_client(format, spec.at("suffix").get<std::string>(),
+                             spec.at("preedit_prefix").get<bool>(), spec.at("document").get<std::string>(),
+                             commands, responses);
 }
 
 // A client that never draws the composition into its document (Konsole, VTE)
@@ -573,7 +616,7 @@ RAWKEY_SUITE("memory formats validate through raw keys", memory_formats) {
         return;
     }
     for (const std::string_view format :
-         {"utf8", "utf16", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
+         {"utf8", "utf16", "utf32", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
         FormatClient client = spawn_client(format);
         RAWKEY_ASSERT(client.pid > 0);
         HarnessOptions options;
@@ -605,11 +648,11 @@ RAWKEY_SUITE("memory formats validate through raw keys", memory_formats) {
         RAWKEY_ASSERT(harness.preedit() == "你");
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-        // Heap bytes in front of the synthetic buffer can stay in the context;
-        // what matters is that the document prefix is adopted intact.
+        // The leading cleared cell/NUL is an explicit document boundary.
+        // No unrelated heap text or live composition may cross it.
         const bool adopted = harness.pump_until([&] {
             const std::string text = harness.context_text();
-            return text.size() >= 16 && text.ends_with("document prefix ");
+            return text == "document prefix ";
         });
         std::printf("[%s] format=%.*s adopted=%d context=%s\n", adopted ? "ok  " : "FAIL",
                     static_cast<int>(format.size()), format.data(), adopted ? 1 : 0,
@@ -755,27 +798,29 @@ RAWKEY_SUITE("earlier preedit segments stay out of memory context", memory_preed
         harness.activate();
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-        harness.key("s");
-        harness.key("u");
+        for (const auto key : {"s", "u"}) {
+            const auto completed = harness.memory_probe_count();
+            harness.key(key);
+            RAWKEY_ASSERT(wait_for_probe(harness, completed));
+        }
         harness.key("3");
         RAWKEY_ASSERT(harness.preedit() == "你");
-        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() >= 1; }));
         auto completed = harness.memory_probe_count();
         RAWKEY_ASSERT(advance(client, '4'));
         harness.key("s");
         RAWKEY_ASSERT(harness.preedit() == "你ㄋ");
-        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() > completed; }));
+        RAWKEY_ASSERT(wait_for_probe(harness, completed));
         completed = harness.memory_probe_count();
         RAWKEY_ASSERT(advance(client, '5'));
         harness.key("u");
         RAWKEY_ASSERT(harness.preedit() == "你ㄋㄧ");
-        RAWKEY_ASSERT(harness.pump_until([&] { return harness.memory_probe_count() > completed; }));
+        RAWKEY_ASSERT(wait_for_probe(harness, completed));
         RAWKEY_ASSERT(advance(client, '6'));
         harness.key("3");
         RAWKEY_ASSERT(harness.preedit() == "你你");
 
         const bool adopted = harness.pump_until([&] {
-            return harness.context_text().ends_with("document prefix ");
+            return harness.context_text() == "document prefix ";
         });
         std::printf("[%s] preedit-prefix format=%.*s context=%s\n",
                     adopted ? "ok  " : "FAIL", static_cast<int>(format.size()), format.data(),
@@ -801,7 +846,7 @@ RAWKEY_SUITE("a static string prefix is not adopted as context", memory_static_p
         return;
     }
     bool all = true;
-    for (const std::string_view format : {"utf8", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
+    for (const std::string_view format : {"utf8", "utf16", "utf32", "cell8", "cell12", "foot", "cell16", "cell20", "cell24"}) {
         FormatClient client = spawn_static_client(format, "ㄋㄧㄣ囉");
         RAWKEY_ASSERT(client.pid > 0);
         HarnessOptions options;
@@ -811,19 +856,16 @@ RAWKEY_SUITE("a static string prefix is not adopted as context", memory_static_p
         harness.activate();
         std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-        harness.key("s");
-        RAWKEY_ASSERT(harness.preedit() == "ㄋ");
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        harness.key("u");
-        RAWKEY_ASSERT(harness.preedit() == "ㄋㄧ");
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        harness.key("p");
+        for (const auto key : {"s", "u", "p"}) {
+            const auto completed = harness.memory_probe_count();
+            harness.key(key);
+            RAWKEY_ASSERT(wait_for_probe(harness, completed));
+            // Reject *any* published text, including garbage or a different
+            // static copy, rather than only the expected document suffix.
+            all = all && harness.context_text().empty();
+        }
         RAWKEY_ASSERT(harness.preedit() == "ㄋㄧㄣ");
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-        const bool adopted = harness.pump_until([&] {
-            return harness.context_text().ends_with("document prefix ");
-        }, std::chrono::milliseconds(2500));
+        const bool adopted = !harness.context_text().empty();
         std::printf("[%s] static format=%.*s adopted=%d context=%s\n",
                     adopted ? "FAIL" : "ok  ", static_cast<int>(format.size()), format.data(),
                     adopted ? 1 : 0, harness.context_text().c_str());
@@ -850,9 +892,10 @@ RAWKEY_SUITE("misread byte streams do not shadow the terminal row", memory_decoy
     }
     bool all = true;
     for (const std::string_view format : {"utf8", "cell12"}) {
-        for (const Decoy decoy : {Decoy::Repeated, Decoy::Consecutive}) {
+        for (const Decoy decoy : {Decoy::Repeated, Decoy::Consecutive, Decoy::GlyphStride}) {
             const std::string_view decoy_name =
-                decoy == Decoy::Repeated ? "repeated" : "consecutive";
+                decoy == Decoy::Repeated ? "repeated" :
+                decoy == Decoy::GlyphStride ? "glyph-stride" : "consecutive";
             FormatClient client = spawn_decoy_client(format, decoy);
             RAWKEY_ASSERT(client.pid > 0);
             HarnessOptions options;
@@ -877,9 +920,7 @@ RAWKEY_SUITE("misread byte streams do not shadow the terminal row", memory_decoy
 
             const bool adopted = harness.pump_until([&] {
                 const std::string text = harness.context_text();
-                return text.ends_with("document prefix ") &&
-                       text.find("啼") == std::string::npos &&
-                       text.find("一") == std::string::npos;
+                return text == "document prefix ";
             });
             std::printf("[%s] decoy format=%.*s kind=%.*s adopted=%d context=%s\n",
                         adopted ? "ok  " : "FAIL", static_cast<int>(format.size()), format.data(),
@@ -930,8 +971,7 @@ RAWKEY_SUITE("a misread plain copy does not shadow the terminal row", memory_pla
 
     const bool adopted = harness.pump_until([&] {
         const std::string text = harness.context_text();
-        return text.find("watch") != std::string::npos &&
-               text.find("程式") != std::string::npos;
+        return text == "watch 程式 ";
     });
     std::printf("[%s] plain copy adopted=%d context=%s\n", adopted ? "ok  " : "FAIL",
                 adopted ? 1 : 0, harness.context_text().c_str());
@@ -943,5 +983,6 @@ RAWKEY_SUITE("a misread plain copy does not shadow the terminal row", memory_pla
     int status = 0;
     ::waitpid(client.pid, &status, 0);
 }
+
 
 }  // namespace llavon::ime::rawkey

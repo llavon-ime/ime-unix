@@ -198,8 +198,9 @@ std::optional<json> build_row(const Row& row, const Tables& tables, int max_leng
     if (std::find(weights.begin(), weights.end(), 1) == weights.end()) return std::nullopt;
     if (tokens.size() > static_cast<std::size_t>(max_length)) return std::nullopt;
     std::vector<int> attention(tokens.size(), 1);
-    return json{{"tokens", tokens}, {"labels", tokens}, {"loss_weights", weights},
-                {"attention_mask", attention}, {"candidate_masks", masks}};
+    return std::optional<json>{std::in_place,
+        json{{"tokens", tokens}, {"labels", tokens}, {"loss_weights", weights},
+             {"attention_mask", attention}, {"candidate_masks", masks}}};
 }
 
 }  // namespace

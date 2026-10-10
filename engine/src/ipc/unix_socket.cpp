@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -26,7 +27,7 @@ sockaddr_un make_address(const std::filesystem::path& path) {
 
     sockaddr_un address{};
     address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, text.c_str(), sizeof(address.sun_path) - 1);
+    std::ranges::copy(text, std::begin(address.sun_path));
     return address;
 }
 
@@ -81,7 +82,8 @@ bool UnixSocketConnection::valid() const noexcept {
 void UnixSocketConnection::send_all(std::span<const std::uint8_t> bytes) const {
     size_t sent = 0;
     while (sent < bytes.size()) {
-        const ssize_t rc = ::send(fd_, bytes.data() + sent, bytes.size() - sent, MSG_NOSIGNAL);
+        const auto remaining = bytes.subspan(sent);
+        const ssize_t rc = ::send(fd_, remaining.data(), remaining.size(), MSG_NOSIGNAL);
         if (rc < 0) {
             if (errno == EINTR) continue;
             throw_errno("send failed");
@@ -95,7 +97,8 @@ std::vector<std::uint8_t> UnixSocketConnection::recv_exact(size_t size) const {
     std::vector<std::uint8_t> bytes(size);
     size_t received = 0;
     while (received < size) {
-        const ssize_t rc = ::recv(fd_, bytes.data() + received, size - received, 0);
+        const auto remaining = std::span(bytes).subspan(received);
+        const ssize_t rc = ::recv(fd_, remaining.data(), remaining.size(), 0);
         if (rc < 0) {
             if (errno == EINTR) continue;
             throw_errno("recv failed");

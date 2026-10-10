@@ -127,6 +127,15 @@ struct CoreTests {
         precondition(!snapshot.selectionKeys.isEmpty, "expected selection keys")
         precondition(!snapshot.preedit.isEmpty, "expected a preedit")
 
+        // The formal service-management ABI leaves frontend contexts and
+        // composition alive; Swift has no knowledge of the socket wire format.
+        let commitsBeforeRestart = host.commits
+        precondition(core.restartPredictionService())
+        queue.pumpUntilIdle()
+        precondition(core.snapshot(context)?.preedit.map { $0.text } == snapshot.preedit.map { $0.text })
+        precondition(host.commits == commitsBeforeRestart)
+        precondition(core.hasPendingComposition)
+
         // Marking mode renders the tooltip, the hint target and underlines.
         _ = core.sendKey(context, keyCode: 0x35, charactersIgnoringModifiers: "\u{1b}",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)

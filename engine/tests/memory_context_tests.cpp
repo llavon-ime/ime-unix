@@ -15,6 +15,10 @@
 #include <unistd.h>
 #include <vector>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+
 namespace llavon::ime {
 namespace {
 
@@ -97,21 +101,21 @@ struct ProbeState {
     MemoryProbeCallbacks callbacks() {
         MemoryProbeCallbacks result;
         result.preedit = [this] {
-            std::lock_guard lock(mutex);
+            std::lock_guard<std::mutex> lock(mutex);
             return preedit;
         };
         result.processes = [this] {
-            std::lock_guard lock(mutex);
+            std::lock_guard<std::mutex> lock(mutex);
             return pids;
         };
         result.sensitive = [this] {
-            std::lock_guard lock(mutex);
+            std::lock_guard<std::mutex> lock(mutex);
             return sensitive;
         };
         return result;
     }
     void set(std::string text) {
-        std::lock_guard lock(mutex);
+        std::lock_guard<std::mutex> lock(mutex);
         preedit = std::move(text);
     }
 };
@@ -251,14 +255,14 @@ bool test_sensitive_transition_forgets_context() {
     ok &= check(provider.latest() && provider.latest()->usable,
                 "sample established before the sensitive field");
     {
-        std::lock_guard lock(state.mutex);
+        std::lock_guard<std::mutex> lock(state.mutex);
         state.sensitive = true;
     }
     provider.refresh();
     ok &= check(provider.latest() && !provider.latest()->usable,
                 "entering a sensitive field discards the cached document context");
     {
-        std::lock_guard lock(state.mutex);
+        std::lock_guard<std::mutex> lock(state.mutex);
         state.sensitive = false;
     }
     ok &= step(provider, state, "他", 4);
@@ -339,6 +343,10 @@ GridChild spawn_grid_child(std::string_view prefix) {
     if (pid == 0) {
         ::close(commands[1]);
         ::close(responses[0]);
+        // Only this synthetic client opts into sibling-process reads. The
+        // real-helper test must not need a privileged helper or weaker Yama
+        // settings on the developer's machine.
+        if (::prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) != 0) ::_exit(1);
         auto append_cell = [](std::string& out, char32_t codepoint, bool continuation) {
             for (int shift = 0; shift < 32; shift += 8) {
                 out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
@@ -355,7 +363,7 @@ GridChild spawn_grid_child(std::string_view prefix) {
         constexpr std::size_t kCompositionCells = 256;
         for (std::size_t cell = 0; cell < kCompositionCells; ++cell) append_cell(buffer, 0, false);
         const auto address = reinterpret_cast<std::uintptr_t>(buffer.data() + composition_start);
-        (void)::write(responses[1], &address, sizeof(address));
+        if (::write(responses[1], &address, sizeof(address)) != sizeof(address)) ::_exit(1);
         char step = 0;
         while (::read(commands[0], &step, 1) == 1) {
             std::vector<char32_t> text;
@@ -369,7 +377,7 @@ GridChild spawn_grid_child(std::string_view prefix) {
             }
             while (cells.size() < kCompositionCells * 12) cells.push_back('\0');
             buffer.replace(composition_start, cells.size(), cells);
-            (void)::write(responses[1], &step, 1);
+            if (::write(responses[1], &step, 1) != 1) ::_exit(1);
         }
         ::_exit(0);
     }
@@ -397,7 +405,7 @@ bool test_real_scanner_terminal_grid() {
     if (!check(child.pid > 0, "grid child spawned")) return false;
     ProbeState state;
     {
-        std::lock_guard lock(state.mutex);
+        std::lock_guard<std::mutex> lock(state.mutex);
         state.pids = {static_cast<int>(child.pid)};
     }
     MemoryContextProvider provider(64, state.callbacks(), helper);

@@ -316,6 +316,10 @@ void Engine::reload_phrase_overrides() {
     (void)phrase_overrides_.load();
 }
 
+void Engine::restart_prediction_service(bool preserve_model_path) {
+    set_transport_options(service_options_from_config(config_, options_.transport, preserve_model_path));
+}
+
 void Engine::clear_context_text(ContextId context) {
     pending_models_.erase(context);
     auto* session = find(context);

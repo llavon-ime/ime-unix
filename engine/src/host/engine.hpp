@@ -94,6 +94,7 @@ public:
     // Restarts the prediction service with new options while keeping the
     // engine, its accessibility backend, and its input sessions alive.
     void set_transport_options(ServiceTransportOptions options);
+    void restart_prediction_service(bool preserve_model_path = false);
     void reload_phrase_overrides();
     const Config& config() const { return config_; }
     PhraseOverrideStore& phrase_overrides() { return phrase_overrides_; }

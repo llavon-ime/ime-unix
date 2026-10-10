@@ -140,6 +140,7 @@ swiftc -O -warnings-as-errors -parse-as-library \
     "${ROOT_DIR}"/macos/Core/*.swift \
     "${ROOT_DIR}"/macos/App/*.swift \
     "${ENGINE_BUILD_DIR}/libllavon_ime_engine.a" \
+    "${ENGINE_BUILD_DIR}/protocol/libllavon_ime_protocol.a" \
     -lc++ \
     -framework Cocoa \
     -framework InputMethodKit \

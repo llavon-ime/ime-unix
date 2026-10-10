@@ -19,6 +19,7 @@ swiftc -warnings-as-errors -parse-as-library -module-name SettingsEntryTests \
     "${ROOT_DIR}"/macos/Core/*.swift "${sources[@]}" \
     "${ROOT_DIR}/macos/Tests/SettingsEntryTests.swift" \
     "${ENGINE_BUILD_DIR}/libllavon_ime_engine.a" -lc++ \
+    "${ENGINE_BUILD_DIR}/protocol/libllavon_ime_protocol.a" \
     -framework Cocoa -framework InputMethodKit -framework Carbon \
     -o "${BUILD_DIR}/settings-entry-tests"
 "${BUILD_DIR}/settings-entry-tests"

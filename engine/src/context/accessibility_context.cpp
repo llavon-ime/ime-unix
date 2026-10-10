@@ -34,7 +34,7 @@ std::uint64_t AccessibilityContextProvider::activation_generation() const noexce
 }
 
 void AccessibilityContextProvider::publish(std::u16string text, bool usable) {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     sample_.text = std::move(text);
     sample_.usable = usable;
     sample_.sequence = ++next_sequence_;
@@ -42,23 +42,23 @@ void AccessibilityContextProvider::publish(std::u16string text, bool usable) {
 }
 
 std::optional<AccessibilityContextSample> AccessibilityContextProvider::latest() const {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!has_sample_) return std::nullopt;
     return sample_;
 }
 
 std::uint64_t AccessibilityContextProvider::sequence() const {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return sample_.sequence;
 }
 
 AccessibilityContextState AccessibilityContextProvider::availability() const {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return availability_;
 }
 
 void AccessibilityContextProvider::set_availability(AccessibilityAvailability availability, std::string detail) {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     availability_.availability = availability;
     availability_.detail = std::move(detail);
 }

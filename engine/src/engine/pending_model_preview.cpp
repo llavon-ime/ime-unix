@@ -31,7 +31,7 @@ PendingModelPreview::~PendingModelPreview() {
     alive_.reset();
     protocol::SessionId id{};
     {
-        std::lock_guard lock(lease_->mutex);
+        std::lock_guard<std::mutex> lock(lease_->mutex);
         lease_->abandoned = true;
         id = lease_->id;
         lease_->id = {};
@@ -180,7 +180,7 @@ void PendingModelPreview::open(const std::shared_ptr<Job>& job) {
         if (const auto* opened = std::get_if<protocol::OpenSessionResponse>(&response)) {
             bool abandoned = false;
             {
-                std::lock_guard lock(lease->mutex);
+                std::lock_guard<std::mutex> lock(lease->mutex);
                 abandoned = lease->abandoned;
                 if (!abandoned) lease->id = opened->session_id;
             }

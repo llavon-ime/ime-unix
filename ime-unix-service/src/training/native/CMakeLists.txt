@@ -4,6 +4,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../engine/cmake/Warnings.cmake")
 # Also buildable on its own: UI iteration does not rebuild llama.cpp or Torch.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(llavon_lora_native VERSION 0.2.0 LANGUAGES CXX)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/protocol" "${CMAKE_CURRENT_BINARY_DIR}/protocol")
     include(GNUInstallDirs)
     option(IME_UNIX_SERVICE_BUILD_TESTS "Build native manager integration tests" ON)
     find_package(SQLite3 REQUIRED)
@@ -40,7 +41,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         message(FATAL_ERROR "LLAVON_LORA_COMMIT must be a 40-digit pinned commit")
     endif()
     set(LLAVON_IME_INSTALLED_LORA_TRAINER_PATH "${CMAKE_INSTALL_FULL_LIBDIR}/llavon-ime/tools/lora/llavon-lora")
-    add_executable(llavon-ime-lora ../lora_cli.cpp ../libtorch_cache.cpp ../numeric_dataset.cpp ../commit_store.cpp ../../pipe/protocol.cpp)
+    add_executable(llavon-ime-lora ../lora_cli.cpp ../libtorch_cache.cpp ../numeric_dataset.cpp ../commit_store.cpp)
     target_compile_features(llavon-ime-lora PRIVATE cxx_std_23)
     set_target_properties(llavon-ime-lora PROPERTIES CXX_EXTENSIONS OFF)
     llavon_ime_enable_warnings(llavon-ime-lora)
@@ -48,7 +49,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         LLAVON_IME_LORA_PINNED_COMMIT="${LLAVON_LORA_COMMIT}"
         LLAVON_IME_INSTALLED_LORA_TRAINER_PATH="${LLAVON_IME_INSTALLED_LORA_TRAINER_PATH}")
     target_include_directories(llavon-ime-lora PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-    target_link_libraries(llavon-ime-lora PRIVATE ${LLAVON_IME_SQLITE_TARGET} utf8cpp::utf8cpp nlohmann_json::nlohmann_json unofficial-sodium::sodium)
+    target_link_libraries(llavon-ime-lora PRIVATE llavon_ime_protocol ${LLAVON_IME_SQLITE_TARGET} utf8cpp::utf8cpp nlohmann_json::nlohmann_json unofficial-sodium::sodium)
     install(TARGETS llavon-ime-lora RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../../../ime-core/table/"
         DESTINATION "${CMAKE_INSTALL_DATADIR}/llavon-ime/tables")
@@ -105,8 +106,13 @@ target_link_libraries(llavon-ime-lora-gui PRIVATE llavon_lora_widgets Qt6::Netwo
 target_compile_definitions(llavon-ime-lora-gui PRIVATE
     LLAVON_BUILD_CLI="$<TARGET_FILE:llavon-ime-lora>"
     LLAVON_BUILD_BACKEND="$<TARGET_FILE:llavon-ime-lora-backend>")
-add_executable(llavon-ime-lora-backend "${training}/lora_gui.cpp" "${training}/commit_store.cpp"
-    "${training}/lora_history_lca.cpp" "${service_src}/pipe/protocol.cpp")
+add_library(llavon_job_process STATIC "${training}/job_process.cpp")
+target_compile_features(llavon_job_process PUBLIC cxx_std_23)
+set_target_properties(llavon_job_process PROPERTIES CXX_EXTENSIONS OFF)
+target_link_libraries(llavon_job_process PUBLIC unofficial-sodium::sodium)
+llavon_ime_enable_warnings(llavon_job_process)
+add_executable(llavon-ime-lora-backend "${training}/manager_backend.cpp" "${training}/commit_store.cpp"
+    "${training}/lora_history_lca.cpp" "${training}/manager_database.cpp" "${training}/manager_model_policy.cpp")
 target_compile_features(llavon-ime-lora-backend PRIVATE cxx_std_23)
 set_target_properties(llavon-ime-lora-backend PROPERTIES CXX_EXTENSIONS OFF)
 target_compile_definitions(llavon-ime-lora-backend PRIVATE LLAVON_NATIVE_GUI=1
@@ -114,7 +120,7 @@ target_compile_definitions(llavon-ime-lora-backend PRIVATE LLAVON_NATIVE_GUI=1
     LLAVON_IME_INSTALLED_LORA_TRAINER_PATH="${LLAVON_IME_INSTALLED_LORA_TRAINER_PATH}"
     LLAVON_IME_GUI_INSTALLED_TABLES_DIR="${CMAKE_INSTALL_FULL_DATADIR}/llavon-ime/tables")
 target_include_directories(llavon-ime-lora-backend PRIVATE "${service_src}")
-target_link_libraries(llavon-ime-lora-backend PRIVATE ${LLAVON_IME_SQLITE_TARGET}
+target_link_libraries(llavon-ime-lora-backend PRIVATE llavon_job_process llavon_ime_protocol ${LLAVON_IME_SQLITE_TARGET}
     utf8cpp::utf8cpp nlohmann_json::nlohmann_json unofficial-sodium::sodium)
 add_dependencies(llavon-ime-lora-gui llavon-ime-lora-backend llavon-ime-lora)
 
@@ -167,6 +173,12 @@ endif()
 
 if(IME_UNIX_SERVICE_BUILD_TESTS)
     enable_testing()
+    add_executable(ime_job_process_tests "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/job_process_tests.cpp")
+    target_include_directories(ime_job_process_tests PRIVATE "${service_src}")
+    target_link_libraries(ime_job_process_tests PRIVATE llavon_job_process)
+    llavon_ime_enable_warnings(ime_job_process_tests)
+    add_test(NAME ime_job_process_tests COMMAND ime_job_process_tests)
+    set_tests_properties(ime_job_process_tests PROPERTIES TIMEOUT 15)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(llavon_linux_update_tests "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/linux_update_tests.cpp")
@@ -177,9 +189,9 @@ if(IME_UNIX_SERVICE_BUILD_TESTS)
         set_tests_properties(llavon_linux_update_tests PROPERTIES TIMEOUT 30)
     endif()
     add_executable(llavon_lora_native_tests "${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/lora_native_tests.cpp"
-        "${training}/commit_store.cpp" "${service_src}/pipe/protocol.cpp")
+        "${training}/commit_store.cpp")
     target_include_directories(llavon_lora_native_tests PRIVATE "${service_src}")
-    target_link_libraries(llavon_lora_native_tests PRIVATE llavon_lora_widgets Qt6::Test ${LLAVON_IME_SQLITE_TARGET}
+    target_link_libraries(llavon_lora_native_tests PRIVATE llavon_ime_protocol llavon_lora_widgets Qt6::Test ${LLAVON_IME_SQLITE_TARGET}
         utf8cpp::utf8cpp nlohmann_json::nlohmann_json unofficial-sodium::sodium)
     if(TARGET llavon-ime-lora)
         set(test_cli "$<TARGET_FILE:llavon-ime-lora>")
@@ -193,6 +205,13 @@ if(IME_UNIX_SERVICE_BUILD_TESTS)
         LLAVON_TEST_TABLES="${CMAKE_CURRENT_SOURCE_DIR}/../../../../ime-core/table")
     lora_warnings(llavon_lora_native_tests)
     add_dependencies(llavon_lora_native_tests llavon-ime-lora-gui)
-    add_test(NAME llavon_lora_native_tests COMMAND llavon_lora_native_tests)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_program(LLAVON_DBUS_RUN_SESSION dbus-run-session REQUIRED)
+        add_test(NAME llavon_lora_native_tests COMMAND "${LLAVON_DBUS_RUN_SESSION}"
+            "--config-file=${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/session-bus.conf"
+            -- "$<TARGET_FILE:llavon_lora_native_tests>")
+    else()
+        add_test(NAME llavon_lora_native_tests COMMAND llavon_lora_native_tests)
+    endif()
     set_tests_properties(llavon_lora_native_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 90)
 endif()

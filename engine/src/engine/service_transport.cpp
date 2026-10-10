@@ -2,6 +2,8 @@
 
 #include "service_transport.hpp"
 #include "util/unique_fd.hpp"
+#include "ipc/socket_io.hpp"
+#include "config/config.hpp"
 
 #include <cerrno>
 #include <chrono>
@@ -10,6 +12,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -31,77 +34,68 @@ std::filesystem::path env_path(const char* name) {
     return {};
 }
 
-bool write_all(int fd, std::span<const std::uint8_t> bytes) {
-    const auto* data = bytes.data();
-    const auto size = bytes.size();
-    std::size_t offset = 0;
-    while (offset < size) {
-        int flags = 0;
-#ifdef MSG_NOSIGNAL
-        flags |= MSG_NOSIGNAL;
-#endif
-        const auto count = ::send(fd, data + offset, size - offset, flags);
-        if (count < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        if (count == 0) return false;
-        offset += static_cast<std::size_t>(count);
-    }
-    return true;
+void validate_limits(const ServiceTransportOptions& options) {
+    if (options.max_pending_requests == 0 || options.max_pending_requests > 65536 ||
+        options.connect_timeout.count() <= 0 || options.handshake_timeout.count() <= 0 ||
+        options.request_timeout.count() <= 0 || options.cold_prediction_timeout.count() <= 0)
+        throw std::invalid_argument("invalid transport limits");
 }
 
-bool read_all(int fd, std::span<std::uint8_t> bytes) {
-    auto* data = bytes.data();
-    const auto size = bytes.size();
-    std::size_t offset = 0;
-    while (offset < size) {
-        const auto count = ::recv(fd, data + offset, size - offset, 0);
-        if (count < 0) {
-            if (errno == EINTR) continue;
-            return false;
-        }
-        if (count == 0) return false;
-        offset += static_cast<std::size_t>(count);
+bool launch_service(std::vector<std::string>& arguments) {
+    // Build argv before fork: allocator locks may be owned by another thread.
+    std::vector<char*> argv;
+    argv.reserve(arguments.size() + 1);
+    for (auto& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+    const pid_t launcher = ::fork();
+    if (launcher < 0) return false;
+    if (launcher == 0) {
+        // The long-lived service must not leave a zombie child behind in an
+        // input-method host after it exits or is repeatedly restarted.
+        const pid_t service = ::fork();
+        if (service < 0) _exit(127);
+        if (service > 0) _exit(0);
+        ::execv(argv[0], argv.data());
+        _exit(127);
     }
-    return true;
+    int status = 0;
+    pid_t ended;
+    do { ended = ::waitpid(launcher, &status, 0); } while (ended < 0 && errno == EINTR);
+    return ended == launcher && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-protocol::ByteVector recv_frame(int fd) {
+protocol::ByteVector recv_frame(int fd, socket_io::Deadline deadline) {
     std::array<std::uint8_t, 4> header{};
-    if (!read_all(fd, header)) throw std::system_error(errno, std::generic_category(), "read service frame header");
+    if (!socket_io::read_all(fd, header, deadline)) throw std::system_error(errno, std::generic_category(), "read service frame header");
     const auto length = static_cast<std::uint32_t>(header[0]) | (static_cast<std::uint32_t>(header[1]) << 8U) |
                         (static_cast<std::uint32_t>(header[2]) << 16U) | (static_cast<std::uint32_t>(header[3]) << 24U);
     if (length > protocol::kMaxFramePayloadBytes) throw protocol::ProtocolError("service frame is too large");
     protocol::ByteVector result(header.begin(), header.end());
     result.resize(result.size() + length);
-    if (!read_all(fd, std::span(result).subspan(4, length))) throw std::system_error(errno, std::generic_category(), "read service frame");
+    if (!socket_io::read_all(fd, std::span(result).subspan(4, length), deadline)) throw std::system_error(errno, std::generic_category(), "read service frame");
     return result;
-}
-
-int connect_socket(const std::filesystem::path& path) {
-    UniqueFd fd(::socket(AF_UNIX, SOCK_STREAM, 0));
-    if (!fd.valid()) return -1;
-    sockaddr_un address{};
-    address.sun_family = AF_UNIX;
-    const auto string_path = path.string();
-    if (string_path.size() >= sizeof(address.sun_path)) return -1;
-    std::memcpy(address.sun_path, string_path.c_str(), string_path.size() + 1);
-    if (::connect(fd.get(), reinterpret_cast<const sockaddr*>(&address),
-                  static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + string_path.size() + 1)) != 0) {
-        return -1;
-    }
-#ifdef SO_NOSIGPIPE
-    // macOS has no MSG_NOSIGNAL; ask the socket itself not to raise SIGPIPE.
-    const int enabled = 1;
-    (void)::setsockopt(fd.get(), SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
-#endif
-    return fd.release();
 }
 
 }  // namespace
 
+ServiceTransportOptions service_options_from_config(const Config& config, ServiceTransportOptions options,
+                                                   bool preserve_model_path) {
+    if (!preserve_model_path) options.model_path = config.model_path;
+    options.context_length = static_cast<std::uint32_t>(std::max(1, config.context_length));
+    options.threads = static_cast<std::uint32_t>(std::max(1, config.thread_count));
+    options.gpu_layers = config.gpu_layers;
+    options.idle_timeout_seconds = static_cast<std::uint32_t>(std::max(1, config.idle_timeout_seconds));
+    return options;
+}
+
+bool same_service_runtime(const ServiceTransportOptions& left, const ServiceTransportOptions& right) {
+    return left.model_path == right.model_path && left.context_length == right.context_length &&
+           left.threads == right.threads && left.gpu_layers == right.gpu_layers &&
+           left.idle_timeout_seconds == right.idle_timeout_seconds;
+}
+
 ServiceTransport::ServiceTransport(ServiceTransportOptions options) : options_(std::move(options)) {
+    validate_limits(options_);
     if (options_.socket_path.empty()) options_.socket_path = default_socket_path();
     if (options_.service_path.empty()) options_.service_path = default_service_path();
     worker_ = std::jthread([this](std::stop_token stop) { run(stop); });
@@ -138,7 +132,7 @@ void ServiceTransport::shutdown(Callback callback) {
 void ServiceTransport::stop() {
     bool should_shutdown = false;
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) {
             // The join below is still needed when stop() is called twice.
         } else {
@@ -150,7 +144,7 @@ void ServiceTransport::stop() {
     // Wake a blocking recv without closing/reusing the descriptor underneath
     // the worker. The worker owns the final disconnect while it unwinds.
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (socket_fd_ >= 0) (void)::shutdown(socket_fd_, SHUT_RDWR);
     }
     if (worker_.joinable()) worker_.join();
@@ -159,17 +153,18 @@ void ServiceTransport::stop() {
 }
 
 bool ServiceTransport::connected() const noexcept {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return connected_;
 }
 
 void ServiceTransport::reconfigure(ServiceTransportOptions options) {
+    validate_limits(options);
     // stop() joins the worker, fails everything still queued, and shuts down
     // the service this transport owned. The worker is restarted with the new
     // options so a service may only spawn once a request arrives.
     stop();
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = false;
         connected_ = false;
         socket_fd_ = -1;
@@ -183,7 +178,7 @@ void ServiceTransport::reconfigure(ServiceTransportOptions options) {
 }
 
 std::optional<protocol::ServiceEpoch> ServiceTransport::service_epoch() const {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     return epoch_;
 }
 
@@ -232,22 +227,54 @@ std::filesystem::path ServiceTransport::default_service_path() {
 void ServiceTransport::enqueue(RequestKind kind, protocol::Message message, Callback callback) {
     Callback rejected_callback;
     std::optional<protocol::Message> rejected_response;
+    std::optional<Pending> superseded;
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stopping_ && kind == RequestKind::Predict) {
+            const auto id = std::get<protocol::PredictRequest>(message).session_id;
+            const auto obsolete = std::ranges::find_if(queue_, [&id](const Pending& pending) {
+                const auto* prediction = std::get_if<protocol::PredictRequest>(&pending.message);
+                return prediction && prediction->session_id == id;
+            });
+            if (obsolete != queue_.end()) {
+                superseded = std::move(*obsolete);
+                queue_.erase(obsolete);
+            }
+        }
+        if (!stopping_ && kind == RequestKind::DiscardCommit) {
+            const auto event = std::get<protocol::DiscardCommitRequest>(message).event_id;
+            const auto recorded = std::ranges::find_if(queue_, [&event](const Pending& pending) {
+                const auto* record = std::get_if<protocol::RecordCommitRequest>(&pending.message);
+                return record && record->event_id == event;
+            });
+            if (recorded != queue_.end()) {
+                // Neither operation was sent. Drop both, not just the correction.
+                queue_.erase(recorded);
+                return;
+            }
+            if (std::ranges::any_of(queue_, [&event](const Pending& pending) {
+                const auto* discard = std::get_if<protocol::DiscardCommitRequest>(&pending.message);
+                return discard && discard->event_id == event;
+            })) return;
+        }
         if (stopping_) {
             if (callback) {
                 rejected_callback = std::move(callback);
                 rejected_response = protocol::Message{correlation_error(
                     message, protocol::ErrorCode::ServiceShuttingDown, "transport is stopped")};
             }
-        } else if (kind == RequestKind::RecordCommit && queue_.size() >= 128) {
-            // Collection is best effort. Do not let a stalled service retain
-            // unbounded committed text in the input method process.
-            return;
+        } else if (queue_.size() >= (kind == RequestKind::DiscardCommit
+                   ? options_.max_pending_requests * 2 + 1 : options_.max_pending_requests)) {
+            // Keep accepted work in FIFO order, especially Record/Discard.
+            // Collection is best effort; callers with callbacks get a correlated error.
+            rejected_response = protocol::Message{correlation_error(
+                message, protocol::ErrorCode::ResourceExhausted, "transport queue is full")};
+            rejected_callback = std::move(callback);
         } else {
-            queue_.push(Pending{kind, std::move(message), std::move(callback)});
+            queue_.push_back(Pending{kind, std::move(message), std::move(callback)});
         }
     }
+    if (superseded) fail(std::move(*superseded), protocol::ErrorCode::ResourceExhausted, "prediction superseded before execution");
     if (rejected_callback) rejected_callback(std::move(*rejected_response));
     if (rejected_response) return;
     condition_.notify_one();
@@ -265,20 +292,20 @@ void ServiceTransport::run(std::stop_token stop) {
     while (true) {
         Pending pending;
         {
-            std::unique_lock lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             condition_.wait(lock, stop, [this]() { return stopping_ || !queue_.empty(); });
             // stop() has already shut down the socket to unblock recv. Fail
             // queued work below instead of reconnecting while draining it.
             if (stopping_ || stop.stop_requested()) break;
             pending = std::move(queue_.front());
-            queue_.pop();
+            queue_.pop_front();
         }
 
         try {
             if (!ensure_connected()) throw std::system_error(ENOENT, std::generic_category(), "service is unavailable");
             bool stopped = false;
             {
-                std::lock_guard lock(mutex_);
+                std::lock_guard<std::mutex> lock(mutex_);
                 stopped = stopping_;
             }
             if (stopped) {
@@ -288,9 +315,15 @@ void ServiceTransport::run(std::stop_token stop) {
                 continue;
             }
             const auto bytes = protocol::encode(pending.message);
-            if (!write_all(socket_fd_, bytes)) throw std::system_error(errno, std::generic_category(), "write service frame");
-            const auto response = protocol::decode(recv_frame(socket_fd_));
+            const auto timeout = pending.kind == RequestKind::Predict && cold_prediction_
+                ? options_.cold_prediction_timeout : options_.request_timeout;
+            const auto deadline = std::chrono::steady_clock::now() + timeout;
+            if (!socket_io::write_all(socket_fd_, bytes, deadline)) throw std::system_error(errno, std::generic_category(), "write service frame");
+            const auto response = protocol::decode(recv_frame(socket_fd_, deadline));
+            if (pending.kind == RequestKind::Predict) cold_prediction_ = false;
             if (!matches(pending.kind, pending.message, response)) {
+                // A complete, decoded frame keeps the stream aligned. Reject
+                // the stale result without applying it to another request.
                 fail(std::move(pending), protocol::ErrorCode::ProtocolError, "service response correlation mismatch");
             } else {
                 observe_response(response);
@@ -301,28 +334,33 @@ void ServiceTransport::run(std::stop_token stop) {
             fail(std::move(pending), protocol::ErrorCode::ProtocolError, error.what());
         } catch (const std::exception& error) {
             disconnect();
-            fail(std::move(pending), protocol::ErrorCode::ModelError, error.what());
+            bool stopping = false;
+            { std::lock_guard<std::mutex> lock(mutex_); stopping = stopping_; }
+            fail(std::move(pending), stopping ? protocol::ErrorCode::ServiceShuttingDown : protocol::ErrorCode::ModelError, error.what());
         }
     }
     disconnect();
-    std::queue<Pending> remaining;
+    std::deque<Pending> remaining;
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         remaining.swap(queue_);
     }
     while (!remaining.empty()) {
         fail(std::move(remaining.front()), protocol::ErrorCode::ServiceShuttingDown, "transport is stopped");
-        remaining.pop();
+        remaining.pop_front();
     }
 }
 
 bool ServiceTransport::ensure_connected() {
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (connected_ && socket_fd_ >= 0) return true;
     }
 
-    int fd = connect_socket(options_.socket_path);
+    const auto connect = [this]() {
+        return socket_io::connect(options_.socket_path, std::chrono::steady_clock::now() + options_.connect_timeout);
+    };
+    int fd = connect();
     const bool spawn_allowed = options_.auto_start && !options_.service_path.empty() &&
                                std::chrono::steady_clock::now() >= spawn_backoff_until_;
     if (fd < 0 && spawn_allowed) {
@@ -339,19 +377,11 @@ bool ServiceTransport::ensure_connected() {
         arguments.emplace_back("--max-idle-sessions"); arguments.emplace_back(std::to_string(options_.max_idle_sessions));
         arguments.emplace_back("--max-concurrent-predictions"); arguments.emplace_back(std::to_string(options_.max_concurrent_predictions));
         arguments.emplace_back("--idle-timeout"); arguments.emplace_back(std::to_string(options_.idle_timeout_seconds));
-        const pid_t child = ::fork();
-        if (child == 0) {
-            std::vector<char*> argv;
-            argv.reserve(arguments.size() + 1);
-            for (auto& argument : arguments) argv.push_back(argument.data());
-            argv.push_back(nullptr);
-            ::execv(argv[0], argv.data());
-            _exit(127);
-        }
-        if (child > 0) {
+        if (launch_service(arguments)) {
             for (int attempt = 0; attempt < 40 && fd < 0; ++attempt) {
+                { std::lock_guard<std::mutex> lock(mutex_); if (stopping_) return false; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(25));
-                fd = connect_socket(options_.socket_path);
+                fd = connect();
             }
         }
     }
@@ -361,30 +391,39 @@ bool ServiceTransport::ensure_connected() {
     if (fd < 0) return false;
 
     UniqueFd connection(fd);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) return false;
+        // Publish the descriptor before the handshake so stop() can wake it.
+        socket_fd_ = connection.release();
+    }
     try {
+        const auto deadline = std::chrono::steady_clock::now() + options_.handshake_timeout;
         const auto status_request = protocol::encode(protocol::Message{protocol::StatusRequest{std::nullopt}});
-        if (!write_all(fd, status_request)) throw std::runtime_error("failed to query service epoch");
-        const auto response = protocol::decode(recv_frame(fd));
+        if (!socket_io::write_all(fd, status_request, deadline)) throw std::runtime_error("failed to query service epoch");
+        const auto response = protocol::decode(recv_frame(fd, deadline));
         const auto* status = std::get_if<protocol::StatusResponse>(&response);
         if (status == nullptr) throw protocol::ProtocolError("service epoch query returned an unexpected response");
         {
-            std::lock_guard lock(mutex_);
+            std::lock_guard<std::mutex> lock(mutex_);
             if (epoch_ && *epoch_ != status->service_epoch) {
                 // Session IDs are process-local.  The frontend will receive UNKNOWN_SESSION
                 // and lazily open a replacement on its next prediction.
             }
             epoch_ = status->service_epoch;
-            socket_fd_ = connection.release();
+            if (stopping_) return false;
             connected_ = true;
+            cold_prediction_ = !status->model_loaded;
         }
         return true;
     } catch (...) {
+        disconnect();
         return false;
     }
 }
 
 void ServiceTransport::disconnect() noexcept {
-    std::lock_guard lock(mutex_);
+    std::lock_guard<std::mutex> lock(mutex_);
     if (socket_fd_ >= 0) {
         ::shutdown(socket_fd_, SHUT_RDWR);
         ::close(socket_fd_);
@@ -396,10 +435,11 @@ void ServiceTransport::disconnect() noexcept {
 void ServiceTransport::shutdown_service() noexcept {
     if (!options_.auto_start) return;
     try {
-        const UniqueFd connection(connect_socket(options_.socket_path));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        const UniqueFd connection(socket_io::connect(options_.socket_path, deadline));
         if (!connection.valid()) return;
         const auto bytes = protocol::encode(protocol::Message{protocol::ShutdownRequest{}});
-        (void)write_all(connection.get(), bytes);
+        (void)socket_io::write_all(connection.get(), bytes, deadline);
         ::shutdown(connection.get(), SHUT_RDWR);
     } catch (...) {
     }
@@ -419,7 +459,14 @@ void ServiceTransport::fail(Pending pending, protocol::ErrorCode code, std::stri
 }
 
 bool ServiceTransport::matches(RequestKind kind, const protocol::Message& request, const protocol::Message& response) {
-    if (std::holds_alternative<protocol::Error>(response)) return true;
+    if (const auto* error = std::get_if<protocol::Error>(&response)) {
+        if (const auto* sent = std::get_if<protocol::PredictRequest>(&request))
+            return error->session_id == sent->session_id && error->request_id == sent->request_id &&
+                   error->buffer_revision == sent->buffer_revision;
+        if (const auto* sent = std::get_if<protocol::CloseSessionRequest>(&request))
+            return error->session_id == sent->session_id;
+        return true;
+    }
     switch (kind) {
         case RequestKind::Open: return std::holds_alternative<protocol::OpenSessionResponse>(response);
         case RequestKind::Predict: {
@@ -464,13 +511,13 @@ protocol::Error ServiceTransport::correlation_error(const protocol::Message& req
 
 void ServiceTransport::observe_response(const protocol::Message& response) {
     if (const auto* value = std::get_if<protocol::StatusResponse>(&response)) {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (epoch_ && *epoch_ != value->service_epoch) {
             // Keep the new epoch; callers validate their session IDs against the server response.
         }
         epoch_ = value->service_epoch;
     } else if (const auto* opened = std::get_if<protocol::OpenSessionResponse>(&response)) {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         epoch_ = opened->service_epoch;
     }
 }

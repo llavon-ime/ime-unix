@@ -150,7 +150,7 @@ bool test_prediction_retry_and_close() {
             connection.send_all(
                 protocol::encode(protocol::Message{protocol::CloseSessionResponse{session_id}}));
             {
-                std::lock_guard lock(close_mutex);
+                std::lock_guard<std::mutex> lock(close_mutex);
                 close_received = true;
             }
             close_condition.notify_all();
@@ -183,7 +183,7 @@ bool test_prediction_retry_and_close() {
         }
         engine.detach(context);
         {
-            std::unique_lock lock(close_mutex);
+            std::unique_lock<std::mutex> lock(close_mutex);
             passed = passed &&
                      close_condition.wait_for(lock, std::chrono::seconds(2), [&]() { return close_received.load(); });
         }
@@ -266,7 +266,7 @@ bool test_unknown_session_reopens() {
             connection.send_all(
                 protocol::encode(protocol::Message{protocol::CloseSessionResponse{second_id}}));
             {
-                std::lock_guard lock(close_mutex);
+                std::lock_guard<std::mutex> lock(close_mutex);
                 close_received = true;
             }
             close_condition.notify_all();
@@ -305,7 +305,7 @@ bool test_unknown_session_reopens() {
         }
         engine.detach(context);
         {
-            std::unique_lock lock(close_mutex);
+            std::unique_lock<std::mutex> lock(close_mutex);
             passed = passed &&
                      close_condition.wait_for(lock, std::chrono::seconds(2), [&]() { return close_received.load(); });
         }
@@ -350,7 +350,7 @@ bool test_destroy_with_inflight_request() {
         } catch (...) {
         }
         {
-            std::lock_guard lock(mutex);
+            std::lock_guard<std::mutex> lock(mutex);
             server_done = true;
         }
         condition.notify_all();
@@ -368,7 +368,7 @@ bool test_destroy_with_inflight_request() {
     }
 
     {
-        std::unique_lock lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
         (void)condition.wait_for(lock, std::chrono::seconds(2), [&]() { return server_done.load(); });
     }
     if (!server_done) unblock_accept(socket_path);

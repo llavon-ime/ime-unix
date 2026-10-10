@@ -124,7 +124,7 @@ std::string password_option(const Options& options) {
         const bool hidden = ::tcgetattr(STDIN_FILENO, &original) == 0;
         if (hidden) {
             termios masked = original;
-            masked.c_lflag &= ~ECHO;
+            masked.c_lflag &= ~static_cast<tcflag_t>(ECHO);
             ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &masked);
         }
         std::string line;
@@ -364,9 +364,25 @@ void check_model(const fs::path& output) {
     fs::remove(metadata);
 }
 
-// One non-blocking look at the rolling manifest for the pinned commit. The
-// immutable per-commit manifest is still the authority; callers re-validate
-// the version, asset name, and SHA-256 before installing anything.
+// Prefer the immutable commit manifest. The version-tagged manifest and its
+// asset checksum are still re-validated before installing anything.
+nlohmann::json fetch_pinned_candidate(const fs::path& output, std::string_view expected_commit) {
+    const auto manifest_file = output / "commit-release.json.partial";
+    try {
+        // The immutable commit tag remains available after `latest` moves and
+        // does not consume the anonymous GitHub API quota shared by AUR/CI.
+        run_tool("curl", {"--fail", "--location", "--retry", "3", "--output", manifest_file.string(),
+                          "https://github.com/llavon-ime/lora-trainer/releases/download/commit-" +
+                          std::string(expected_commit) + "/latest.json"});
+        auto candidate = nlohmann::json::parse(std::ifstream(manifest_file));
+        fs::remove(manifest_file);
+        if (candidate.is_object() && candidate.value("commit", "") == expected_commit) return candidate;
+    } catch (...) {}
+    fs::remove(manifest_file);
+    return nlohmann::json::object();
+}
+
+// Compatibility fallback for older trainer releases without a commit tag.
 nlohmann::json fetch_rolling_candidate(const fs::path& output, std::string_view expected_commit, int attempt) {
     const auto manifest_file = output / "release.json.partial";
     try {
@@ -395,7 +411,9 @@ void check_trainer(const fs::path& output) {
         installed_version = stamp.value("version", "");
         installed_commit = stamp.value("commit", "");
     } catch (...) {}
-    auto candidate = fetch_rolling_candidate(output, expected_commit, 1);
+    auto candidate = fetch_pinned_candidate(output, expected_commit);
+    if (candidate.value("commit", "") != expected_commit)
+        candidate = fetch_rolling_candidate(output, expected_commit, 1);
     if (candidate.value("commit", "") != expected_commit)
         candidate = trainer_release_for_commit(output, expected_commit);
     const std::string release_version =
@@ -460,8 +478,8 @@ void install_trainer(const fs::path& output) {
             if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() || attempts < 1 || attempts > 30)
                 throw std::invalid_argument("invalid release retry count");
         }
-        nlohmann::json candidate;
-        for (int attempt = 1; attempt <= attempts; ++attempt) {
+        auto candidate = fetch_pinned_candidate(output, expected_commit);
+        for (int attempt = 1; candidate.value("commit", "") != expected_commit && attempt <= attempts; ++attempt) {
             candidate = fetch_rolling_candidate(output, expected_commit, attempt);
             if (candidate.value("commit", "") == expected_commit) break;
             std::cerr << "Waiting for LoRA Trainer release of pinned commit " << expected_commit << '\n';
@@ -542,9 +560,9 @@ void install_trainer(const fs::path& output) {
         std::vector<fs::path> obsolete;
         for (const auto& entry : fs::directory_iterator(output)) obsolete.push_back(entry.path());
         for (const auto& path : obsolete) {
-            const auto name = path.filename();
-            if (name == archive.filename() || name == manifest_file.filename() ||
-                name == pinned_manifest_file.filename() || name == staging.filename()) continue;
+            const auto filename = path.filename();
+            if (filename == archive.filename() || filename == manifest_file.filename() ||
+                filename == pinned_manifest_file.filename() || filename == staging.filename()) continue;
             fs::remove_all(path);
         }
         for (const auto& entry : fs::directory_iterator(staging))

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <unistd.h>
 
 using namespace llavon::ime;
 using namespace llavon::ime::rawkey;

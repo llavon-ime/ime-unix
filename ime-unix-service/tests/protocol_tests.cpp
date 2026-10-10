@@ -65,7 +65,7 @@ bool protocol_test() {
 
 bool core_adapter_test() {
     ime::unix_service::protocol::PredictRequest request;
-    request.padding.push_back({false, u"ㄋㄧˇ", 0});
+    request.padding.emplace_back(false, std::u16string{u"ㄋㄧˇ"}, 0);
     request.padding.push_back({true, {}, U'好'});
 
     const auto core_padding = ime::unix_service::detail::to_core_padding(request);
@@ -152,7 +152,7 @@ bool session_test() {
     request.session_id = first_id;
     request.request_id = 1;
     request.buffer_revision = 9;
-    request.padding.push_back({false, u"ㄋㄧˇ", 0});
+    request.padding.emplace_back(false, std::u16string{u"ㄋㄧˇ"}, 0);
     const auto prediction = manager.predict(1000, request);
     if (!std::holds_alternative<ime::unix_service::protocol::Prediction>(prediction)) return false;
     const auto& value = std::get<ime::unix_service::protocol::Prediction>(prediction);
@@ -388,7 +388,7 @@ bool commit_test() {
             const auto entries = nlohmann::json::parse(table);
             for (auto it = entries.begin(); it != entries.end(); ++it) {
                 const auto id = it.value().get<int>();
-                if (id < 18546) vocab[id] = it.key();
+                if (id >= 0 && id < 18546) vocab[static_cast<std::size_t>(id)] = it.key();
             }
         }
         std::ofstream(directory / "ime_vocab.json") << nlohmann::json{{"tokens", vocab}}.dump();
@@ -461,8 +461,8 @@ bool commit_test() {
         bool sealed_refused = false;
         {
             const CommitCipher locked;
-            const auto decryption = locked.decryption();
-            try { (void)write_numeric_dataset(db, IME_UNIX_SERVICE_TEST_TABLE_DIR, config, output, 384, nullptr, &decryption); }
+            const auto locked_decryption = locked.decryption();
+            try { (void)write_numeric_dataset(db, IME_UNIX_SERVICE_TEST_TABLE_DIR, config, output, 384, nullptr, &locked_decryption); }
             catch (const std::runtime_error&) { sealed_refused = true; }
         }
         good = good && sealed_refused;

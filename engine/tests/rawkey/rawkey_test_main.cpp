@@ -34,6 +34,10 @@ SuiteRegistrar::SuiteRegistrar(const char* name, void (*body)()) {
 // The standard raw-key runner: every registered suite drives raw keys through
 // the harness and reports one line; a failure never stops the other suites.
 int main(int argc, char** argv) {
+    if (argc == 5 && std::string_view(argv[1]) == "--memory-client") {
+        return llavon::ime::rawkey::memory_client_main(argv[2], std::atoi(argv[3]),
+                                                     std::atoi(argv[4]));
+    }
     if (argc == 5 && std::string_view(argv[1]) == "--committed-client") {
         return llavon::ime::rawkey::committed_client_main(argv[2], std::atoi(argv[3]),
                                                           std::atoi(argv[4]));

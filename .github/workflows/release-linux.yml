@@ -26,6 +26,13 @@ env:
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
+  verify-input-behavior:
+    uses: ./.github/workflows/verify-release-engine.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+    permissions:
+      contents: read
+
   build-linux:
     name: Build ${{ matrix.format }} package
     runs-on: ubuntu-24.04
@@ -288,7 +295,7 @@ jobs:
 
   publish-linux:
     name: Attach Linux packages to release
-    needs: verify-clean-install
+    needs: [verify-clean-install, verify-input-behavior]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout tag

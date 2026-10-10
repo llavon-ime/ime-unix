@@ -152,23 +152,29 @@ std::vector<char32_t> to_codepoints(std::string_view input) {
 // A terminal grid: 12-byte cells holding a UTF-32 code point and attributes.
 // Wide characters repeat the code point in a continuation cell.
 Holder spawn_cell12_holder(std::string_view prefix, std::string_view text,
-                           bool noisy_heap_boundary = false) {
+                            bool noisy_heap_boundary = false, bool foot_clean = false) {
     int ready[2];
     if (::pipe(ready) != 0) return {};
     const pid_t pid = ::fork();
     if (pid == 0) {
         ::close(ready[0]);
-        auto append_cell = [](std::string& out, char32_t codepoint, bool continuation) {
+        auto append_cell = [foot_clean](std::string& out, char32_t codepoint, bool continuation) {
+            // Foot 1.21's offset8 bit0 is attrs.clean, NOT Kitty continuation.
+            // Its wide-glyph spacer is CELL_SPACER from the retained terminal.h.
+            if (foot_clean && continuation) codepoint = 0x40200000u;
             for (int shift = 0; shift < 32; shift += 8) {
                 out.push_back(static_cast<char>((codepoint >> shift) & 0xff));
             }
             const unsigned char attributes[8] = {
                 0x00, 0x00, 0x0e, 0x00,
-                static_cast<unsigned char>(continuation ? 0x01 : 0x00), 0x04, 0x00, 0x00};
+                static_cast<unsigned char>(foot_clean || continuation ? 0x01 : 0x00), 0x04, 0x00, 0x00};
             out.append(reinterpret_cast<const char*>(attributes), 8);
         };
         std::string buffer;
         buffer.reserve(4096);
+        // Explicitly represent the preceding cleared grid cell; this is a
+        // decoder test, not a claim that heap allocation proves row boundary.
+        if (foot_clean) append_cell(buffer, 0, false);
         if (noisy_heap_boundary) {
             // Three binary cells, then a coincidental valid CJK code point
             // with heap attributes, just before the actual screen row.
@@ -474,6 +480,20 @@ int main() {
     }
 
     {
+        const Holder holder = spawn_cell12_holder("test input prefix 你", "ㄋㄧㄣ", false, true);
+        const auto foot_anchor = parse("ㄋㄧㄣ");
+        ScanError error;
+        std::vector<Match> candidates;
+        (void)scan_pid(holder.pid, *foot_anchor, 512, 16, limits,
+                       {{holder.pid, holder.address, holder.address + 1024}}, error, &candidates);
+        check(std::ranges::any_of(candidates, [&](const Match& item) {
+                  return item.encoding == Encoding::FootCell12Le &&
+                         item.before == "test input prefix 你";
+              }), "Foot clean cells preserve every prefix character instead of Kitty flag filtering");
+        stop_holder(holder.pid);
+    }
+
+    {
         // Konsole keeps its screen as 16-byte cells; the composition must be
         // found with the document text in front of it.
         const Holder holder = spawn_cell16_holder("doc text ", kAnchor);
@@ -728,10 +748,10 @@ int main() {
         const ChangingHolder changing = spawn_changing_holder();
         check(changing.holder.address != 0, "mutable client string has a stable address");
         std::uintptr_t previous = 0;
-        for (const auto [key, text] : std::vector<std::pair<char, const char*>>{
+        for (const auto [key, composition] : std::vector<std::pair<char, const char*>>{
                  {'1', "ㄋ"}, {'2', "ㄋㄧ"}, {'3', "你"}}) {
             check(update_holder(changing, key), "client changed its natural composition");
-            const auto pattern = parse(text);
+            const auto pattern = parse(composition);
             ScanError error;
             std::vector<Match> candidates;
             const std::vector<Hint> hint{{changing.holder.pid, changing.holder.address,
@@ -746,7 +766,7 @@ int main() {
                     previous = candidate.address;
                 }
             }
-            check(found, std::string("natural composition match: ") + text);
+            check(found, std::string("natural composition match: ") + composition);
         }
         ::close(changing.updates); ::close(changing.acknowledgements);
         stop_holder(changing.holder.pid);
@@ -853,8 +873,8 @@ int main() {
     {
         // A validated hint can extend into an unmapped page. The scanner
         // still has to reach the adjacent mapped page holding the document.
-        const std::string text = std::string("document prefix ") + kAnchor;
-        const Holder holder = spawn_guarded_holder(text);
+        const std::string guarded_text = std::string("document prefix ") + kAnchor;
+        const Holder holder = spawn_guarded_holder(guarded_text);
         ScanError error;
         std::vector<Match> candidates;
         const auto address = holder.address + std::string_view("document prefix ").size();

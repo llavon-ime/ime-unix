@@ -49,7 +49,7 @@ int encoding_rank(std::string_view encoding) {
     if (encoding == "utf16le") return 1;
     if (encoding == "utf32le") return 2;
     if (encoding == "utf32cell8le") return 3;
-    if (encoding == "utf32cell12le") return 4;
+    if (encoding == "utf32cell12le" || encoding == "footcell12le") return 4;
     if (encoding == "utf32cell16le") return 5;
     if (encoding == "utf32cell20le") return 6;
     if (encoding == "utf32cell24le") return 7;
@@ -78,7 +78,8 @@ public:
                 close();
                 return std::nullopt;
             }
-            const ssize_t count = ::write(to_child_.get(), line.data() + offset, line.size() - offset);
+            const auto remaining = std::string_view(line).substr(offset);
+            const ssize_t count = ::write(to_child_.get(), remaining.data(), remaining.size());
             if (count < 0 && errno == EINTR) continue;
             if (count <= 0) {
                 close();
@@ -101,7 +102,9 @@ public:
             output.append(buffer.data(), static_cast<std::size_t>(count));
             if (const auto newline = output.find('\n'); newline != std::string::npos) {
                 auto parsed = nlohmann::json::parse(output.substr(0, newline), nullptr, false);
-                if (!parsed.is_discarded() && parsed.is_object()) return parsed;
+                if (!parsed.is_discarded() && parsed.is_object()) {
+                    return std::optional<nlohmann::json>{std::in_place, std::move(parsed)};
+                }
                 break;
             }
         }
@@ -201,7 +204,7 @@ public:
 
     void stop() {
         {
-            std::lock_guard lock(mutex_);
+            std::lock_guard<std::mutex> lock(mutex_);
             stopping_ = true;
             pending_.reset();
         }
@@ -213,7 +216,7 @@ public:
     bool running() const noexcept { return running_; }
 
     void invalidate(bool context_continues = false) {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         ++revision_;
         pending_.reset();
         candidates_.clear();
@@ -246,7 +249,7 @@ public:
         if (pids.empty()) return;
         if (pids.size() > 16) pids.resize(16);
         const std::string program = callbacks_.program ? callbacks_.program() : std::string{};
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) return;
         pending_ = Job{{}, {}, std::move(pids), hooks_.generation(), revision_, true, false, program, {}, 0};
         condition_.notify_one();
@@ -294,7 +297,7 @@ public:
         const std::string key = Job::make_key(anchors) + '\x1e' + preedit_prefix + '\x1e' +
                                 std::to_string(preferred_pid);
         const auto now = std::chrono::steady_clock::now();
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_ || key == last_anchor_) return;
         if (failures_ >= kMaxConsecutiveFailures && now - last_probe_ < kFailurePause) return;
         last_probe_ = now;
@@ -318,7 +321,7 @@ public:
     // True while a location is being verified or already confirmed, so a
     // rendered-only composition may still be tracked.
     bool tracking() const {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return !candidates_.empty() || hint_pid_ != 0;
     }
 
@@ -419,7 +422,7 @@ private:
             std::string hint_before;
 #endif
             {
-                std::unique_lock lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 condition_.wait(lock, [this] { return stopping_ || pending_.has_value(); });
                 if (stopping_) return;
                 job = std::move(*pending_);
@@ -459,7 +462,7 @@ private:
                 // giving up after one miss or depending on a fixed delay. A
                 // timeout/budget retry also resumes where the last scan
                 // stopped, because the helper keeps its cursor per PID.
-                std::unique_lock lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 if (stopping_ || job.revision != revision_ || job.key() != last_anchor_ ||
                     pending_.has_value()) {
                     break;
@@ -497,7 +500,7 @@ private:
             std::u16string verified_context;
             bool notify_published = false;
             {
-                std::lock_guard lock(mutex_);
+                std::lock_guard<std::mutex> lock(mutex_);
                 if (stopping_ || job.revision != revision_ ||
                     job.generation != hooks_.generation() || !hooks_.active()) continue;
                 // Typing may outrun a cold scan. Keep its candidate evidence
@@ -720,11 +723,10 @@ private:
                     }
                 }
 #endif
-                // A verified location is the text in front of the caret,
-                // which does not change while the composition grows. Publish
-                // it even when typing already moved on; the published callback
-                // re-requests the prediction for the composition on screen.
-                if (verified) {
+                // Superseded scans may contribute candidate evidence above,
+                // but must not publish or notify the current composition.
+                // Matching prefixes do not make an older scan current.
+                if (verified && current_job) {
                     LLAVON_DEBUG_LOG("MEMCTX", "preedit=\"%s\" confirmed pid=%d address=0x%lx observations=%u confidence=%d candidates=%zu",
                                       job.primary().c_str(), verified->pid,
                                      static_cast<unsigned long>(verified->address),

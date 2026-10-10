@@ -53,24 +53,24 @@ public:
         if (worker_.joinable()) worker_.join();
     }
     void release() {
-        { std::lock_guard lock(mutex_); hold_ = false; }
+        { std::lock_guard<std::mutex> lock(mutex_); hold_ = false; }
         condition_.notify_all();
     }
     void release_one() {
-        { std::lock_guard lock(mutex_); released_calls_ = calls.load(); }
+        { std::lock_guard<std::mutex> lock(mutex_); released_calls_ = calls.load(); }
         condition_.notify_all();
     }
     void hold() {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         hold_ = true;
         released_calls_ = calls.load();
     }
     std::vector<std::u16string> contexts() {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return contexts_;
     }
     std::vector<protocol::SessionId> prediction_sessions() {
-        std::lock_guard lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         return prediction_sessions_;
     }
     std::filesystem::path socket;
@@ -100,13 +100,13 @@ private:
                     ++sessions_remaining;
                     ++opens;
                     if (hold_open_) {
-                        std::unique_lock lock(mutex_);
+                        std::unique_lock<std::mutex> lock(mutex_);
                         (void)condition_.wait_for(lock, std::chrono::seconds(3), [&] { return !hold_; });
                     }
                     connection.send_all(protocol::encode(protocol::Message{protocol::OpenSessionResponse{session, epoch}}));
                 } else if (const auto* request = std::get_if<protocol::PredictRequest>(&message)) {
                     {
-                        std::unique_lock lock(mutex_);
+                        std::unique_lock<std::mutex> lock(mutex_);
                         contexts_.push_back(request->context);
                         prediction_sessions_.push_back(request->session_id);
                         ++calls;

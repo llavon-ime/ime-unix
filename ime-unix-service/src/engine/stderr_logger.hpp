@@ -24,6 +24,8 @@ namespace ime::unix_service {
 //     factory is never evaluated at all (the moved-in factory is destroyed).
 class StderrLogger final : public llavon::ime::core::Logger {
 public:
+    using llavon::ime::core::Logger::log;
+
     explicit StderrLogger(std::size_t max_queue = 256);
     ~StderrLogger() override;
 

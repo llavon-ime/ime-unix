@@ -63,17 +63,25 @@ bool read_all(int fd, std::span<std::uint8_t> destination) {
 }
 
 void write_all(int fd, std::span<const std::uint8_t> source) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     const auto* bytes = source.data();
     const auto size = source.size();
     std::size_t offset = 0;
     while (offset < size) {
-        int flags = 0;
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (remaining.count() <= 0) throw std::runtime_error("Unix socket write timed out");
+        pollfd descriptor{fd, POLLOUT, 0};
+        const auto ready = ::poll(&descriptor, 1, static_cast<int>(remaining.count()));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready == 0) throw std::runtime_error("Unix socket write timed out");
+        if (ready < 0) throw std::system_error(errno, std::generic_category(), "poll Unix socket write");
+        int flags = MSG_DONTWAIT;
 #ifdef MSG_NOSIGNAL
         flags |= MSG_NOSIGNAL;
 #endif
         const auto count = ::send(fd, bytes + offset, size - offset, flags);
         if (count < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             throw std::system_error(errno, std::generic_category(), "send on Unix socket");
         }
         if (count == 0) throw std::runtime_error("Unix socket closed while sending");
@@ -111,6 +119,8 @@ void require_private_directory(const std::filesystem::path& path, bool create) {
 bool socket_is_active(const std::filesystem::path& path) {
     const UniqueFd probe(::socket(AF_UNIX, SOCK_STREAM, 0));
     if (!probe.valid()) throw std::system_error(errno, std::generic_category(), "create Unix socket probe");
+    if (::fcntl(probe.get(), F_SETFL, O_NONBLOCK) < 0)
+        throw std::system_error(errno, std::generic_category(), "make socket probe nonblocking");
     sockaddr_un address {};
     address.sun_family = AF_UNIX;
     const auto string_path = path.string();
@@ -122,6 +132,8 @@ bool socket_is_active(const std::filesystem::path& path) {
                                  static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + string_path.size() + 1));
     const int saved_errno = errno;
     if (result == 0) return true;
+    // A full listen backlog is still an active service, not a stale socket.
+    if (saved_errno == EAGAIN || saved_errno == EINPROGRESS) return true;
     if (saved_errno == ECONNREFUSED || saved_errno == ENOENT || saved_errno == ECONNRESET) return false;
     throw std::system_error(saved_errno, std::generic_category(), "probe Unix socket");
 }
@@ -168,83 +180,15 @@ std::uint64_t peer_uid(int fd) {
 
 }  // namespace
 
-class UnixSocketServer::WorkerPool {
-public:
-    explicit WorkerPool(std::size_t count) {
-        count = std::max<std::size_t>(1, count);
-        for (std::size_t i = 0; i < count; ++i)
-            workers_.emplace_back([this](std::stop_token stop) { run(stop); });
-    }
-
-    ~WorkerPool() {
-        shutdown();
-    }
-
-    WorkerPool(const WorkerPool&) = delete;
-    WorkerPool& operator=(const WorkerPool&) = delete;
-
-    bool enqueue(std::function<void()> task) {
-        {
-            std::lock_guard lock(mutex_);
-            if (stopping_) return false;
-            queue_.push(std::move(task));
-        }
-        condition_.notify_one();
-        return true;
-    }
-
-    void shutdown() {
-        {
-            std::lock_guard lock(mutex_);
-            if (stopping_) {
-                // A second call still joins any threads that have not been joined.
-            } else {
-                stopping_ = true;
-            }
-        }
-        condition_.notify_all();
-        for (auto& worker : workers_) {
-            if (worker.joinable()) worker.join();
-        }
-        workers_.clear();
-    }
-
-private:
-    void run(std::stop_token stop) {
-        while (true) {
-            std::function<void()> task;
-            {
-                std::unique_lock lock(mutex_);
-                condition_.wait(lock, stop, [this]() { return stopping_ || !queue_.empty(); });
-                if (queue_.empty()) {
-                    if (stopping_ || stop.stop_requested()) return;
-                    continue;
-                }
-                task = std::move(queue_.front());
-                queue_.pop();
-            }
-            try {
-                task();
-            } catch (...) {
-                // A connection owns the error response.  Worker exceptions must never
-                // terminate the service process.
-            }
-        }
-    }
-
-    std::mutex mutex_;
-    std::condition_variable_any condition_;
-    std::queue<std::function<void()>> queue_;
-    bool stopping_ = false;
-    std::vector<std::jthread> workers_;
-};
-
 class UnixSocketServer::Connection final : public std::enable_shared_from_this<Connection> {
 public:
     Connection(UnixSocketServer& server, int fd, std::uint64_t uid) : server_(server), fd_(fd), uid_(uid) {}
 
     ~Connection() {
         close();
+        // The descriptor is stable while a reader or queued worker owns us.
+        // Shutdown wakes recv; only the last owner closes it, avoiding fd reuse races.
+        if (fd_ >= 0) ::close(fd_);
     }
 
     void run() {
@@ -272,16 +216,12 @@ public:
     }
 
     void close() noexcept {
-        std::lock_guard lock(write_mutex_);
-        if (fd_ < 0) return;
+        if (closed_.exchange(true, std::memory_order_acq_rel)) return;
         ::shutdown(fd_, SHUT_RDWR);
-        ::close(fd_);
-        fd_ = -1;
     }
 
     bool closed() const noexcept {
-        std::lock_guard lock(write_mutex_);
-        return fd_ < 0;
+        return closed_.load(std::memory_order_acquire);
     }
 
     std::uint64_t uid() const noexcept {
@@ -292,7 +232,7 @@ public:
         try {
             const auto bytes = protocol::encode(message);
             std::lock_guard lock(write_mutex_);
-            if (fd_ >= 0) write_all(fd_, bytes);
+            if (!closed()) write_all(fd_, bytes);
         } catch (...) {
             close();
         }
@@ -310,19 +250,20 @@ private:
                 using T = std::decay_t<decltype(value)>;
                 if constexpr (std::is_same_v<T, protocol::OpenSessionRequest>) {
                     if (!server_.workers_->enqueue([self = shared_from_this()]() {
+                            if (self->closed()) return;
                             const auto result = self->server_.sessions_->open_session(self->uid());
                             std::visit([&self](const auto& response) { self->send(protocol::Message{response}); }, result);
                         })) {
-                        send_error(protocol::ErrorCode::ServiceShuttingDown, {}, 0, 0, "service is shutting down");
+                        send_queue_error({}, 0, 0);
                     }
                 } else if constexpr (std::is_same_v<T, protocol::PredictRequest>) {
                     const auto request = value;
                     if (!server_.workers_->enqueue([self = shared_from_this(), request]() {
+                            if (self->closed()) return;
                             const auto result = self->server_.sessions_->predict(self->uid(), request);
                             std::visit([&self](const auto& response) { self->send(protocol::Message{response}); }, result);
                         })) {
-                        send_error(protocol::ErrorCode::ServiceShuttingDown, request.session_id, request.request_id,
-                                   request.buffer_revision, "service is shutting down");
+                        send_queue_error(request.session_id, request.request_id, request.buffer_revision);
                     }
                 } else if constexpr (std::is_same_v<T, protocol::CloseSessionRequest>) {
                     const auto request = value;
@@ -330,36 +271,19 @@ private:
                             const auto result = self->server_.sessions_->close_session(self->uid(), request.session_id);
                             std::visit([&self](const auto& response) { self->send(protocol::Message{response}); }, result);
                         })) {
-                        send_error(protocol::ErrorCode::ServiceShuttingDown, request.session_id, 0, 0,
-                                   "service is shutting down");
+                        send_queue_error(request.session_id, 0, 0);
                     }
                 } else if constexpr (std::is_same_v<T, protocol::StatusRequest>) {
                     const auto result = server_.sessions_->status(uid_, value.session_id);
                     std::visit([this](const auto& response) { send(protocol::Message{response}); }, result);
                 } else if constexpr (std::is_same_v<T, protocol::RecordCommitRequest>) {
-                    const auto request = value;
-                    if (!server_.workers_->enqueue([self = shared_from_this(), request]() {
-                            try {
-                                const bool stored = self->server_.record_commit(request);
-                                self->send(protocol::Message{protocol::RecordCommitResponse{request.event_id, stored}});
-                            } catch (const std::exception& error) {
-                                self->send_error(protocol::ErrorCode::InvalidArgument, {}, 0, 0, error.what());
-                            }
-                        })) {
-                        send_error(protocol::ErrorCode::ServiceShuttingDown, {}, 0, 0, "service is shutting down");
-                    }
+                    // A connection's Record/Discard stream is ordered independently
+                    // of slow model jobs. Parallel workers must not reverse it.
+                    const bool stored = server_.record_commit(value);
+                    send(protocol::Message{protocol::RecordCommitResponse{value.event_id, stored}});
                 } else if constexpr (std::is_same_v<T, protocol::DiscardCommitRequest>) {
-                    const auto event_id = value.event_id;
-                    if (!server_.workers_->enqueue([self = shared_from_this(), event_id]() {
-                            try {
-                                const bool discarded = self->server_.discard_commit(event_id);
-                                self->send(protocol::Message{protocol::DiscardCommitResponse{event_id, discarded}});
-                            } catch (const std::exception& error) {
-                                self->send_error(protocol::ErrorCode::InvalidArgument, {}, 0, 0, error.what());
-                            }
-                        })) {
-                        send_error(protocol::ErrorCode::ServiceShuttingDown, {}, 0, 0, "service is shutting down");
-                    }
+                    const bool discarded = server_.discard_commit(value.event_id);
+                    send(protocol::Message{protocol::DiscardCommitResponse{value.event_id, discarded}});
                 } else if constexpr (std::is_same_v<T, protocol::ShutdownRequest>) {
                     send(protocol::Message{protocol::ShutdownResponse{true}});
                     server_.request_stop();
@@ -374,8 +298,15 @@ private:
         return fd_;
     }
 
+    void send_queue_error(const protocol::SessionId& id, std::uint64_t request_id, std::uint64_t revision) {
+        const bool stopping = server_.stopping_.load(std::memory_order_acquire);
+        send_error(stopping ? protocol::ErrorCode::ServiceShuttingDown : protocol::ErrorCode::ResourceExhausted,
+                   id, request_id, revision, stopping ? "service is shutting down" : "service queue is full");
+    }
+
     UnixSocketServer& server_;
     int fd_ = -1;
+    std::atomic_bool closed_{false};
     std::uint64_t uid_ = 0;
     mutable std::mutex write_mutex_;
 };
@@ -413,10 +344,7 @@ void UnixSocketServer::settle_staged_commits(bool all) {
 UnixSocketServer::~UnixSocketServer() {
     request_stop();
     close_connections();
-    for (auto& thread : connection_threads_) {
-        if (thread.joinable()) thread.join();
-    }
-    connection_threads_.clear();
+    connections_.clear();
     if (workers_) workers_->shutdown();
     if (listen_fd_ >= 0) {
         ::close(listen_fd_);
@@ -448,7 +376,8 @@ std::filesystem::path UnixSocketServer::default_pid_path() {
 int UnixSocketServer::run() {
     runtime_->validate_configuration();
     sessions_ = std::make_unique<SessionManager>(runtime_, options_.limits);
-    workers_ = std::make_unique<WorkerPool>(std::max<std::size_t>(2, options_.limits.max_concurrent_predictions + 1));
+    workers_ = std::make_unique<WorkerPool>(std::max<std::size_t>(2, options_.limits.max_concurrent_predictions + 1),
+                                          options_.max_queued_requests);
 
     prepare_socket_path(socket_path_);
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -501,6 +430,7 @@ int UnixSocketServer::run() {
             throw std::system_error(errno, std::generic_category(), "poll Unix listening socket");
         }
         if (poll_result > 0 && (descriptor.revents & POLLIN) != 0) accept_connections();
+        reap_connections();
         sessions_->reap();
         // A commit is only written once its correction window elapsed.
         settle_staged_commits(false);
@@ -514,10 +444,7 @@ int UnixSocketServer::run() {
     close_connections();
     {
         std::lock_guard lock(connections_mutex_);
-        for (auto& thread : connection_threads_) {
-            if (thread.joinable()) thread.join();
-        }
-        connection_threads_.clear();
+        connections_.clear();
     }
     if (workers_) workers_->shutdown();
     // Nothing can arrive now, so settle whatever is still staged before the
@@ -542,6 +469,7 @@ void UnixSocketServer::accept_connections() {
         throw std::system_error(errno, std::generic_category(), "accept Unix socket");
     }
     const int connection_fd = accepted.get();
+    if (::fcntl(connection_fd, F_SETFD, FD_CLOEXEC) != 0) return;
 #ifdef SO_NOSIGPIPE
     // macOS has no MSG_NOSIGNAL; ask the socket itself not to raise SIGPIPE.
     const int enabled = 1;
@@ -549,16 +477,29 @@ void UnixSocketServer::accept_connections() {
 #endif
     const auto uid = peer_uid(connection_fd);
     if (uid != static_cast<std::uint64_t>(::getuid())) return;
+    reap_connections();
+    std::lock_guard lock(connections_mutex_);
+    if (connections_.size() >= options_.max_connections) return;
     auto connection = std::make_shared<Connection>(*this, connection_fd, uid);
     (void)accepted.release();
-    std::lock_guard lock(connections_mutex_);
-    connections_.push_back(connection);
-    connection_threads_.emplace_back([connection]() { connection->run(); });
+    auto finished = std::make_shared<std::atomic_bool>(false);
+    std::jthread thread([connection, finished]() {
+        try { connection->run(); } catch (...) { connection->close(); }
+        finished->store(true, std::memory_order_release);
+    });
+    connections_.push_back(ConnectionTask{std::move(connection), std::move(finished), std::move(thread)});
 }
 
 void UnixSocketServer::close_connections() noexcept {
     std::lock_guard lock(connections_mutex_);
-    for (const auto& connection : connections_) connection->close();
+    for (const auto& task : connections_) task.connection->close();
+}
+
+void UnixSocketServer::reap_connections() {
+    std::lock_guard lock(connections_mutex_);
+    std::erase_if(connections_, [](const ConnectionTask& task) {
+        return task.finished->load(std::memory_order_acquire);
+    });
 }
 
 void UnixSocketServer::cleanup_endpoint() noexcept {

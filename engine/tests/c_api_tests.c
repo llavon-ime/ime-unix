@@ -344,6 +344,10 @@ static int test_config(lv_engine* engine) {
 }
 
 int run_c_api_tests(void) {
+    /* This is a host-free bridge test, not a desktop accessibility probe. */
+    const char* previous_atspi = getenv("LLAVON_IME_ATSPI_LIBRARY");
+    char* saved_atspi = previous_atspi != NULL ? strdup(previous_atspi) : NULL;
+    setenv("LLAVON_IME_ATSPI_LIBRARY", "/nonexistent/llavon-ime-libatspi.so.0", 1);
     char overrides_path[256];
     snprintf(overrides_path, sizeof(overrides_path), "/tmp/llavon-ime-c-api-%d.txt", (int)getpid());
 
@@ -389,6 +393,18 @@ int run_c_api_tests(void) {
     const lv_context_id context = 77;
     lv_engine_attach(engine, context);
     int ok = test_commit_and_render(engine, context);
+    if (ok) {
+        lv_engine_reset(engine, context, LV_RESET_EXPLICIT, 1);
+        for (const char* ch = "su3"; *ch != '\0'; ++ch) type_key(engine, context, (uint32_t)*ch);
+        pump_until_idle(200);
+        const lv_render_info* before = lv_engine_render(engine, context);
+        const size_t length = before->preedit_length;
+        const int commits = g_commit_count;
+        ok = lv_engine_restart_prediction_service(NULL) != 0 && lv_engine_restart_prediction_service(engine) == 0;
+        pump_until_idle(200);
+        const lv_render_info* after = lv_engine_render(engine, context);
+        ok = ok && after->preedit_length == length && g_commit_count == commits;
+    }
     if (ok) ok = test_shift_letter_from_state(engine, context);
     if (ok) ok = test_key_shapes(engine, context);
     if (ok) ok = test_config(engine);
@@ -408,6 +424,8 @@ int run_c_api_tests(void) {
         lv_engine_detach(engine, context);
     }
     lv_engine_destroy(engine);
+    if (saved_atspi != NULL) { setenv("LLAVON_IME_ATSPI_LIBRARY", saved_atspi, 1); free(saved_atspi); }
+    else unsetenv("LLAVON_IME_ATSPI_LIBRARY");
     unlink(overrides_path);
     if (saved_config_home[0] != '\0') {
         setenv("XDG_CONFIG_HOME", saved_config_home, 1);

@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cctype>
 #include <concepts>
+#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -20,8 +21,9 @@ template <std::integral T>
     }
     if (text.empty()) return std::nullopt;
     T value{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (parsed.ec != std::errc{} || (complete && parsed.ptr != text.data() + text.size()))
+    const auto* end = std::to_address(text.end());
+    const auto parsed = std::from_chars(text.data(), end, value);
+    if (parsed.ec != std::errc{} || (complete && parsed.ptr != end))
         return std::nullopt;
     return value;
 }

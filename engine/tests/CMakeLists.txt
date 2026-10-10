@@ -13,6 +13,7 @@ set(LLAVON_IME_ENGINE_TEST_SOURCES
     buffer_tests.cpp
     protocol_tests.cpp
     service_transport_tests.cpp
+    transport_resilience_tests.cpp
     keypad_tests.cpp
     input_state_tests.cpp
     input_key_tests.cpp
@@ -70,8 +71,11 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/smart_cursor_boundary_tests.cpp
     rawkey/lifecycle_tests.cpp
     rawkey/memory_format_tests.cpp
+    rawkey/memory_order_tests.cpp
+    rawkey/native_terminal_commit_control_tests.cpp
     rawkey/phrase_override_tests.cpp
     rawkey/prediction_integration_tests.cpp
+    rawkey/service_resilience_tests.cpp
     rawkey/vulkan_pipeline_cache_tests.cpp
     rawkey/live_mixed_model_tests.cpp
     rawkey/punctuation_tests.cpp

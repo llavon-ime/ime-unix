@@ -4,6 +4,7 @@
 #include "../session/session_manager.hpp"
 #include "server_strategy.hpp"
 #include "training/commit_store.hpp"
+#include "worker_pool.hpp"
 
 #include <filesystem>
 #include <atomic>
@@ -20,6 +21,8 @@ struct UnixServerOptions {
     SessionLimits limits;
     std::optional<std::filesystem::path> socket_path;
     std::optional<std::filesystem::path> pid_path;
+    std::size_t max_connections = 128;
+    std::size_t max_queued_requests = 128;
 };
 
 class UnixSocketServer final : public ServerStrategy {
@@ -37,12 +40,17 @@ public:
     static std::filesystem::path default_pid_path();
 
 private:
-    class WorkerPool;
     class Connection;
+    struct ConnectionTask {
+        std::shared_ptr<Connection> connection;
+        std::shared_ptr<std::atomic_bool> finished;
+        std::jthread thread;
+    };
 
     void request_stop() noexcept;
     void accept_connections();
     void close_connections() noexcept;
+    void reap_connections();
     void cleanup_endpoint() noexcept;
     bool record_commit(const protocol::RecordCommitRequest& request);
     bool discard_commit(const protocol::SessionId& event_id);
@@ -64,8 +72,7 @@ private:
     std::atomic_bool stopping_{false};
 
     std::mutex connections_mutex_;
-    std::vector<std::shared_ptr<Connection>> connections_;
-    std::vector<std::jthread> connection_threads_;
+    std::vector<ConnectionTask> connections_;
 };
 
 }  // namespace ime::unix_service
