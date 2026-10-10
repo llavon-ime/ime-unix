@@ -21,16 +21,20 @@ def receive(client, size):
     return bytes(data)
 
 
+def status_on(client):
+    client.sendall(bytes.fromhex("03000000050000"))
+    length, = struct.unpack("<I", receive(client, 4))
+    assert length < 1024
+    response = receive(client, length)
+    assert response[:2] == b"\x05\x01"
+    return response[2:18]
+
+
 def status(endpoint):
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(3)
         connect(client, endpoint)
-        client.sendall(bytes.fromhex("03000000050000"))
-        length, = struct.unpack("<I", receive(client, 4))
-        assert length < 1024
-        response = receive(client, length)
-        assert response[:2] == b"\x05\x01"
-        return response[2:18]
+        return status_on(client)
 
 
 def connect(client, endpoint):
@@ -90,9 +94,14 @@ def main():
                 try:
                     for _ in range(128):
                         client = socket.socket(socket.AF_UNIX)
+                        held.append(client)
                         client.settimeout(3)
                         connect(client, endpoint)
-                        held.append(client)
+                        # Confirm admission before connecting the next peer:
+                        # a burst can fill the kernel's 32-entry backlog before
+                        # the service reaches its 128-reader limit. macOS then
+                        # returns ECONNREFUSED, not Linux's retryable EAGAIN.
+                        assert status_on(client) == epoch
                     time.sleep(0.2)
                     with socket.socket(socket.AF_UNIX) as extra:
                         extra.settimeout(3)

@@ -65,8 +65,8 @@ bool protocol_test() {
 
 bool core_adapter_test() {
     ime::unix_service::protocol::PredictRequest request;
-    request.padding.emplace_back(false, std::u16string{u"ㄋㄧˇ"}, 0);
-    request.padding.push_back({true, {}, U'好'});
+    request.padding.emplace_back(std::u16string{u"ㄋㄧˇ"});
+    request.padding.emplace_back(U'好');
 
     const auto core_padding = ime::unix_service::detail::to_core_padding(request);
     if (core_padding.size() != 2 || core_padding[0].chosen || core_padding[0].bopomofo != u"ㄋㄧˇ" ||
