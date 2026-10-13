@@ -8,6 +8,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -36,9 +38,9 @@ protocol::Message receive(const UnixSocketConnection& connection) {
 class ScriptService {
 public:
     explicit ScriptService(bool hold = false, int invalid = 0, bool delay_alternatives = false, bool hold_open = false,
-                           bool singleton_words = false, bool structured_words = false)
+                           bool singleton_words = false, bool structured_words = false, bool alias_words = false)
         : hold_(hold || delay_alternatives), invalid_(invalid), delay_alternatives_(delay_alternatives),
-          hold_open_(hold_open), singleton_words_(singleton_words), structured_words_(structured_words) {
+          hold_open_(hold_open), singleton_words_(singleton_words), structured_words_(structured_words), alias_words_(alias_words) {
         static std::size_t serial = 0;
         socket = std::filesystem::temp_directory_path() /
                  ("mixed-live-" + std::to_string(getpid()) + "-" + std::to_string(++serial) + ".sock");
@@ -72,6 +74,10 @@ public:
     std::vector<protocol::SessionId> prediction_sessions() {
         std::lock_guard<std::mutex> lock(mutex_);
         return prediction_sessions_;
+    }
+    std::vector<protocol::PredictRequest> prediction_requests() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return prediction_requests_;
     }
     std::filesystem::path socket;
     std::atomic<std::size_t> calls{0};
@@ -109,6 +115,7 @@ private:
                         std::unique_lock<std::mutex> lock(mutex_);
                         contexts_.push_back(request->context);
                         prediction_sessions_.push_back(request->session_id);
+                        prediction_requests_.push_back(*request);
                         ++calls;
                         (void)condition_.wait_for(lock, std::chrono::seconds(3), [&] {
                             return !hold_ || released_calls_ >= calls.load() ||
@@ -133,6 +140,10 @@ private:
                             if (entry.bopomofo() == u"ㄊㄨㄥˊ") candidates = {U'同'};
                             if (entry.bopomofo() == u"ㄕˋ") candidates = {U'事'};
                             if (entry.bopomofo() == u"ㄌㄧˇ") candidates = {U'裡'};
+                        }
+                        if (alias_words_) {
+                            if (entry.bopomofo() == u"ㄏㄨㄟˇ") candidates = {U'悔', U'會'};
+                            if (entry.bopomofo() == u"ㄧㄠ ") candidates = {U'邀', U'要'};
                         }
                         if (entry.chosen()) candidates = {entry.chosen_char()};
                         if (invalid_ == 2) candidates = {U'龍'};
@@ -169,9 +180,11 @@ private:
     bool hold_open_ = false;
     bool singleton_words_ = false;
     bool structured_words_ = false;
+    bool alias_words_ = false;
     std::size_t released_calls_ = 0;
     std::vector<std::u16string> contexts_;
     std::vector<protocol::SessionId> prediction_sessions_;
+    std::vector<protocol::PredictRequest> prediction_requests_;
 };
 
 HarnessOptions smart_options() {
@@ -400,6 +413,507 @@ RAWKEY_SUITE("production mixed model across keyboard layouts", production_layout
         harness.choose_text(keys);
         harness.expect_commit(keys);
         RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
+RAWKEY_SUITE("production layout model preserves English suffixes and resumes after unknown islands", production_layout_literal_models) {
+    const std::pair<std::string, std::string> layouts[]{
+        {"standard", "su3cl3"}, {"hsu", "nefhwf"}, {"ibm", "7a,-;,"},
+        {"et", "ne3hz3"}, {"ginyieh", "d-avla"}, {"et26", "nejhzj"},
+        {"dachen_cp26", "surclr"},
+    };
+    for (const auto& [layout, keys] : layouts) {
+        for (const bool island : {false, true}) {
+            const std::string raw = keys + (island ? "quux" + keys : "hello");
+            const std::string expected = island ? "擬好quux擬好" : "擬好hello";
+            const auto options = [&](const ScriptService& service) {
+                auto value = smart_options();
+                value.config.keyboard_layout = layout;
+                value.config.smart_model_preview = true;
+                value.socket_path = service.socket.string();
+                return value;
+            };
+            const auto settled = [](Harness& harness) {
+                RAWKEY_ASSERT(harness.pump_until([&] {
+                    return harness.pending_model_idle() && !harness.session()->prediction.pending;
+                }));
+            };
+            {
+                ScriptService service;
+                Harness harness(options(service));
+                harness.set_surrounding("history", 7, 7);
+                harness.type(raw);
+                settled(harness);
+                if (harness.preedit() != expected) {
+                    throw Failure{layout + ": " + raw + " => " + harness.preedit() + " (expected " + expected + ")"};
+                }
+                RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(raw));
+                const auto& decision = harness.session()->mixed_decision;
+                const auto& segments = decision.result.paths.at(decision.preview_path).segments;
+                RAWKEY_ASSERT(std::ranges::count_if(segments, [](const auto& segment) {
+                    return segment.kind == MixedSegmentKind::Bopomofo;
+                }) == (island ? 4 : 2));
+                RAWKEY_ASSERT(std::ranges::any_of(segments, [&](const auto& segment) {
+                    return segment.kind == MixedSegmentKind::Latin && segment.raw == (island ? u"quux" : u"hello");
+                }));
+                const auto requests = service.prediction_requests();
+                const auto has_pair = [&](std::u16string_view context) {
+                    return std::ranges::any_of(requests, [&](const auto& request) {
+                        return request.context == context && request.padding.size() == 2 &&
+                            !request.padding[0].chosen() && request.padding[0].bopomofo() == u"ㄋㄧˇ" &&
+                            !request.padding[1].chosen() && request.padding[1].bopomofo() == u"ㄏㄠˇ";
+                    });
+                };
+                RAWKEY_ASSERT(has_pair(u"history"));
+                if (island) {
+                    // The literal is fixed context between two canonical runs,
+                    // not a guessed reading or a layout-specific model token.
+                    RAWKEY_ASSERT(has_pair(u"history擬好quux"));
+                }
+                harness.key("Down");
+                const auto choices = harness.candidates();
+                RAWKEY_ASSERT(std::ranges::find(choices, raw) != choices.end());
+                harness.choose_text(raw);
+                harness.expect_commit(raw);
+                RAWKEY_ASSERT(service.ok.load());
+            }
+            {
+                ScriptService service(true);
+                Harness harness(options(service));
+                harness.type(raw);
+                wait_request(harness, service);
+                harness.key("Down");
+                harness.key("Down");
+                const auto panel = harness.candidates();
+                const auto shown = harness.preedit();
+                const auto cursor = harness.cursor_index();
+                RAWKEY_ASSERT(cursor != 0);
+                RAWKEY_ASSERT(std::ranges::find(panel, raw) != panel.end());
+                service.release();
+                settled(harness);
+                RAWKEY_ASSERT(harness.candidates() == panel);
+                RAWKEY_ASSERT(harness.preedit() == shown);
+                RAWKEY_ASSERT(harness.cursor_index() == cursor);
+                harness.choose_text(raw);
+                harness.expect_commit(raw);
+                RAWKEY_ASSERT(service.ok.load());
+            }
+        }
+    }
+}
+
+RAWKEY_SUITE("smart typing automatic recovery reaches the model across keyboard layouts", production_recovered_layout_models) {
+    const std::pair<std::string, std::string> cases[]{
+        {"standard", "sucl"}, {"hsu", "nehw"}, {"ibm", "7a-;"},
+        {"et", "nehz"}, {"ginyieh", "d-vl"}, {"et26", "nehz"},
+        {"dachen_cp26", "sucl"}, {"standard", "su3c3"},
+    };
+    for (const auto& [layout, raw] : cases) {
+        for (const bool late : {false, true}) {
+            ScriptService service(late);
+            auto options = smart_options();
+            options.config.keyboard_layout = layout;
+            options.config.smart_typing = true;
+            options.config.smart_model_preview = true;
+            options.socket_path = service.socket.string();
+            Harness harness(options);
+            harness.set_surrounding("history", 7, 7);
+            const auto settled = [&] {
+                RAWKEY_ASSERT(harness.pump_until([&] {
+                    return harness.pending_model_idle() && !harness.session()->prediction.pending;
+                }));
+            };
+            harness.type(raw);
+            if (late) {
+                wait_request(harness, service);
+                harness.key("Down");
+                harness.key("Down");
+                const auto shown = harness.preedit();
+                const auto panel = harness.candidates();
+                const auto cursor = harness.cursor_index();
+                RAWKEY_ASSERT(cursor != 0);
+                service.release();
+                settled();
+                RAWKEY_ASSERT(harness.preedit() == shown);
+                RAWKEY_ASSERT(harness.candidates() == panel);
+                RAWKEY_ASSERT(harness.cursor_index() == cursor);
+                harness.choose_text(raw);
+                harness.expect_commit(raw);
+            } else {
+                settled();
+                if (harness.preedit() != "擬好") {
+                    throw Failure{layout + ": recovered " + raw + " did not reach the model: " + harness.preedit()};
+                }
+                RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(raw));
+                const auto requests = service.prediction_requests();
+                RAWKEY_ASSERT(std::ranges::any_of(requests, [](const auto& request) {
+                    return request.context == u"history" && request.padding.size() == 2 &&
+                        !request.padding[0].chosen() && request.padding[0].bopomofo() == u"ㄋㄧˇ" &&
+                        !request.padding[1].chosen() && request.padding[1].bopomofo() == u"ㄏㄠˇ";
+                }));
+                harness.key("Down");
+                const auto choices = harness.candidates();
+                RAWKEY_ASSERT(std::ranges::find(choices, raw) != choices.end());
+                harness.key("Escape");
+                harness.expect_commit("擬好");
+            }
+            RAWKEY_ASSERT(service.ok.load());
+        }
+    }
+}
+
+RAWKEY_SUITE("smart typing inferred candidates use canonical model readings and retain explicit choices", production_inferred_candidate_models) {
+    const std::string raw = "sc";
+    for (const std::string action : {"refine", "navigate", "navigate-second", "manual", "raw", "escape"}) {
+        ScriptService service;
+        auto options = smart_options();
+        options.config.smart_typing = true;
+        options.config.smart_model_preview = true;
+        options.socket_path = service.socket.string();
+        Harness harness(options);
+        harness.set_surrounding("history", 7, 7);
+        const auto settled = [&] {
+            RAWKEY_ASSERT(harness.pump_until([&] {
+                return harness.pending_model_idle() && !harness.session()->prediction.pending;
+            }));
+        };
+        harness.type(raw);
+        settled();
+        const auto& initial_paths = harness.session()->mixed_decision.result.paths;
+        if (!std::ranges::any_of(initial_paths, [](const auto& path) {
+            return path.inferred_alternative && !path.inferred_model_refined && path.rendered == u"你好";
+        })) throw Failure{raw + ": missing the inferred 你好 model alternative"};
+        std::vector<std::vector<std::u16string>> target_readings;
+        std::vector<std::string> original_targets;
+        for (const auto& path : initial_paths) {
+            if (!path.inferred_alternative || path.inferred_model_refined) continue;
+            std::vector<std::u16string> readings;
+            for (const auto& segment : path.segments) {
+                if (segment.kind == MixedSegmentKind::Bopomofo) readings.push_back(segment.reading);
+            }
+            if (readings.empty()) continue;
+            target_readings.push_back(std::move(readings));
+            original_targets.push_back(u16_to_utf8(path.rendered));
+            if (target_readings.size() == 2) break;
+        }
+        RAWKEY_ASSERT(target_readings.size() == 2);
+        const auto automatic = harness.preedit();
+        const auto calls = service.calls.load();
+        service.hold();
+        harness.key("Down");
+        const auto original_choices = harness.candidates();
+        RAWKEY_ASSERT(std::ranges::find(original_choices, raw) != original_choices.end());
+        RAWKEY_ASSERT(std::ranges::find(original_choices, "你好") != original_choices.end());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (service.calls.load() == calls && std::chrono::steady_clock::now() < deadline) {
+            (void)harness.pump_until([&] { return service.calls.load() > calls; }, std::chrono::milliseconds(10));
+        }
+        RAWKEY_ASSERT(service.calls.load() > calls);
+        const auto requests = service.prediction_requests();
+        const auto& request = requests.back();
+        RAWKEY_ASSERT(request.context == u"history");
+        RAWKEY_ASSERT(request.padding.size() == target_readings.front().size());
+        for (std::size_t i = 0; i < request.padding.size(); ++i) {
+            RAWKEY_ASSERT(!request.padding[i].chosen() && request.padding[i].bopomofo() == target_readings.front()[i]);
+        }
+        if (action == "refine") {
+            service.release();
+            settled();
+            RAWKEY_ASSERT(harness.preedit() == automatic);
+            RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(raw));
+            const auto choices = harness.candidates();
+            RAWKEY_ASSERT(std::ranges::find(choices, raw) != choices.end());
+            RAWKEY_ASSERT(std::ranges::find(choices, "你好") != choices.end());
+            RAWKEY_ASSERT(std::ranges::find(choices, "擬好") != choices.end());
+            for (const auto& original : original_targets) {
+                RAWKEY_ASSERT(std::ranges::find(choices, original) != choices.end());
+            }
+            const auto completed_requests = service.prediction_requests();
+            RAWKEY_ASSERT(completed_requests.size() == calls + 2);
+            for (std::size_t target = 0; target < target_readings.size(); ++target) {
+                const auto& completed_request = completed_requests[calls + target];
+                RAWKEY_ASSERT(completed_request.context == u"history");
+                RAWKEY_ASSERT(completed_request.padding.size() == target_readings[target].size());
+                for (std::size_t i = 0; i < completed_request.padding.size(); ++i) {
+                    RAWKEY_ASSERT(!completed_request.padding[i].chosen() &&
+                        completed_request.padding[i].bopomofo() == target_readings[target][i]);
+                }
+            }
+            const auto& paths = harness.session()->mixed_decision.result.paths;
+            RAWKEY_ASSERT(std::ranges::any_of(paths, [](const auto& path) {
+                return path.inferred_alternative && path.inferred_model_refined && path.rendered == u"擬好";
+            }));
+            RAWKEY_ASSERT(std::ranges::count_if(paths, [](const auto& path) {
+                return path.inferred_model_refined;
+            }) <= 2);
+            // Choosing the refined copy must replay corrected body keys,
+            // rather than the abbreviated or malformed original spelling.
+            harness.choose_text("擬好");
+            harness.expect_commit("擬好");
+        } else {
+            if (action == "navigate-second") {
+                service.release_one();
+                const auto second_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (service.calls.load() < calls + 2 && std::chrono::steady_clock::now() < second_deadline) {
+                    (void)harness.pump_until([&] { return service.calls.load() == calls + 2; }, std::chrono::milliseconds(10));
+                }
+                RAWKEY_ASSERT(service.calls.load() == calls + 2);
+            }
+            if (action == "navigate" || action == "navigate-second") harness.key("Down");
+            else if (action == "manual") harness.choose_text("你好");
+            else if (action == "raw") harness.choose_text(raw);
+            else harness.key("Escape");
+            const auto shown = harness.preedit();
+            const auto panel = harness.candidates();
+            const auto cursor = harness.cursor_index();
+            const auto commits = harness.commits();
+            service.release();
+            settled();
+            RAWKEY_ASSERT(harness.preedit() == shown);
+            RAWKEY_ASSERT(harness.candidates() == panel);
+            RAWKEY_ASSERT(harness.cursor_index() == cursor);
+            RAWKEY_ASSERT(harness.commits() == commits);
+            if (action == "navigate" || action == "navigate-second") {
+                RAWKEY_ASSERT(cursor != 0);
+                harness.choose_text(raw);
+                harness.expect_commit(raw);
+            } else if (action == "manual") harness.expect_commit("你好");
+            else if (action == "raw") harness.expect_commit(raw);
+            else harness.expect_commit(shown);
+        }
+        RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
+RAWKEY_SUITE("smart typing model preserves native unfinished phonetic display", production_native_phonetic_model) {
+    ScriptService service(true);
+    auto options = smart_options();
+    options.config.smart_english = false;
+    options.config.smart_typing = true;
+    options.config.smart_model_preview = true;
+    options.socket_path = service.socket.string();
+    Harness harness(options);
+    harness.type("su3cl3");
+    wait_request(harness, service);
+    harness.type("c");
+    if (!harness.preedit().ends_with("ㄏ")) {
+        throw Failure{"native unfinished phonetic display: " + harness.preedit() + " (expected a ㄏ suffix)"};
+    }
+    service.release();
+    RAWKEY_ASSERT(harness.pump_until([&] {
+        return harness.pending_model_idle() && !harness.session()->prediction.pending;
+    }));
+    RAWKEY_ASSERT(harness.preedit() == "擬好ㄏ");
+    RAWKEY_ASSERT(harness.session()->pending_token.raw == u"su3cl3c");
+    harness.key("BackSpace");
+    RAWKEY_ASSERT(harness.preedit() == "擬好");
+    harness.expect_commit("擬好");
+    RAWKEY_ASSERT(service.ok.load());
+}
+
+RAWKEY_SUITE("smart typing tone aliases cannot break recovered dictionary words", production_recovered_tone_alias_model) {
+    for (const std::string route : {"pending", "space", "settled"}) for (const auto& [raw, expected] : std::array{
+        std::pair{"d9cjo", "開會"}, std::pair{"jiul", "我要"},
+        std::pair{"rupwu0jiuld9cjo", "今天我要開會"},
+    }) {
+        ScriptService service(false, 0, false, false, false, false, true);
+        auto options = smart_options();
+        options.config.smart_typing = true;
+        options.config.smart_model_preview = true;
+        options.socket_path = service.socket.string();
+        Harness harness(options);
+        harness.type(raw);
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }));
+        RAWKEY_ASSERT(service.calls.load() != 0);
+        RAWKEY_ASSERT(harness.preedit() == expected);
+        if (route == "space") {
+            harness.key("space");
+            RAWKEY_ASSERT(harness.pump_until([&] {
+                return harness.pending_model_idle() && !harness.session()->prediction.pending;
+            }));
+            RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(std::string(raw) + " "));
+        } else if (route == "settled") {
+            const auto calls = service.calls.load();
+            harness.key("Home");
+            harness.key("End");
+            RAWKEY_ASSERT(harness.pump_until([&] {
+                return service.calls.load() > calls && harness.pending_model_idle() &&
+                    !harness.session()->prediction.pending;
+            }));
+            RAWKEY_ASSERT(harness.session()->pending_token.empty());
+        }
+        if (harness.preedit() != expected) {
+            throw Failure{"tone alias " + route + ": " + raw + " => " + harness.preedit() + " (expected " + expected + ")"};
+        }
+        const auto& decision = harness.session()->mixed_decision;
+        bool retained_model_character = false;
+        const auto check_candidates = [&](std::u16string_view reading, const std::vector<char32_t>& candidates) {
+            if (reading == u"ㄏㄨㄟˇ" || reading == u"ㄧㄠ ") {
+                const auto model_character = reading == u"ㄏㄨㄟˇ" ? U'悔' : U'邀';
+                RAWKEY_ASSERT(candidates.front() != model_character);
+                RAWKEY_ASSERT(std::ranges::find(candidates, model_character) != candidates.end());
+                retained_model_character = true;
+            }
+        };
+        if (decision.active()) {
+            for (const auto& segment : decision.result.paths[decision.preview_path].segments) {
+                check_candidates(segment.reading, segment.candidates);
+            }
+        } else {
+            for (const auto& segment : harness.session()->buffer.segments()) {
+                check_candidates(segment.reading(), segment.candidates);
+            }
+        }
+        RAWKEY_ASSERT(retained_model_character);
+        harness.expect_commit(expected);
+        RAWKEY_ASSERT(harness.composition_empty());
+        RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
+RAWKEY_SUITE("smart typing tone aliases allow model words across source word boundaries", production_recovered_tone_alias_word_model) {
+    for (const bool settled : {false, true}) {
+        ScriptService service(true, 0, false, false, false, false, true);
+        auto options = smart_options();
+        options.config.smart_typing = true;
+        options.config.smart_model_preview = true;
+        options.socket_path = service.socket.string();
+        Harness harness(options);
+        harness.type("jiulfu/3");
+        RAWKEY_ASSERT(harness.preedit() == "我要請");
+        wait_request(harness, service);
+        const auto requests = service.calls.load();
+        if (settled) {
+            harness.key("Home");
+            harness.key("End");
+            RAWKEY_ASSERT(harness.session()->pending_token.empty());
+            RAWKEY_ASSERT(harness.preedit() == "我要請");
+        }
+        service.release();
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return (!settled || service.calls.load() > requests) &&
+                harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }));
+        RAWKEY_ASSERT(harness.preedit() == "我邀請");
+        harness.expect_commit("我邀請");
+        RAWKEY_ASSERT(harness.composition_empty());
+        RAWKEY_ASSERT(service.ok.load());
+    }
+}
+
+// Opt in with an existing service executable and compatible GGUF. Unlike the
+// scripted suite, this requires the model to improve a dictionary alternative
+// in context, then commits that asynchronously returned candidate through the
+// same corrected-reading path that a frontend uses.
+RAWKEY_SUITE("real model refines smart typing recovery candidates", production_inferred_real_model) {
+    const auto* service = std::getenv("LLAVON_IME_TEST_REAL_TYPING_SERVICE");
+    if (!service || !*service) {
+        std::puts("[skip] real smart typing model: set LLAVON_IME_TEST_REAL_TYPING_SERVICE, _MODEL and _TABLES");
+        return;
+    }
+    const auto* model = std::getenv("LLAVON_IME_TEST_REAL_TYPING_MODEL");
+    const auto* tables = std::getenv("LLAVON_IME_TEST_REAL_TYPING_TABLES");
+    RAWKEY_ASSERT(model && *model && tables && *tables);
+    RAWKEY_ASSERT(std::filesystem::is_regular_file(service));
+    RAWKEY_ASSERT(std::filesystem::is_regular_file(model));
+    RAWKEY_ASSERT(std::filesystem::is_directory(tables));
+    HarnessOptions options;
+    options.config.smart_english = true;
+    options.config.smart_typing = true;
+    options.config.smart_model_preview = true;
+    options.config.gpu_layers = 0;
+    options.config.thread_count = 2;
+    options.config.context_length = 64;
+    options.service_path = service;
+    options.model_path = model;
+    options.tables_dir = tables;
+    options.on_training_commit = [](const auto&, auto) {};
+    Harness harness(options);
+    harness.engine().restart_prediction_service(true);
+    for (const auto& [context, raw, expected, candidate_only] : std::array{
+        std::tuple{"這份文件已經草", "sucl", "擬好", false},
+        std::tuple{"這份文件已經草", "su3c3", "擬好", false},
+        std::tuple{"這份文件已經草", "sc", "擬好", true},
+        // The table permits multiple tone aliases for these characters. A
+        // missing tone must not let a masked model request destroy a complete
+        // dictionary word that the phonetic recovery already found.
+        std::tuple{"明天上午大家要一起", "d9cjo", "開會", false},
+        std::tuple{"明天", "jiul", "我要", false},
+        std::tuple{"", "d9cjo", "開會", false},
+        std::tuple{"", "jiul", "我要", false},
+        std::tuple{"安排一下，", "rupwu0jiuld9cjo", "今天我要開會", false},
+    }) {
+        const auto cursor = utf8_to_u16(context).size();
+        harness.set_surrounding(context, cursor, cursor);
+        const auto before_requests = harness.pending_model_requests();
+        harness.type(raw);
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.pending_model_idle() && !harness.session()->prediction.pending;
+        }, std::chrono::seconds(120)));
+        const auto automatic = harness.preedit();
+        const auto requests = harness.pending_model_requests();
+        if (candidate_only) {
+            harness.key("Down");
+            RAWKEY_ASSERT(harness.pump_until([&] {
+                return harness.pending_model_requests() > requests && harness.pending_model_idle() &&
+                    !harness.session()->prediction.pending;
+            }, std::chrono::seconds(120)));
+            RAWKEY_ASSERT(harness.preedit() == automatic);
+        } else {
+            if (automatic != expected) {
+                std::string message = "real model: recovered " + std::string(raw) + " => " + automatic +
+                    " (expected " + expected + "); readings:";
+                const auto& decision = harness.session()->mixed_decision;
+                if (decision.preview_path < decision.result.paths.size()) {
+                    for (const auto& segment : decision.result.paths[decision.preview_path].segments) {
+                        if (segment.kind == MixedSegmentKind::Bopomofo) message += " <" + u16_to_utf8(segment.reading) + ">";
+                    }
+                }
+                throw Failure{message};
+            }
+            RAWKEY_ASSERT(requests > before_requests);
+        }
+        RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(raw));
+        const auto& paths = harness.session()->mixed_decision.result.paths;
+        if (candidate_only && !std::ranges::any_of(paths, [&](const auto& path) {
+            return path.inferred_model_refined && path.rendered == utf8_to_u16(expected);
+        })) {
+            std::string message = "real model: " + std::string(raw) + " did not produce inferred " + expected + "; candidates:";
+            for (const auto& candidate : harness.candidates()) message += " " + candidate;
+            throw Failure{message};
+        }
+        if (std::string_view(expected) == "今天我要開會") {
+            harness.key("space");
+            RAWKEY_ASSERT(harness.pump_until([&] {
+                return harness.pending_model_idle() && !harness.session()->prediction.pending;
+            }, std::chrono::seconds(120)));
+            RAWKEY_ASSERT(harness.preedit() == expected);
+            RAWKEY_ASSERT(harness.session()->pending_token.raw == utf8_to_u16(std::string(raw) + " "));
+            const auto before_buffer_requests = harness.session()->prediction.next_request_id;
+            harness.key("Home");
+            harness.key("End");
+            RAWKEY_ASSERT(harness.pump_until([&] {
+                return harness.session()->prediction.next_request_id > before_buffer_requests &&
+                    harness.pending_model_idle() && !harness.session()->prediction.pending;
+            }, std::chrono::seconds(120)));
+            if (harness.preedit() != expected) {
+                throw Failure{"real model: settled navigation changed " + std::string(expected) + " => " + harness.preedit()};
+            }
+            RAWKEY_ASSERT(harness.session()->pending_token.empty());
+            std::printf("[real-model] settled navigation => %s (%llu buffer requests)\n", expected,
+                static_cast<unsigned long long>(harness.session()->prediction.next_request_id - before_buffer_requests));
+        }
+        std::printf("[real-model] %s => %s (%llu model requests)\n", raw, expected,
+                    static_cast<unsigned long long>(harness.pending_model_requests() - before_requests));
+        const auto commits = harness.commits().size();
+        if (candidate_only) harness.choose_text(expected);
+        harness.expect_commit(expected);
+        RAWKEY_ASSERT(harness.pump_until([&] {
+            return harness.composition_empty() && harness.commits().size() == commits + 1 &&
+                harness.last_commit() == expected;
+        }, std::chrono::seconds(30)));
     }
 }
 

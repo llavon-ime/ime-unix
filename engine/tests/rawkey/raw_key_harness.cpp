@@ -381,6 +381,8 @@ void Harness::set_config(std::string_view path, std::string_view value) {
     const bool on = value == "True" || value == "true" || value == "1";
     if (path == "SmartEnglish") {
         updated.smart_english = on;
+    } else if (path == "SmartTyping") {
+        updated.smart_typing = on;
     } else if (path == "SmartModelPreview") {
         updated.smart_model_preview = on;
     } else if (path == "BopomofoKeyboardLayout") {

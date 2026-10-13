@@ -172,6 +172,7 @@ RAWKEY_SUITE("smart candidate", engine_test_smart_candidate) {
         RAWKEY_ASSERT(harness.has_candidates());
         harness.type("hi");
         RAWKEY_ASSERT(!harness.has_candidates());
-        RAWKEY_ASSERT(harness.preedit() == "你hi");
+        // The separately typed Space becomes a separator when English follows.
+        RAWKEY_ASSERT(harness.preedit() == "你 hi");
 }
 }

@@ -27,6 +27,8 @@ struct Config {
     // Smart Chinese-English keeps reversible raw keys while the decoder ranks
     // English and 注音 interpretations for the current preview.
     bool smart_english = false;
+    // Opt-in reversible omission/typo decoding with the existing model.
+    bool smart_typing = false;
     // Internal test/probe control, not a persisted user setting. Production
     // smart English automatically refines complete readings without waiting
     // for punctuation; old JSON/INI preview toggles are ignored by the schema.

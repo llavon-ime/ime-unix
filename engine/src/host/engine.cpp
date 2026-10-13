@@ -1,5 +1,4 @@
 #include "host/engine.hpp"
-#include "input/mixed_lexicon.hpp"
 
 #include <algorithm>
 #include <random>
@@ -106,8 +105,7 @@ Engine::Engine(EngineOptions options, Host& host)
       fallback_(options_.table_path),
       decoder_([this](std::u16string_view reading) { return fallback_.lookup(reading); },
                [this](std::u16string_view word) { return fallback_.latin_frequency(word); },
-               [](std::u16string_view word, bool prefix) { return MixedLexicon::instance().english_score(word, prefix); },
-               [](std::u16string_view history, char32_t ch) { return MixedLexicon::instance().chinese_score(history, ch); }),
+               {}, {}),
       phrase_overrides_(options_.phrase_overrides_path),
       processor_(fallback_, decoder_, phrase_overrides_),
       transport_(options_.transport),
@@ -182,7 +180,7 @@ bool Engine::key_event(ContextId context, const InputKey& key) {
          (normalized_key.sym == U' ' && normalized_key.raw_has(InputKeyState::Shift)));
     if (session.deferred_commit && submit) return true;
     session.deferred_commit.reset();
-    if (config_.smart_english) resync_context(context, session);
+    if (config_.smart_english || config_.smart_typing) resync_context(context, session);
     if (submit && !InputProcessor::composition_empty(session) &&
         (session.prediction.pending || !pending_model_idle(context))) {
         session.deferred_commit = key;
@@ -450,7 +448,7 @@ std::uint64_t Engine::pending_model_requests(ContextId context) const {
 void Engine::update_pending_model(ContextId context) {
     auto* session = find(context);
     if (!session) return;
-    if (!config_.smart_english || !config_.smart_model_preview) {
+    if (!(config_.smart_english || config_.smart_typing) || !config_.smart_model_preview) {
         pending_models_.erase(context);
         return;
     }
@@ -459,7 +457,7 @@ void Engine::update_pending_model(ContextId context) {
         const bool boundary_candidate = session->choosing_candidate() && session->candidate_view.cursor == 0 &&
             session->candidate_view.page_size(config_.candidate_page_size, session->displayed_candidates.size()) >=
                 (session->mixed_decision.preview_path == 0 ? 3 : 4) &&
-            std::ranges::any_of(session->mixed_decision.result.paths, [](const auto& path) { return path.boundary_alternative; });
+            std::ranges::any_of(session->mixed_decision.result.paths, [](const auto& path) { return path.boundary_alternative || path.inferred_alternative; });
         if (session->pending_token.empty() || !session->mixed_decision.active() ||
             (!boundary_candidate && (session->mixed_decision.preview_path == 0 || session->choosing_candidate()))) return;
         PendingModelPreview::Client client;

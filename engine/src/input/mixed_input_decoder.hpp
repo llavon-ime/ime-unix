@@ -2,12 +2,14 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "bopomofo/keymap.hpp"
+#include "input/phonetic_recovery.hpp"
 
 namespace llavon::ime {
 
@@ -33,6 +35,11 @@ struct MixedSegment {
     std::vector<char32_t> candidates;
     double score = 0;
     bool consumed_boundary = false;
+    bool inferred = false;
+    bool missing_tone = false;
+    bool abbreviated = false;
+    unsigned recovery_edits = 0;
+    bool phonetic_display = false;
 };
 
 struct MixedPath {
@@ -44,6 +51,8 @@ struct MixedPath {
     bool boundary_alternative = false;
     // An additional model-refined copy beside its unchanged dictionary repair.
     bool boundary_model_refined = false;
+    bool inferred_alternative = false;
+    bool inferred_model_refined = false;
 };
 
 struct MixedDecodeResult {
@@ -51,6 +60,11 @@ struct MixedDecodeResult {
     std::vector<MixedPath> paths;
     // Path zero is the reversible raw alternative, not a ranking override.
     size_t best_path = 0;
+};
+
+struct MixedDecodeOptions {
+    bool smart_typing = false;
+    bool allow_english = true;
 };
 
 // One displayed candidate entry: which path it came from, which character
@@ -81,7 +95,7 @@ public:
                       LatinScoreFn latin_score = {}, ChineseScoreFn chinese_score = {});
 
     MixedDecodeResult decode(std::u16string_view raw, BopomofoKeyboardLayout layout, bool space_tone,
-                             std::u16string_view context = {}) const;
+                             std::u16string_view context = {}, MixedDecodeOptions options = {}) const;
 
     // Best/preferred path first, then raw, an explicit boundary repair when
     // available, and the remaining ranked alternatives.
@@ -99,7 +113,12 @@ private:
     LookupFn lookup_;
     FrequencyFn frequency_;
     LatinScoreFn latin_score_;
+    bool default_latin_score_;
     ChineseScoreFn chinese_score_;
+    bool default_chinese_score_;
+    PhoneticRecovery recovery_;
+    struct WordCache;
+    std::shared_ptr<WordCache> word_cache_;
 };
 
 }  // namespace llavon::ime

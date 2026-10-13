@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "engine/inferred_tone_guard.hpp"
 #include "text/utf.hpp"
 
 namespace llavon::ime {
@@ -45,6 +46,7 @@ bool PendingModelPreview::supported(std::u16string_view reading) const {
 
 std::u16string PendingModelPreview::text(const MixedSegment& segment) {
     if (segment.consumed_boundary) return {};
+    if (segment.kind == MixedSegmentKind::BopomofoIncomplete && segment.phonetic_display) return segment.reading;
     if (segment.kind == MixedSegmentKind::Bopomofo && !segment.candidates.empty()) {
         return utf8_to_u16(char32_to_utf8(segment.candidates.front()));
     }
@@ -59,31 +61,44 @@ void PendingModelPreview::render(MixedPath& path) {
 std::optional<PendingModelPreview::Snapshot> PendingModelPreview::capture() const {
     auto* session = client_.session();
     const auto& config = client_.config();
-    if (!session || !config.smart_english || !config.smart_model_preview || session->pending_token.empty() ||
+    if (!session || (!config.smart_english && !config.smart_typing) || !config.smart_model_preview || session->pending_token.empty() ||
         !session->mixed_decision.active()) {
         return std::nullopt;
     }
     Snapshot result;
     result.preview = session->mixed_decision.preview_path;
     result.candidate_only = session->choosing_candidate();
+    std::vector<std::size_t> targets;
     if (result.candidate_only) {
         // Opening the panel explicitly asks for alternatives. Only enrich the
-        // tagged boundary repair, and stop as soon as the user navigates away
+        // tagged boundary or inferred repair, and stop as soon as the user navigates away
         // from the initial row. Never change a candidate under their cursor.
         if (session->candidate_view.cursor != 0) return std::nullopt;
-        const int required_rows = session->mixed_decision.preview_path == 0 ? 3 : 4;
-        if (session->candidate_view.page_size(config.candidate_page_size, session->displayed_candidates.size()) < required_rows) {
+        const int base_rows = session->mixed_decision.preview_path == 0 ? 1 : 2;
+        const int rows = session->candidate_view.page_size(config.candidate_page_size, session->displayed_candidates.size());
+        if (rows < base_rows + 2) {
             return std::nullopt;  // Do not infer a suggestion the panel cannot show.
         }
         const auto& paths = session->mixed_decision.result.paths;
         const auto repair = std::ranges::find_if(paths, [](const auto& path) {
             return path.boundary_alternative && !path.boundary_model_refined;
         });
-        if (repair == paths.end()) return std::nullopt;
-        result.preview = static_cast<std::size_t>(repair - paths.begin());
-    } else if (result.preview == 0) return std::nullopt;
-    if (result.preview >= session->mixed_decision.result.paths.size()) return std::nullopt;
-    result.path = session->mixed_decision.result.paths[result.preview];
+        if (repair != paths.end()) targets.push_back(static_cast<std::size_t>(repair - paths.begin()));
+        else {
+            const auto limit = static_cast<std::size_t>(std::min(2, (rows - base_rows) / 2));
+            for (std::size_t i = 0; i < paths.size() && targets.size() < limit; ++i) {
+                const auto& path = paths[i];
+                if (path.inferred_alternative && !path.inferred_model_refined &&
+                    std::ranges::any_of(path.segments, [this](const auto& segment) {
+                        return segment.kind == MixedSegmentKind::Bopomofo && supported(segment.reading);
+                    })) targets.push_back(i);
+            }
+        }
+        if (targets.empty()) return std::nullopt;
+    } else {
+        if (result.preview == 0 || result.preview >= session->mixed_decision.result.paths.size()) return std::nullopt;
+        targets.push_back(result.preview);
+    }
     result.raw = session->pending_token.raw;
     result.raw_revision = session->pending_token.revision;
     result.buffer_revision = session->buffer.revision();
@@ -95,25 +110,37 @@ std::optional<PendingModelPreview::Snapshot> PendingModelPreview::capture() cons
     // User-selected characters and exact literals in the buffer are fixed
     // context, never targets of pending-input model selection.
     result.context += session->buffer.rendered_prefix_before_caret();
-    const auto last = std::find_if(result.path.segments.rbegin(), result.path.segments.rend(), [this](const auto& segment) {
-        return segment.kind == MixedSegmentKind::Bopomofo && supported(segment.reading);
-    });
-    if (last == result.path.segments.rend()) return std::nullopt;
-    const auto count = static_cast<std::size_t>(std::distance(result.path.segments.begin(), last.base()));
-    for (std::size_t i = 0; i < count; ++i) {
-        const auto& segment = result.path.segments[i];
-        if (segment.consumed_boundary) continue;
-        const bool reading = segment.kind == MixedSegmentKind::Bopomofo && supported(segment.reading);
-        const auto value = reading ? segment.reading : text(segment);
-        result.query += (reading ? u"r" : u"t") + utf8_to_u16(std::to_string(value.size())) + u":" + value;
+    for (const auto target : targets) {
+        result.preview = target;
+        result.path = session->mixed_decision.result.paths[target];
+        result.query.clear();
+        const auto last = std::find_if(result.path.segments.rbegin(), result.path.segments.rend(), [this](const auto& segment) {
+            return segment.kind == MixedSegmentKind::Bopomofo && supported(segment.reading);
+        });
+        if (last == result.path.segments.rend()) continue;
+        const auto count = static_cast<std::size_t>(std::distance(result.path.segments.begin(), last.base()));
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& segment = result.path.segments[i];
+            if (segment.consumed_boundary) continue;
+            const bool reading = segment.kind == MixedSegmentKind::Bopomofo && supported(segment.reading);
+            const auto value = reading ? segment.reading : text(segment);
+            result.query += (reading ? u"r" : u"t") + utf8_to_u16(std::to_string(value.size())) + u":" + value;
+        }
+        if (result.candidate_only && std::ranges::any_of(candidate_attempts_, [&](const auto& attempted) {
+            return compatible(attempted, result) && attempted.raw_revision == result.raw_revision &&
+                attempted.raw == result.raw && attempted.query == result.query;
+        })) continue;
+        return result;
     }
-    return result;
+    return std::nullopt;
 }
 
 bool PendingModelPreview::compatible(const Snapshot& a, const Snapshot& b) {
     return a.context == b.context && a.buffer_revision == b.buffer_revision && a.caret == b.caret &&
            a.layout == b.layout && a.sensitive == b.sensitive && a.context_length == b.context_length &&
-           a.candidate_only == b.candidate_only;
+           a.candidate_only == b.candidate_only &&
+           a.path.inferred_alternative == b.path.inferred_alternative &&
+           a.path.boundary_alternative == b.path.boundary_alternative;
 }
 
 bool PendingModelPreview::fresh(const Snapshot& snapshot) const {
@@ -123,6 +150,22 @@ bool PendingModelPreview::fresh(const Snapshot& snapshot) const {
 }
 
 void PendingModelPreview::on_input() {
+    if (!candidate_attempts_.empty()) {
+        const auto* session = client_.session();
+        if (!session || session->pending_token.empty() || !session->mixed_decision.active()) candidate_attempts_.clear();
+        else {
+            const auto& config = client_.config();
+            const auto sensitive = client_.sensitive();
+            auto context = sensitive ? std::u16string{} : client_.context();
+            context += session->buffer.rendered_prefix_before_caret();
+            std::erase_if(candidate_attempts_, [&](const auto& attempted) {
+                return attempted.raw_revision != session->pending_token.revision || attempted.raw != session->pending_token.raw ||
+                    attempted.buffer_revision != session->buffer.revision() || attempted.caret != session->buffer.caret() ||
+                    attempted.layout != session->pending_token.layout || attempted.context_length != config.context_length ||
+                    attempted.sensitive != sensitive || attempted.context != context;
+            });
+        }
+    }
     auto current = capture();
     if (!current) {
         wanted_.reset();
@@ -139,6 +182,10 @@ void PendingModelPreview::on_input() {
     if (current->candidate_only && cache && compatible(*cache, *current) &&
         cache->raw == current->raw && cache->query == current->query) {
         apply_candidate(*cache);
+        candidate_attempts_.push_back(*current);
+        wanted_ = capture();
+        if (!active_) start_latest();
+        return;
     } else if (!current->candidate_only && cache && compatible(*cache, *current)) {
         auto& path = client_.session()->mixed_decision.result.paths[current->preview];
         const auto before = path.rendered;
@@ -155,7 +202,7 @@ void PendingModelPreview::on_input() {
         current->path = path;
         if (path.rendered != before) client_.redraw();
     }
-    if (completed && compatible(*completed, *current) && completed->query == current->query) return;
+    if (!current->candidate_only && completed && compatible(*completed, *current) && completed->query == current->query) return;
     wanted_ = std::move(current);
     if (!active_) start_latest();
 }
@@ -261,6 +308,11 @@ void PendingModelPreview::reply(const std::shared_ptr<Job>& job, protocol::Messa
         finish(job, false, true);
         return;
     }
+    std::vector<char32_t> original;
+    for (const auto index : job->run) {
+        const auto& candidates = job->snapshot.path.segments[index].candidates;
+        original.push_back(candidates.empty() ? 0 : candidates.front());
+    }
     for (std::size_t i = 0; i < job->run.size(); ++i) {
         auto& segment = job->snapshot.path.segments[job->run[i]];
         const auto allowed = fallback_.lookup(segment.reading);
@@ -274,8 +326,27 @@ void PendingModelPreview::reply(const std::shared_ptr<Job>& job, protocol::Messa
             if (std::ranges::find(candidates, candidate) == candidates.end()) candidates.push_back(candidate);
         }
         segment.candidates = std::move(candidates);
-        job->prefix += text(segment);
     }
+    if (!job->snapshot.candidate_only) {
+        // Missing tones can select a legal table alias that masks out the
+        // word's usual pronunciation. Do not let that mask break a known
+        // dictionary word by replacing its ambiguous-tone character. Other
+        // contextual homophones, including uncommon words, remain available.
+        std::vector<InferredToneSlot> slots;
+        for (std::size_t i = 0; i < job->run.size(); ++i) {
+            const auto& current = job->snapshot.path.segments[job->run[i]];
+            slots.push_back({current.reading, original[i], current.candidates.front(),
+                current.missing_tone && !current.abbreviated && current.raw == current.body_keys, true});
+        }
+        const auto preserve = protect_inferred_tone_words(slots, fallback_);
+        for (std::size_t i = 0; i < job->run.size(); ++i) {
+            auto& candidates = job->snapshot.path.segments[job->run[i]].candidates;
+            if (!preserve[i]) continue;
+            const auto chosen = std::ranges::find(candidates, original[i]);
+            if (chosen != candidates.end()) std::rotate(candidates.begin(), chosen, chosen + 1);
+        }
+    }
+    for (const auto index : job->run) job->prefix += text(job->snapshot.path.segments[index]);
     advance(job);
 }
 
@@ -283,7 +354,8 @@ void PendingModelPreview::finish(const std::shared_ptr<Job>& job, bool apply, bo
     if (active_ != job) return;
     const std::weak_ptr<bool> alive = alive_;
     const auto slot = job->snapshot.candidate_only ? 1U : 0U;
-    if (apply && fresh(job->snapshot)) {
+    const bool current = fresh(job->snapshot);
+    if (apply && current) {
         if (job->snapshot.candidate_only) apply_candidate(job->snapshot);
         else {
             client_.session()->mixed_decision.result.paths[job->snapshot.preview] = job->snapshot.path;
@@ -296,7 +368,11 @@ void PendingModelPreview::finish(const std::shared_ptr<Job>& job, bool apply, bo
         // failed query for every unfinished key. The next reading may retry.
         completed_[slot] = job->snapshot;
     }
+    if (job->snapshot.candidate_only && current && (apply || failed)) {
+        candidate_attempts_.push_back(job->snapshot);
+    }
     active_.reset();
+    if (job->snapshot.candidate_only && current) wanted_ = capture();
     if (wanted_) {
         const auto& completed = completed_[wanted_->candidate_only ? 1U : 0U];
         if (completed && compatible(*completed, *wanted_) && completed->query == wanted_->query) wanted_.reset();
@@ -313,7 +389,15 @@ void PendingModelPreview::apply_candidate(const Snapshot& snapshot) {
     auto& paths = client_.session()->mixed_decision.result.paths;
     // A model is another suggestion, not permission to remove a correctly
     // ranked dictionary phrase. Preserve that original explicit choice.
-    const auto previous = std::ranges::find_if(paths, [](const auto& path) { return path.boundary_model_refined; });
+    const auto previous = std::ranges::find_if(paths, [&](const auto& path) {
+        if ((!path.boundary_model_refined && !path.inferred_model_refined) ||
+            path.segments.size() != snapshot.path.segments.size()) return false;
+        return std::ranges::equal(path.segments, snapshot.path.segments, [](const auto& a, const auto& b) {
+            return a.kind == b.kind && a.begin == b.begin && a.end == b.end && a.raw == b.raw &&
+                a.body_keys == b.body_keys && a.tone_key == b.tone_key && a.reading == b.reading &&
+                a.consumed_boundary == b.consumed_boundary;
+        });
+    });
     if (std::ranges::any_of(paths, [&](const auto& path) { return path.rendered == snapshot.path.rendered; })) {
         if (previous != paths.end() && previous->rendered != snapshot.path.rendered) {
             paths.erase(previous);
@@ -322,7 +406,8 @@ void PendingModelPreview::apply_candidate(const Snapshot& snapshot) {
         return;
     }
     auto refined = snapshot.path;
-    refined.boundary_model_refined = true;
+    refined.boundary_model_refined = snapshot.path.boundary_alternative;
+    refined.inferred_model_refined = snapshot.path.inferred_alternative;
     if (previous == paths.end()) paths.push_back(std::move(refined));
     else *previous = std::move(refined);
     client_.redraw();

@@ -18,7 +18,7 @@
 
 namespace llavon::ime {
 
-// A single displayed mixed-input path (or one explicit boundary candidate),
+// A single displayed mixed-input path (or one explicit boundary/inferred candidate),
 // predicted asynchronously through the
 // existing service. Engine owns one coordinator per input context. All state
 // transitions run on the host thread; transport callbacks only post work.
@@ -99,6 +99,10 @@ private:
     // Keep explicit candidate work out of the automatic preview's cache.
     std::array<std::optional<Snapshot>, 2> cache_;
     std::array<std::optional<Snapshot>, 2> completed_;
+    // Only the first two visible inferred reading paths are attempted for an
+    // unchanged candidate panel. Masked probabilities are never compared
+    // between paths, and each keeps its original dictionary rendering.
+    std::vector<Snapshot> candidate_attempts_;
 };
 
 }  // namespace llavon::ime

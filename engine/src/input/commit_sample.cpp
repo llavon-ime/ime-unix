@@ -21,6 +21,7 @@ std::optional<InputEffect::CommitSample> training_sample(const CompositionBuffer
     InputEffect::CommitSample sample;
     bool trainable = false;
     for (const auto& segment : buffer.segments()) {
+        if (segment.inferred_reading) return std::nullopt;
         if (!segment.visible_candidate() || segment.selected_candidate() == 0) return std::nullopt;
         if (segment.literal != 0) {
             sample.entries.push_back({std::u16string{}, segment.literal, false, true});
@@ -52,6 +53,7 @@ std::optional<InputEffect::CommitSample> mixed_training_sample(const InputSessio
     bool trainable = false;
     for (const auto& segment : segments) {
         if (segment.consumed_boundary) continue;
+        if (segment.inferred) return std::nullopt;
         if (segment.kind == MixedSegmentKind::Bopomofo) {
             if (segment.reading.empty() || segment.candidates.empty() || segment.candidates.front() == 0) return std::nullopt;
             sample.entries.push_back({segment.reading, segment.candidates.front(), false, false});
@@ -73,6 +75,12 @@ std::optional<InputEffect::CommitSample> mixed_training_sample(const InputSessio
 
 std::optional<InputEffect::CommitSample> commit_training_sample(const InputSession& session,
                                                                std::u16string_view committed) {
+    const auto& preview = session.mixed_decision;
+    if (preview.active() && preview.preview_path < preview.result.paths.size()) {
+        for (const auto& segment : preview.result.paths[preview.preview_path].segments) {
+            if (segment.inferred) return std::nullopt;
+        }
+    }
     if (!session.pending_token.empty() && !session.buffer.caret_at_end()) {
         // Materialize at the real caret, not as an append-only suffix.
         auto buffer = session.buffer;
@@ -83,6 +91,7 @@ std::optional<InputEffect::CommitSample> commit_training_sample(const InputSessi
             for (const auto& segment : decision.result.paths[decision.preview_path].segments) {
                 if (segment.consumed_boundary) continue;
                 if (segment.kind == MixedSegmentKind::Bopomofo) {
+                    if (segment.inferred) return std::nullopt;
                     const auto inserted = buffer.add_bopomofo_keys(segment.body_keys, segment.tone_key,
                         session.pending_token.layout, true, segment.reading);
                     if (!inserted || !inserted->completed || segment.candidates.empty() ||

@@ -65,6 +65,7 @@ bool CompositionBuffer::add_bopomofo(char32_t symbol) {
             segment.manually_chosen = false;
             segment.phrase_override_chosen = false;
             segment.reading_finalized = is_bopomofo_tone(symbol) && segment.syllable.complete();
+            segment.inferred_tone = false;
             segment.alternative_readings.clear();
             last_edited_segment_ = caret_ - 1;
             touch();
@@ -105,6 +106,7 @@ std::optional<BopomofoInputResult> CompositionBuffer::add_bopomofo_key(char32_t 
         segment.manually_chosen = false;
         segment.phrase_override_chosen = false;
         segment.reading_finalized = result.status == BopomofoKeyStatus::Completed;
+        segment.inferred_tone = false;
         segment.alternative_readings.clear();
         if (result.status == BopomofoKeyStatus::Completed) {
             segment.alternative_readings = std::move(result.alternative_readings);
@@ -440,6 +442,13 @@ std::optional<size_t> CompositionBuffer::manually_chosen_segment_at_caret() cons
     if (caret_ > 0 && explicitly_chosen(caret_ - 1)) return caret_ - 1;
     if (caret_ < segments_.size() && explicitly_chosen(caret_)) return caret_;
     return std::nullopt;
+}
+
+bool CompositionBuffer::mark_segment_reading_inferred(size_t index, bool inferred_tone) {
+    if (index >= segments_.size() || segments_[index].literal != 0) return false;
+    segments_[index].inferred_reading = true;
+    segments_[index].inferred_tone = inferred_tone;
+    return true;
 }
 
 bool CompositionBuffer::set_segment_candidates(size_t index, std::vector<char32_t> candidates,

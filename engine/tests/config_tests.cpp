@@ -103,6 +103,8 @@ static bool test_config_schema() {
         return field.key == "smart_model_preview" || field.ini_key == "SmartModelPreview";
     });
     const auto legacy = config_from_json({{"smart_english", true}, {"smart_model_preview", false}});
+    ok = ok && !default_config().smart_typing;
+    ok = ok && config_from_json({{"smart_typing", true}}).smart_typing;
     ok = ok && legacy.smart_english && legacy.smart_model_preview;
     ok = ok && !to_json(legacy).contains("smart_model_preview");
     ok = ok && schema.contains("fields") && schema["fields"].size() == fields.size();

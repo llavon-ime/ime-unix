@@ -96,12 +96,14 @@ target_sources(llavon_ime_engine PRIVATE
     src/buffer/composition_buffer.cpp
     src/engine/fallback_engine.cpp
     src/engine/pending_model_preview.cpp
+    src/engine/inferred_tone_guard.cpp
     src/input/ascii_tokenizer.cpp
     src/input/keypad.cpp
     src/input/input_processor.cpp
     src/input/commit_sample.cpp
     src/input/mixed_input_decoder.cpp
     src/input/mixed_lexicon.cpp
+    src/input/phonetic_recovery.cpp
     src/input/punctuation.cpp
     src/symbol/symbol_menu.cpp
     src/phrase_override/phrase_override_store.cpp

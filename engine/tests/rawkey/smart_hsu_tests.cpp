@@ -587,8 +587,8 @@ RAWKEY_SUITE("smart hsu", engine_test_smart_hsu) {
         harness.type("nef");
         harness.key("space");
         harness.type("adds");
-        RAWKEY_ASSERT(harness.preedit() == "你adds");
-        harness.expect_space_then_commit("你adds ");
+        RAWKEY_ASSERT(harness.preedit() == "你 adds");
+        harness.expect_space_then_commit("你 adds ");
     }
     // A recognized inflection still has reversible Chinese alternatives.
     {

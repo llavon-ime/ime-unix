@@ -28,6 +28,11 @@ struct Segment {
     // Parser completion is distinct from a structurally complete syllable.
     bool reading_finalized = false;
     std::vector<std::u16string> alternative_readings;
+    // A recovered/missing reading is useful for prediction but is not a
+    // user-supplied pronunciation label for learning.
+    bool inferred_reading = false;
+    // The body was entered unchanged and its tone was omitted.
+    bool inferred_tone = false;
 
     bool complete() const noexcept;
     bool empty() const noexcept;
@@ -95,6 +100,7 @@ public:
     std::optional<size_t> segment_selected_index(size_t index) const;
     std::optional<size_t> manually_chosen_segment_at_caret() const noexcept;
     bool set_segment_candidates(size_t index, std::vector<char32_t> candidates, bool preserve_manual_choice = true);
+    bool mark_segment_reading_inferred(size_t index, bool inferred_tone = false);
     // Refreshes fallback/model candidates without dropping a phrase override
     // pin: the pinned character stays selected at the front. Explicit manual
     // choices are preserved like set_segment_candidates(..., true).

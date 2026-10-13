@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "bopomofo/keymap.hpp"
+#include "engine/inferred_tone_guard.hpp"
 #include "input/ascii_tokenizer.hpp"
 #include "input/commit_sample.hpp"
 #include "input/keypad.hpp"
@@ -310,7 +311,7 @@ void InputProcessor::process_impl(const InputKey& key) {
     if (arrow_key && key.has(InputKeyState::Shift) &&
         !(key.has(InputKeyState::Alt) || key.has(InputKeyState::Super) || key.has(InputKeyState::Meta)) &&
         !session_->symbol_menu.active() && !candidate_list_active(*session_) && !composition_empty(*session_)) {
-        if (config_->smart_english && !session_->pending_token.empty()) (void)settle_pending_preview();
+        if ((config_->smart_english || config_->smart_typing) && !session_->pending_token.empty()) (void)settle_pending_preview();
         if (session_->buffer.extend_selection(key.sym == keysym::Left ? -1 : 1)) {
             redraw();
             consume();
@@ -359,7 +360,7 @@ void InputProcessor::process_impl(const InputKey& key) {
     }
 
     if (key.sym == keysym::grave && !key.has_blocking_modifier()) {
-        if (config_->smart_english && !session_->pending_token.empty()) {
+        if ((config_->smart_english || config_->smart_typing) && !session_->pending_token.empty()) {
             (void)settle_pending_preview();
             open_symbol_menu();
         } else if (!session_->buffer.has_unfinished_reading()) {
@@ -423,7 +424,7 @@ void InputProcessor::process_impl(const InputKey& key) {
     // Smart English keeps the raw input in a pending token; the mixed-input
     // decoder ranks parallel interpretations after every input event. Raw
     // keys (including Space) remain editable until an explicit confirmation.
-    if (config_->smart_english) {
+    if ((config_->smart_english || config_->smart_typing)) {
         const bool is_upper = raw_symbol >= U'A' && raw_symbol <= U'Z';
         const bool is_lower = raw_symbol >= U'a' && raw_symbol <= U'z';
         const bool caps_on = key.caps_lock;
@@ -913,12 +914,22 @@ bool InputProcessor::apply_mixed_path(const MixedPath& path, std::size_t char_in
                 next.add_bopomofo_keys(segment.body_keys, segment.tone_key, session_->pending_token.layout, true,
                                       segment.reading);
             if (!result || !result->completed) return false;
+            if (segment.inferred) {
+                (void)next.mark_segment_reading_inferred(result->segment_index,
+                    segment.missing_tone && !segment.abbreviated && segment.raw == segment.body_keys);
+            }
             (void)next.set_segment_candidates(result->segment_index, segment.candidates);
             const size_t candidate_index = i + 1 == path.segments.size() ? char_index : 0;
             if (candidate_index >= segment.candidates.size()) return false;
             if (manual && !next.select_candidate(result->segment_index, candidate_index,
                                        config_->move_cursor_after_selection)) {
                 return false;
+            }
+        } else if (segment.kind == MixedSegmentKind::BopomofoIncomplete && segment.phonetic_display) {
+            for (const char16_t key : segment.raw) {
+                const auto input = next.add_bopomofo_key(key, session_->pending_token.layout,
+                                                        config_->caps_lock_inputs_bopomofo);
+                if (!input || input->completed) return false;
             }
         } else {
             for (const char16_t ch : segment.raw) (void)next.add_literal(static_cast<char32_t>(ch));
@@ -1039,7 +1050,7 @@ void InputProcessor::rerun_pending_decision() {
     auto context = session_->context_text;
     context += session_->buffer.rendered_prefix_before_caret();
     auto result = decoder_.decode(session_->pending_token.raw, session_->pending_token.layout,
-                                  false, context);
+                                  false, context, {config_->smart_typing, config_->smart_english});
     const size_t preview = result.best_path;
     set_mixed_preview(std::move(result), preview);
 }
@@ -1063,7 +1074,7 @@ void InputProcessor::backspace_pending(bool undo_raw_key) {
                 path.rendered.resize(path.rendered.size() - (character > 0xffff ? 2U : 1U));
                 path.segments.pop_back();
                 survivor = std::move(path);
-            } else if (!tail.raw.empty()) {
+            } else if (!tail.raw.empty() && !tail.phonetic_display) {
                 // Literal letters/digits/symbols remain one-character edits;
                 // retain the visible prefix instead of guessing its language
                 // again just because the user deleted a trailing character.
@@ -1158,14 +1169,32 @@ void InputProcessor::apply_fallback_candidates(InputSession& session, std::size_
 }
 
 void InputProcessor::apply_prediction(InputSession& session, const protocol::Prediction& prediction) {
+    std::vector<InferredToneSlot> slots;
+    for (const auto& segment : session.buffer.segments()) {
+        const auto character = segment.selected_candidate();
+        slots.push_back({segment.reading(), character, character,
+                         segment.inferred_tone && !segment.manually_chosen,
+                         segment.literal == 0 && segment.complete() && character != 0});
+    }
+    std::vector<std::vector<char32_t>> merged(session.prediction.segment_indices.size());
     for (std::size_t i = 0; i < session.prediction.segment_indices.size(); ++i) {
         const auto index = session.prediction.segment_indices[i];
-        if (index >= session.buffer.segments().size()) continue;
+        if (index >= session.buffer.segments().size() || i >= prediction.candidates.size()) continue;
         const auto& segment = session.buffer.segments()[index];
+        merged[i] = fallback_.merge_model_candidates(segment, prediction.candidates[i]);
+        if (!merged[i].empty() && !segment.manually_chosen) slots[index].proposed = merged[i].front();
+    }
+    const auto preserve = protect_inferred_tone_words(slots, fallback_);
+    for (std::size_t i = 0; i < session.prediction.segment_indices.size(); ++i) {
+        const auto index = session.prediction.segment_indices[i];
+        if (index >= slots.size() || i >= prediction.candidates.size()) continue;
+        if (preserve[index]) {
+            const auto original = std::ranges::find(merged[i], slots[index].original);
+            if (original != merged[i].end()) std::rotate(merged[i].begin(), original, original + 1);
+        }
         // Keep the table's homophones in the candidate list so the user can
         // always pick another character, even after a model response.
-        (void)session.buffer.refresh_segment_candidates(
-            index, fallback_.merge_model_candidates(segment, prediction.candidates[i]));
+        (void)session.buffer.refresh_segment_candidates(index, std::move(merged[i]));
     }
 }
 

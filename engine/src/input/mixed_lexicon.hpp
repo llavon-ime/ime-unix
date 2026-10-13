@@ -10,10 +10,14 @@ class MixedLexicon {
 public:
     static const MixedLexicon& instance();
     double english_frequency(std::u16string_view word) const;
+    // Whole-word source frequency including the scoring-only rare tier.
+    // This is not strong dictionary membership or completion evidence.
+    double english_scoring_frequency(std::u16string_view word) const;
     // Strongest dictionary completion of an unfinished spelling, on the same
     // normalized frequency scale as a complete word. No text is completed here.
     double english_prefix_frequency(std::u16string_view prefix) const;
-    double english_score(std::u16string_view word, bool allow_prefix) const;
+    double english_score(std::u16string_view word, bool allow_prefix,
+                         bool allow_compound = true) const;
     double chinese_score(std::u16string_view history, char32_t character) const;
     // Existing 2-4 character Chinese words, indexed by prefix. Used to match
     // whole lexical units against reading edges without a homophone product.

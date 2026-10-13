@@ -6,6 +6,7 @@
 #include <cmath>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "text/utf.hpp"
@@ -34,6 +35,7 @@ struct Data {
     };
     std::unordered_map<std::u16string, PhrasePrefix> chinese_phrases;
     std::unordered_map<std::u16string, double> words;
+    std::unordered_map<std::u16string, double> rare_words;
     std::unordered_map<std::u16string, double> prefixes;
     std::array<std::array<double, 27>, 27> pairs{};
     std::array<double, 27> totals{};
@@ -44,10 +46,19 @@ struct Data {
             while (begin < chunk.size()) {
                 const size_t tab = chunk.find('\t', begin);
                 const size_t end = chunk.find('\n', tab);
+                const size_t tag = chunk.find('\t', tab + 1);
                 int frequency = 0;
-                (void)std::from_chars(chunk.data() + tab + 1, chunk.data() + end, frequency);
+                (void)std::from_chars(chunk.data() + tab + 1, chunk.data() + std::min(tag, end), frequency);
                 auto word = utf8_to_u16(chunk.substr(begin, tab - begin));
                 const double zipf = static_cast<double>(frequency) / 100.0;
+                if (tag < end && chunk.substr(tag + 1, end - tag - 1) == "r") {
+                    // Rare words supply a whole-spelling prior only. They must
+                    // not become strong literal boundaries, prefix evidence,
+                    // or training examples for the character spelling model.
+                    rare_words.emplace(std::move(word), zipf);
+                    begin = end + 1;
+                    continue;
+                }
                 words.emplace(word, zipf);
                 if (word.size() >= 2 && word.size() <= 4 && std::ranges::all_of(word, [](char16_t ch) {
                     return ch >= u'\u3400' && ch <= u'\u9fff';
@@ -124,11 +135,47 @@ std::span<const char32_t> MixedLexicon::common_chinese_pair_extensions(char32_t 
     return it == data().chinese_phrases.end() ? std::span<const char32_t>{} : it->second.common_pair_next;
 }
 
-double MixedLexicon::english_score(std::u16string_view input, bool allow_prefix) const {
+double MixedLexicon::english_scoring_frequency(std::u16string_view input) const {
+    const auto word = lowercase(input);
+    const auto& model = data();
+    const auto primary = model.words.find(word);
+    if (primary != model.words.end()) return primary->second / 8.0;
+    const auto rare = model.rare_words.find(word);
+    return rare == model.rare_words.end() ? 0.0 : rare->second / 8.0;
+}
+
+double MixedLexicon::english_score(std::u16string_view input, bool allow_prefix,
+                                   bool allow_compound) const {
     const auto word = lowercase(input);
     const auto& model = data();
     const auto known = model.words.find(word);
     double score = known == model.words.end() ? -1000.0 : std::min(-0.1, known->second * 0.75 - 5.0);
+    if (known == model.words.end()) {
+        const auto rare = model.rare_words.find(word);
+        // Very short rare spellings overlap completed compact-layout readings
+        // too often to supply independent English evidence.
+        if (rare != model.rare_words.end() && word.size() >= 4) score = rare->second * 0.75 - 5.0;
+        else if (allow_compound && word.size() >= 4 && word.size() <= 24 &&
+                 std::ranges::all_of(word, [](char16_t ch) { return ch >= u'a' && ch <= u'z'; })) {
+            // Unlisted compounds can combine a moderately established word
+            // or abbreviation with a common word. Weak phonetic-looking names
+            // are insufficient evidence: they must not turn Chinese followed
+            // by English into one invented English word.
+            for (size_t split = 2; split + 2 <= word.size(); ++split) {
+                const auto suffix = model.words.find(word.substr(split));
+                if (suffix == model.words.end() || suffix->second < 4.0) continue;
+                const auto prefix = word.substr(0, split);
+                const auto primary = model.words.find(prefix);
+                const auto secondary = model.rare_words.find(prefix);
+                const double frequency = primary != model.words.end() ? primary->second :
+                    secondary != model.rare_words.end() ? secondary->second : 0.0;
+                if (frequency < 2.5) continue;
+                if (primary == model.words.end() && std::u16string_view(u"aeiouy").find(prefix.back()) ==
+                    std::u16string_view::npos) continue;
+                score = std::max(score, std::min(frequency, suffix->second) * 0.75 - 8.0);
+            }
+        }
+    }
     if (allow_prefix) {
         const auto prefix = model.prefixes.find(word);
         if (prefix != model.prefixes.end()) score = std::max(score, prefix->second * 0.75 - 8.0);

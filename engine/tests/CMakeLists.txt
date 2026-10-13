@@ -91,6 +91,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/smart_regression_tests.cpp
     rawkey/smart_space_tests.cpp
     rawkey/smart_standard_tests.cpp
+    rawkey/smart_typing_tests.cpp
     rawkey/smart_usability_tests.cpp
     rawkey/mixed_benchmark_tests.cpp
     rawkey/structured_boundary_tests.cpp
