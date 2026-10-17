@@ -4,6 +4,8 @@
 [submodule "ime-core"]
 	path = ime-core
 	url = https://github.com/llavon-ime/ime-core.git
+	branch = main
 [submodule "lora-trainer"]
 	path = lora-trainer
 	url = https://github.com/llavon-ime/lora-trainer.git
+	branch = main

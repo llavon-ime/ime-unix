@@ -1,352 +1,255 @@
 # 拉風輸入法（Linux / macOS）
 
-拉風輸入法（Llavon IME）是一套專為繁體中文注音輸入打造的輸入法。它使用約 2.5 億參數的語言模型，根據前文與注音內容預測更合適的文字，同時確保候選字符合輸入的讀音。
+會看前後文選字的繁體中文注音輸入法。所有推論都在本機完成，不會上傳你打的字。
 
-所有輸入內容與模型推論都在電腦本機完成，不需要連線至雲端，也不會為了選字而上傳正在輸入的文字。
-
-本儲存庫提供 Linux 的 Fcitx5 前端、macOS 原生輸入法，以及兩個平台共用的本機預測服務。
+本儲存庫包含 Linux 的 Fcitx5 前端、macOS 原生輸入法，以及兩個平台共用的本機預測服務。Windows 版在 [ime-windows](https://github.com/llavon-ime/ime-windows)。
 
 > [!IMPORTANT]
-> 本專案仍在早期開發階段，功能、操作方式及安裝流程都可能變動。目前 Linux 發行套件僅提供 x86_64，macOS 安裝檔僅提供 Apple Silicon（arm64）。
+> 專案仍在早期開發階段，功能、操作方式與安裝流程都可能變動。
 
-## 專案特點
+## 支援平台
 
-- **理解上下文的選字**：依據前後文、注音序列與已選文字預測候選字，不只依靠固定詞頻。
-- **專為注音輸入訓練**：採用專用繁體中文注音模型，而非將一般聊天模型直接接到傳統輸入法。
-- **完全本機運作**：模型與推論引擎皆在本機執行，輸入內容無須傳送至雲端。
-- **熟悉的操作方式**：支援標準、許氏、IBM、倚天、精業、倚天26鍵與大千26鍵，保留傳統注音輸入法熟悉的組字與選字方式。
-- **可自訂常用詞彙**：可指定文字及其注音，改善姓名、專有名詞或其他固定詞彙的輸入結果。
-- **本機個人化訓練**：可選擇收集自己的輸入紀錄，透過 LoRA 在本機訓練個人化模型；資料收集預設關閉。
-- **平台原生整合**：Linux 使用 Fcitx5，macOS 使用原生 InputMethodKit，兩者共用相同的輸入法引擎與預測服務。
-- **硬體加速**：Linux 發行套件提供 Vulkan backend，macOS 使用 Metal backend，並支援 CPU 推論。
+| 平台 | 架構 | 安裝方式 |
+| --- | --- | --- |
+| Debian 13 | x86_64 | `.deb`（需要 Fcitx5 ≥ 5.1.12、glibc ≥ 2.41） |
+| Fedora 43 | x86_64 | `.rpm` |
+| Arch Linux | x86_64 | AUR `llavon-ime-fcitx5-git` |
+| macOS 13 以上 | Apple Silicon | `.pkg` |
+
+其他發行版可以自行[從原始碼建置](#從原始碼建置)，但沒有經過測試。
 
 ## 安裝
 
-### Linux
+### Debian / Ubuntu
 
-可從 [GitHub Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載對應發行套件。
-
-#### Debian / Ubuntu
+從 [Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `.deb`：
 
 ```bash
 sudo apt install ./llavon-ime-fcitx5_<版本>_amd64.deb
 ```
 
-目前的 deb 套件以 Debian 13 建置，需要 Fcitx5 5.1.12 與 glibc 2.41 以上，例如 Debian 13、Ubuntu 26.04。
+套件以 Debian 13 建置。其他以 Debian 為基礎的發行版，只要 Fcitx5 與 glibc 版本符合上表也能安裝，但沒有經過測試。
 
-#### Fedora
+### Fedora
 
 ```bash
 sudo dnf install ./llavon-ime-fcitx5-<版本>-1.<fedora>.x86_64.rpm
 ```
 
-安裝完成後，拉風輸入法會自動加入 Fcitx5。若尚未出現，可開啟 Fcitx5 設定工具手動加入 `llavon-ime`，再執行：
+### 加入簽章套件來源（選用，建議）
+
+加入官方 APT / DNF 來源後，就能用系統套件管理員，或拉風設定裡的「軟體更新」頁更新。步驟（含公鑰指紋）見 [linux-packages](https://llavon-ime.github.io/linux-packages/)。
+
+### Arch Linux
+
+使用 AUR 套件 [`llavon-ime-fcitx5-git`](https://github.com/llavon-ime/aur-llavon-ime-fcitx5-git)。這個套件會從原始碼建置，不含 LoRA 訓練器；需要時可從拉風設定安裝。
+
+### 啟用（Linux）
+
+開啟 Fcitx5 設定工具，把「拉風輸入法」加入輸入法清單，然後重新載入 Fcitx5：
 
 ```bash
 fcitx5 -r
 ```
 
-目前 Linux 發行套件僅支援 x86_64。
-
-新版原生設定視窗提供「軟體更新」頁，透過 PackageKit 檢查與安裝系統套件更新，並在組字完成後套用新版。使用前需部署並加入對應發行版的簽章更新來源；目前已加入 repository 產生與驗證工具，線上來源尚待配置。
-
 ### macOS
 
-建議使用 Homebrew 安裝：
+從 [Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`，直接執行安裝。安裝時需要管理員密碼，安裝內容包括輸入法本體、注音表、模型與本機預測服務。
 
-```bash
-brew tap llavon-ime/llavon-ime
-brew trust --cask llavon-ime/llavon-ime/llavon-ime
-brew install --cask llavon-ime
-```
+安裝後前往「系統設定 → 鍵盤 → 文字輸入 → 編輯」，加入「拉風輸入法」。macOS 26（Tahoe）一定要手動加入；較舊的版本通常由安裝程式自動完成。
 
-安裝過程會要求管理員密碼，並安裝「拉風輸入法」、注音表、模型與本機 AI 預測服務。
+若安裝包被 Gatekeeper 阻擋，到「系統設定 → 隱私權與安全性」按「仍要打開」。
 
-安裝完成後，前往「系統設定 → 鍵盤 → 輸入方式」加入「拉風輸入法」。macOS 15 及更早版本通常可由安裝程式自動加入；macOS 26（Tahoe）因第三方輸入來源的啟用狀態由受保護的系統儲存管理，首次安裝時需要手動按「+」加入，或在安裝後登出再登入一次。
-
-也可以從 [GitHub Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`。目前僅提供 Apple Silicon（arm64）安裝檔。含內建更新器的新正式版發行要求 Developer ID 簽章與公證；舊版未簽章安裝包若被 Gatekeeper 阻擋，可在 Finder 中右鍵選擇「打開」。
-
-含內建更新器的正式版可從輸入來源選單選擇「檢查更新…」或「軟體更新設定…」，由 App 自動檢查與背景下載新版，不需執行 Homebrew 更新。安裝仍需要管理員授權，並會等待組字與個人化訓練工作完成；不含更新器的舊版需手動升級一次。
-
-解除安裝：
-
-```bash
-brew uninstall --cask llavon-ime
-```
-
-或使用套件附帶的解除安裝腳本：
-
-```bash
-sudo "/Library/Application Support/llavon-ime/uninstall.sh"
-```
+> [!NOTE]
+> **Homebrew Cask 已停止更新。** 用 Homebrew 裝過的使用者：先備份設定與訓練資料，再直接用新的 `.pkg` 覆蓋安裝，不需要先解除安裝。之後改由輸入法內建的更新功能管理，請不要再對這個 Cask 執行 `upgrade`、`uninstall` 或 `--zap`，以免刪掉輸入法與資料。
 
 ## 使用方式
 
-切換至拉風輸入法後，即可使用標準注音鍵盤輸入。輸入法會在需要時自動啟動 `llavon-ime-unix-service`，模型載入完成後即可開始使用 AI 選字。
+切換到拉風輸入法後，就能用注音輸入。第一次輸入時，輸入法會自動啟動本機預測服務並載入模型，需要稍等一下。服務還沒準備好時，會先用注音表提供候選字。
 
-### 注音鍵盤與智慧型中英文
+設定入口：
 
-可在設定中選擇「標準」、「許氏」、「IBM」、「倚天」、「精業」、「倚天26鍵」或「大千26鍵」，並另外開啟「智慧型中英文」（預設關閉）。七種配置都使用同一個混輸 decoder 與模型預覽；Linux 與 macOS 共用按鍵行為及設定清單。
+- **Linux**：輸入法選單或 Fcitx5 齒輪 →「拉風設定與個人化…」
+- **macOS**：輸入來源選單 →「設定…」
 
-開啟智慧型中英文後，中文音節、英文單字／前綴與字面內容會共同排名，每次按鍵更新最佳預覽。判斷使用獨立的英文詞頻、未知英文的拼寫模型與中文詞組前文；不把 `ime-core` 的 token 編號當詞頻，也不以單字命中或字母長度直接決定語言。
+鍵盤配置、候選字、強制替代詞彙、個人化訓練與軟體更新都在同一個設定程式裡。
 
-**空白保留在組字中，不會自動提交整句；Enter 才提交目前預覽。** 空白可能完成一聲、接受已完成的中文音節，或成為英文詞界。Backspace 撤銷最近一個原始按鍵（包含空白），因此可以從暫時的中文預覽改回英文。候選清單不會自動跳出；按 `Down` 時先顯示最佳預覽，其次是可取回的原文，再列出其他中英切分與同音字。明確選過的內容會固定，後續輸入不會重新解讀它。
+### 鍵盤配置
 
-許氏鍵盤以 `d / f / j / s` 作為二聲／三聲／四聲／輕聲，空白作為一聲；這些字母在音節開頭也可能是聲母，由音節狀態決定。開啟智慧型中英文時，例如：
+支援標準、許氏、IBM、倚天、精業、倚天 26 鍵與大千 26 鍵，可在設定中切換。
+
+### 智慧型中英文（預設關閉）
+
+開啟後，可以直接混打中英文，不必切換模式。每按一個鍵，輸入法都會重新判斷這串按鍵該當作中文注音、英文單字還是原字，並即時更新預覽。
+
+- 空白鍵不會送出整句，只會完成一聲、確認音節或當作英文字詞間的空白。
+- **按 Enter 才會送出目前的預覽。**
+- Backspace 一次撤銷一個原始按鍵，所以可以從中文預覽退回英文。
+- 按 `Down` 開啟候選：依序是最佳預覽、原始按鍵，再來是其他中英切分與同音字。
+- 明確選過的內容會固定，之後的輸入不會再改它。
+
+<details>
+<summary>許氏鍵盤範例</summary>
+
+許氏鍵盤用 `d / f / j / s` 當二聲、三聲、四聲、輕聲，空白當一聲。這些字母在音節開頭也可能是聲母，由音節狀態決定。
 
 | 按鍵 | 行為 |
 | --- | --- |
-| `ne` → `nef` | 先顯示 `ne`，三聲後預覽「你」 |
-| `nefhwfxhf` | 連續組成「你好我」，Enter 提交 |
+| `ne` → `nef` | 先顯示 `ne`，打了三聲後預覽「你」 |
+| `nefhwfxhf` | 連續組成「你好我」，按 Enter 送出 |
 | `gen` + 空白 | 一聲後預覽「今」 |
-| `if`、`hd` | 優先保留英文；按 `Down` 可選「矮」、「哦」等中文解讀 |
-| `adds`、`added`、`end-to-end` + 空白 | 保留英文與尾端空白在組字中，Enter 提交 |
+| `if`、`hd` | 優先保留英文；按 `Down` 可選「矮」、「哦」等中文 |
+| `adds`、`end-to-end` + 空白 | 保留英文與尾端空白，按 Enter 送出 |
 
-許氏的數字鍵不是聲調鍵。關閉智慧型中英文時，字母直接按許氏注音組字，不經英文判斷。
+標準鍵盤打 `283` 可以直接預覽「打」，`hello283` 預覽 `hello打`。同一串按鍵有時同時是合法英文與合法注音，最佳結果不一定是你要的，可以按 `Down` 改選。詞頻資料來源見 [`engine/data/README.md`](engine/data/README.md)。
 
-標準鍵盤的 `283` 可直接預覽「打」，`hello283` 可預覽 `hello打`；原始數字仍能從候選取回。同一串按鍵有時確實同時是英文與合法注音，最佳結果不一定就是使用者意圖，可用 `Down` 改選。資料來源及再產生方式見 [`engine/data/README.md`](engine/data/README.md)。
+</details>
 
-### 預測上下文
+### 強制替代詞彙
 
-為了根據前文改善選字，輸入法會在本機取得游標附近的文字：
+模型老是選錯某個人名或專有名詞時，可以把它固定下來：
 
-- **Linux**：透過 AT-SPI 取得游標前文字。
-- **macOS**：透過輸入法的 InputMethodKit client 取得游標附近文字，不需要「輔助使用」權限。
+1. 組字完成後，用 `Shift` + 左右方向鍵（或 `Ctrl + Shift` + 方向鍵）選取範圍。範圍要 2 到 8 個字，且每個字都要有注音。
+2. 按 `Enter` 加入。
 
-取得的文字只提供本機模型推論使用，不會因選字而上傳至雲端。
+之後組字時只要出現相同的注音序列，就會優先用你指定的字；你手動改選時，仍以手動選擇為準。也可以在設定程式的「替代詞彙」頁編輯。
 
-## 強制替代詞彙
-
-如果模型經常把特定姓名或專有名詞選錯，可以直接建立「強制替代詞彙」。
-
-組字完成後，用 `Shift` + 左右方向鍵選取要儲存的範圍（也可使用 `Ctrl + Shift` + 方向鍵），再按 `Enter` 加入。選取範圍需為 2 至 8 個字，且每個字都必須有對應注音。
-
-加入後，之後只要組字中出現相同的注音序列，就會優先使用指定文字。替代只作用於相符的範圍，不需要整段輸入完全相同；手動改選其他候選字時，該次輸入仍以使用者的選擇為準。
-
-詞彙以 UTF-8 純文字儲存在：
-
-```text
-~/.config/llavon-ime/phrase_overrides.txt
-```
-
-若有設定 `XDG_CONFIG_HOME`，則位於 `$XDG_CONFIG_HOME/llavon-ime/phrase_overrides.txt`。
-
-每行格式與 McBopomofo 的使用者詞彙檔相容，例如：
+詞彙存在 `~/.config/llavon-ime/phrase_overrides.txt`（有設定 `XDG_CONFIG_HOME` 時改在該目錄下），是 UTF-8 純文字，格式與 McBopomofo 的使用者詞彙檔相容：
 
 ```text
 歐陽芷珩 ㄡ-ㄧㄤˊ-ㄓˇ-ㄏㄥˊ
 ```
 
-Linux 也可從 Fcitx5 的 Llavon IME 設定中選擇「管理強制替代詞彙」進行增刪。
+## 軟體更新
 
-## 本機個人化
+- **Linux**：設定程式的「軟體更新」頁透過 PackageKit 檢查並安裝 `llavon-ime-fcitx5`。需要先[加入簽章套件來源](#加入簽章套件來源選用建議)。安裝完成後，會等組字結束再重新載入。AUR 與原始碼安裝請用原本的更新方式。
+- **macOS**：從輸入來源選單選「檢查更新…」。更新由內建的 Sparkle 下載並驗證簽章，等組字與個人化訓練結束後才提示安裝；安裝時需要管理員授權。只有安裝在 `/Library/Input Methods` 的正式版支援自動更新。
 
-拉風輸入法可以使用自己的輸入紀錄訓練 LoRA 個人化模型。**資料收集預設關閉**：從輸入法選單選擇「管理個人化訓練…」（或在設定頁面按「使用我的輸入改進模型」）開啟管理介面，設定密碼並啟用收集後，完成且非敏感的注音輸入才會加密寫入目前使用者的本機資料庫。介面可用來：
+## 本機個人化（預設關閉）
 
-- 設定收集密碼，並啟用或停用加密收集。
-- 檢視、排除或刪除待訓練紀錄。
-- 下載訓練需要的基礎 checkpoint。
-- 安裝或更新本機 `lora-trainer`。
-- 啟動、取消與查看訓練工作。
-- 選擇完成訓練後產生的 GGUF 模型作為推論模型。
+你可以用自己的輸入紀錄，在本機訓練 LoRA 個人化模型。
 
-訓練資料與管理介面都只存在本機。套件內附的 Q4 GGUF 模型只供推論使用；LoRA 訓練需要另外下載未量化的基礎 checkpoint。
+要開始收集，必須在設定程式的個人化頁面**設定密碼並啟用收集**。在這之前不會記錄任何內容。啟用後，只有完成且非敏感的注音輸入會加密存進本機資料庫；送出後若立刻按 Backspace 修正（10 秒內、中間沒按其他鍵），那筆紀錄會被撤回。
 
-更完整的命令列操作、資料庫位置與模型相容性說明請參考 [`ime-unix-service/README.md`](ime-unix-service/README.md#optional-local-lora-training)。
+在個人化頁面可以：
 
-## 模型與隱私
+- 檢視、排除或刪除待訓練紀錄
+- 下載訓練用的基礎 checkpoint（未量化，與內附的 Q4 推論模型不同）
+- 安裝或更新本機 LoRA 訓練器
+- 啟動、取消訓練，查看訓練歷程，並切換要用哪一次訓練的結果
 
-本專案預設使用 [`llavon-ime-llama-250m-Q4_K_M.gguf`](https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF/blob/main/llavon-ime-llama-250m-Q4_K_M.gguf)。模型以 GGUF 量化格式透過 llama.cpp 在本機執行；其他版本與相關資訊可在 [`llavon-ime-llama-250m-GGUF`](https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF) 模型頁查看。
+訓練資料、模型與管理介面都只存在本機。命令列操作與資料位置見 [`ime-unix-service/README.md`](ime-unix-service/README.md#選用的本機-lora-訓練)。
 
-模型權重另依 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/deed.zh-hant) 授權，僅限非商業用途，使用或散布時須註明來源；此授權與本專案程式碼的 BSD 2-Clause License 分開適用。
+## 隱私與前文
 
-開發版本可透過共用原生管理器的「輸入法設定」頁或 `LLAVON_IME_MODEL_PATH` 指定模型。舊版 `IME_FCITX5_*` 環境變數名稱仍保留相容性，例如 `IME_FCITX5_MODEL_PATH`。
+為了根據前文選字，輸入法會在本機讀取游標前的文字，只拿來做本機推論，不會上傳。
 
-## 專案組成
+- **Linux**：依序嘗試應用程式提供的 surrounding text、AT-SPI。密碼欄位會被排除。
+- **macOS**：透過 InputMethodKit 讀取游標附近文字，不需要「輔助使用」權限。安全輸入模式（例如密碼欄）啟用時不讀取。
 
-- `fcitx5/`：Linux Fcitx5 輸入法前端與平台整合。
-- `macos/`：macOS 原生 InputMethodKit 輸入法。
-- `ime-unix-service/`：Linux / macOS 共用的本機預測服務、個人化資料管理與 LoRA 管理工具。
-- `ime-core/`：跨平台 C++ 推論函式庫，以 Git submodule 引入，負責模型載入、tokenization 與 llama.cpp 推論。
-- `engine/`：兩個 Unix 前端共用的輸入法引擎程式碼。
-- `lora-trainer/`：本機 LoRA 訓練器的版本來源 submodule。
-- `packaging/`：deb、RPM 與 macOS 套件相關檔案。
-- `scripts/`：建置、安裝與發行腳本。
+Linux 另有實驗性的記憶體前文來源 [`memscan`](memscan/README.md)：給既不提供 surrounding text、也不支援 AT-SPI 的程式（例如部分終端機）使用。它預設關閉，只掃描同一使用者的程序，需要 ptrace 權限，而且目前只有 `scripts/build-linux.sh` 的原始碼安裝會附帶，deb、rpm 與 AUR 套件都不含。
 
-輸入法前端與 `llavon-ime-unix-service` 透過 Unix socket 通訊。模型載入與推論集中在獨立服務中，因此前端不需要各自持有一份模型。
+## 模型
 
-## 從原始碼建置
+預設模型是 [`llavon-ime-llama-250m-Q4_K_M.gguf`](https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF)，約 2.5 億參數，透過 llama.cpp 在本機執行。Linux 套件內含 Vulkan 與 CPU backend，macOS 使用 Metal。
 
-### Linux
+模型權重以 [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/deed.zh-hant) 授權：使用或散布時須註明來源，且僅限非商業用途。這與程式碼的 BSD 2-Clause License 分開適用。
 
-最簡單的方式是使用專案附帶的建置腳本：
+可在設定程式中換成其他 GGUF，或用環境變數 `LLAVON_IME_MODEL_PATH` 指定。
+
+## 解除安裝
+
+- **Debian / Ubuntu**：`sudo apt remove llavon-ime-fcitx5`
+- **Fedora**：`sudo dnf remove llavon-ime-fcitx5`
+- **macOS**：`sudo "/Library/Application Support/llavon-ime/uninstall.sh"`
+
+解除安裝不會刪除使用者資料。要完全清除，請另外刪除：
+
+- `~/.config/llavon-ime/`：設定、替代詞彙
+- 個人化資料：Linux 在 `~/.local/state/llavon-ime/`，macOS 在 `~/Library/Application Support/llavon-ime/training/`
+
+## 開發者資訊
+
+### 架構
+
+```text
+應用程式 ⇄ Fcitx5 addon（Linux）     ┐
+應用程式 ⇄ LlavonIME.app（macOS）     ├─ 共用 engine：組字、候選、智慧中英、替代詞彙
+                                     ┘        │ Unix socket（需要時自動啟動）
+                                              ▼
+                                   llavon-ime-unix-service
+                                   └─ ime-core → llama.cpp（載入一次，各前端共用）
+
+拉風設定與個人化（Qt）→ llavon-ime-lora → llavon-lora 訓練器
+```
+
+前端只處理按鍵與畫面，模型由獨立服務載入，所以多個應用程式不會各自佔用一份模型記憶體。服務只接受同一使用者的連線。
+
+### 目錄
+
+| 目錄 | 內容 |
+| --- | --- |
+| `fcitx5/` | Linux Fcitx5 addon |
+| `macos/` | macOS 原生 InputMethodKit 輸入法與 Sparkle 更新（[說明](macos/README.md)） |
+| `engine/` | 兩個前端共用的輸入法引擎與 C ABI |
+| `common/` | 前端與服務共用的通訊協定 |
+| `ime-unix-service/` | 預測服務、個人化資料庫、LoRA 管理與 Qt 設定程式（[說明](ime-unix-service/README.md)） |
+| `memscan/` | 實驗性 Linux 記憶體前文 helper（[說明](memscan/README.md)） |
+| `ime-core/` | 推論函式庫（submodule，[llavon-ime/ime-core](https://github.com/llavon-ime/ime-core)） |
+| `lora-trainer/` | LoRA 訓練器版本來源（submodule，[llavon-ime/lora-trainer](https://github.com/llavon-ime/lora-trainer)） |
+| `packaging/` | deb、RPM、AUR 與 macOS 安裝包檔案 |
+| `scripts/` | 建置、打包、套件來源與發行腳本 |
+
+### 從原始碼建置
+
+先取得原始碼與所有 submodule：
 
 ```bash
 git clone --recurse-submodules https://github.com/llavon-ime/ime-unix.git
 cd ime-unix
+```
+
+#### Linux（x86_64）
+
+```bash
 ./scripts/build-linux.sh
 ```
 
-腳本會初始化子模組與 vcpkg、編譯並測試服務與附加元件，最後進行安裝；需要系統權限時會使用 `sudo`。
+腳本會初始化 vcpkg、建置並測試服務、addon 與 memscan，安裝到 `/usr`，並下載模型與固定版本的 LoRA 訓練器；需要時會用 `sudo`。主要建置相依為 Git、CMake、curl、pkg-config、Fcitx5 開發檔案與 Qt 6.4 以上（Widgets、Network、DBus）；AT-SPI 開發檔案缺少時會關閉 AT-SPI 前文。
 
-需要的主要建置工具包括：
+| 環境變數 | 用途 |
+| --- | --- |
+| `LLAVON_IME_MODEL_URL` | 模型下載來源或鏡像站 |
+| `LLAVON_IME_MODEL_DIR` | 模型下載目錄（預設 `models/`） |
+| `LLAVON_IME_SKIP_LORA_TRAINER` | 非空時不安裝 LoRA 訓練器 |
+| `LLAVON_IME_SKIP_MEMSCAN_CAPABILITY` | 非空時不替 memscan 設定 `CAP_SYS_PTRACE` |
 
-- CMake
-- pkg-config
-- Fcitx5 開發檔案
-- Git
-
-模型若已存在會直接沿用，否則會從 Hugging Face 下載到 `models/`，並安裝至 `/usr/share/llavon-ime/models/`。
-
-可使用以下環境變數調整下載行為：
-
-- `LLAVON_IME_MODEL_URL`：指定模型下載來源或映像站。
-- `LLAVON_IME_MODEL_DIR`：指定模型下載目錄。
-
-<details>
-<summary>手動建置 Linux 元件</summary>
+#### macOS（Apple Silicon）
 
 ```bash
-git clone --recurse-submodules https://github.com/llavon-ime/ime-unix.git
-cd ime-unix
-./vcpkg/bootstrap-vcpkg.sh
-
-cd ime-unix-service
-cmake --preset linux -DIME_UNIX_SERVICE_BUILD_TESTS=ON
-cmake --build --preset linux
-ctest --test-dir build/linux --output-on-failure
-sudo cmake --install build/linux
-cd ..
-
-cd fcitx5
-cmake --preset linux
-cmake --build --preset linux
-ctest --preset linux
-cd ..
-sudo cmake --install build/fcitx5
-```
-
-Linux preset 使用本儲存庫的 vcpkg 工具鏈，並啟用 Vulkan backend（`llama-vulkan`）。
-
-</details>
-
-### macOS
-
-最簡單的方式與 Linux 相同：
-
-```bash
-git clone --recurse-submodules https://github.com/llavon-ime/ime-unix.git
-cd ime-unix
+xcode-select --install
+brew install cmake pkg-config qtbase autoconf autoconf-archive automake libtool
 ./scripts/build-macos.sh
 ```
 
-腳本會初始化子模組與 vcpkg、建置並測試服務與原生 app、下載固定版本的
-LoRA Trainer，最後進行安裝；需要系統權限時會使用 `sudo`。
-開發者也可直接用底層的 app 建置腳本，不需要 fcitx5-macos：
+腳本會建置並測試服務與原生 app，安裝到 `/Library/Input Methods/LlavonIME.app` 與 `/Library/Application Support/llavon-ime/`。
 
-```bash
-macos/scripts/build-native-app.sh --install
-```
+- `--user`：把 app 與服務裝到使用者目錄。**模型仍會裝到 `/Library/Application Support/llavon-ime/models/`，第一次還是需要 `sudo`。**
+- `--no-service`：只更新 app，不重建服務與訓練器。
 
-前置需求：
+開發版預設不啟用自動更新。第一次安裝後，可能需要登出再登入，macOS 才會重新掃描輸入來源。
 
-- Xcode Command Line Tools
-- CMake
-- pkg-config
+### 常用執行期環境變數
 
-可使用 Homebrew 安裝後兩者：
+| 變數 | 用途 |
+| --- | --- |
+| `LLAVON_IME_MODEL_PATH` | 指定 GGUF 模型 |
+| `LLAVON_IME_UNIX_SOCKET_PATH` | 預測服務 socket（預設 `$XDG_RUNTIME_DIR/llavon-ime/ime.sock`） |
+| `LLAVON_IME_DISABLE_SERVICE` | 非空時 Linux 前端不自動啟動服務 |
+| `LLAVON_IME_DISABLE_ATSPI` | 非空時停用 AT-SPI 前文 |
 
-```bash
-brew install cmake pkg-config
-```
-
-第一次建置時 vcpkg 會從原始碼編譯 libsodium，需要 autotools；缺少時 vcpkg 會
-提示 `BUILD_FAILED`，可用 Homebrew 補上：
-
-```bash
-brew install autoconf autoconf-archive automake libtool
-```
-
-腳本會使用 vcpkg 編譯推論引擎、以 `swiftc` 編譯前端、進行 ad-hoc 簽章，並安裝到：
-
-```text
-/Library/Input Methods/LlavonIME.app
-```
-
-系統安裝同時會建置、測試並安裝 AI 預測服務至：
-
-```text
-/Library/Application Support/llavon-ime/payload
-```
-
-模型預設位於 `/Library/Application Support/llavon-ime/models`，固定版本的 LoRA
-Trainer 位於 `/Library/Application Support/llavon-ime/tools/lora`。
-
-沒有 `sudo` 權限時，可改用：
-
-```bash
-./scripts/build-macos.sh --user
-```
-
-只想更新輸入法 app、不重新建置 service 與 LoRA Trainer 時，可加上
-`--no-service`（兩個建置腳本都支援這些選項）。
-
-開發版第一次安裝後，可能需要登出再登入，讓 macOS 重新掃描輸入來源。修改程式後可重新執行相同建置指令；需要時可先執行：
-
-```bash
-pkill -x LlavonIME
-```
-
-<details>
-<summary>手動建置舊版 Fcitx5 macOS 元件</summary>
-
-部分舊版開發流程仍保留 Fcitx5 macOS build preset，需要 `fcitx5-macos` 原始碼以取得標頭：
-
-```bash
-export FCITX5_MACOS_SOURCE_DIR=/path/to/fcitx5-macos
-
-cd ime-unix-service
-cmake --preset macos
-cmake --build --preset macos
-cmake --install build/macos
-cd ..
-
-cd fcitx5
-cmake --preset macos
-cmake --build --preset macos
-ctest --preset macos
-cd ..
-cmake --install build/macos
-```
-
-macOS preset 使用本儲存庫的 vcpkg 工具鏈並啟用 Metal backend（`llama-metal`）。
-
-</details>
+舊的 `IME_FCITX5_*` 名稱只在部分 Linux 入口仍相容，例如 Fcitx5 addon 讀取的 `IME_FCITX5_MODEL_PATH`；新設定請一律使用 `LLAVON_IME_*`。
 
 ## 授權
 
-本專案程式碼依 [BSD 2-Clause License](LICENSE) 授權。模型權重另依 CC BY-NC 4.0 授權；發行套件會一併收錄相關模型與第三方相依套件的授權資訊。
-
-發行套件內含 Q4 GGUF 模型（CC BY-NC 4.0，僅限非商業用途；署名與相依套件授權
-隨套件附上）。開發版本需自備模型，透過共用原生設定頁面或
-`LLAVON_IME_MODEL_PATH` 指定：
-
-https://huggingface.co/tony65535/llavon-ime-llama-250m-GGUF
-
-舊版 `IME_FCITX5_*` 環境變數名稱仍相容（例如 `IME_FCITX5_MODEL_PATH`）。
-
-### 本機 LoRA 個人化（命令列）
-
-注音提交資料的收集預設關閉；在個人化訓練管理介面設定密碼並啟用收集後，
-可用服務安裝的 `llavon-ime-lora` 列出、排除或刪除待訓練紀錄，並以選配的
-[`lora-trainer`](https://github.com/llavon-ime/lora-trainer) 訓練個人化模型。
-也可從輸入法選單的「管理個人化訓練…」或 Fcitx5 齒輪的「使用我的輸入改進模型」按鈕開啟共用的原生管理器，
-檢視紀錄、下載基礎模型、管理訓練工作，並拖曳歷程節點。
-訓練需要另外下載未量化的基礎 checkpoint；套件內的 Q4 GGUF 只供推論使用。
-完整指令及模型相容性說明見 [Unix 服務文件](ime-unix-service/README.md#選用的本機-lora-訓練)。
-
-## 預測上下文
-
-- Linux：透過 AT-SPI 取得游標前文字。
-- macOS：透過 Fcitx5.app 的 InputMethodKit client 取得游標附近文字，不使用
-  Accessibility API，也不需要「輔助使用」權限（需 Fcitx5.app 0.3.4 以上）。
+程式碼以 [BSD 2-Clause License](LICENSE) 授權。模型權重以 CC BY-NC 4.0 授權。發行套件會一併附上模型與第三方相依套件的授權資訊。
