@@ -42,6 +42,10 @@ if [[ "${ARCH}" != "arm64" ]]; then
     echo "The macOS package currently bundles the arm64 service; found ${ARCH}." >&2
     exit 2
 fi
+if [[ ! "${PKG_IDENTIFIER}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "Invalid macOS package identifier: ${PKG_IDENTIFIER}" >&2
+    exit 2
+fi
 
 for command in cmake swiftc codesign pkgbuild productbuild pkg-config xcrun; do
     if ! command -v "${command}" >/dev/null 2>&1; then
@@ -262,6 +266,8 @@ if [[ -e "${PKGROOT}/Users" ]]; then
 fi
 
 unsigned_pkg="${DIST_DIR}/llavon-ime-${VERSION}-${ARCH}.pkg"
+component_pkg="${DIST_DIR}/llavon-ime-component.pkg"
+distribution_xml="${DIST_DIR}/Distribution.xml"
 # The component plist turns bundle relocation off: with it, Installer always
 # writes /Library/Input Methods/LlavonIME.app instead of upgrading a same-id
 # copy in the home directory.
@@ -272,7 +278,16 @@ pkgbuild \
     --identifier "${PKG_IDENTIFIER}" \
     --version "${VERSION}" \
     --install-location / \
+    "${component_pkg}"
+
+sed "s/@PACKAGE_IDENTIFIER@/${PKG_IDENTIFIER}/g" \
+    "${ROOT_DIR}/packaging/macos/Distribution.xml.in" > "${distribution_xml}"
+productbuild \
+    --distribution "${distribution_xml}" \
+    --resources "${ROOT_DIR}/packaging/macos/resources" \
+    --package-path "${DIST_DIR}" \
     "${unsigned_pkg}"
+rm -f "${component_pkg}" "${distribution_xml}"
 
 if [[ -n "${DEVELOPER_ID_INSTALLER:-}" ]]; then
     signed_pkg="${DIST_DIR}/llavon-ime-${VERSION}-${ARCH}-signed.pkg"

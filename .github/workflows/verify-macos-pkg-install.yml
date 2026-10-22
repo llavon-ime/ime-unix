@@ -62,6 +62,8 @@ jobs:
           clang -O2 -Wall -Wextra -framework Carbon \
             -o "${payload}/tools/llavon-ime-tis" packaging/macos/tools/tis.c
           cp ime-core/table/bopomofo_char.json "${payload}/share/llavon-ime/tables/"
+          component="${RUNNER_TEMP}/llavon-ime-component.pkg"
+          distribution="${RUNNER_TEMP}/Distribution.xml"
           pkgbuild \
             --root "${root}" \
             --scripts packaging/macos/scripts \
@@ -69,7 +71,22 @@ jobs:
             --identifier llavon-ime-install-check \
             --version 0.0.0 \
             --install-location / \
+            "${component}"
+          sed 's/@PACKAGE_IDENTIFIER@/llavon-ime-install-check/g' \
+            packaging/macos/Distribution.xml.in > "${distribution}"
+          productbuild \
+            --distribution "${distribution}" \
+            --resources packaging/macos/resources \
+            --package-path "${RUNNER_TEMP}" \
             "${RUNNER_TEMP}/llavon-ime-install-check.pkg"
+
+      - name: Verify installer guidance
+        run: |
+          set -euo pipefail
+          expanded="${RUNNER_TEMP}/expanded-package"
+          pkgutil --expand "${RUNNER_TEMP}/llavon-ime-install-check.pkg" "${expanded}"
+          grep -q '<conclusion file="Conclusion.html"' "${expanded}/Distribution"
+          grep -q '登出並重新登入，或重新啟動 Mac' "${expanded}/Resources/Conclusion.html"
 
       - name: Check the runner session
         run: |

@@ -54,11 +54,13 @@ fcitx5 -r
 
 ### macOS
 
-從 [Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`，直接執行安裝。安裝時需要管理員密碼，安裝內容包括輸入法本體、注音表、模型與本機預測服務。
+1. 從 [Releases](https://github.com/llavon-ime/ime-unix/releases/latest) 下載 `llavon-ime-<版本>-arm64.pkg`。
+2. 開啟安裝包，依照畫面指示完成安裝。
+3. 安裝完成後，**登出並重新登入，或重新啟動 Mac**。
+4. 前往「系統設定 → 鍵盤 → 文字輸入 → 編輯」，加入「拉風輸入法」。
+5. 從選單列的輸入來源選單切換至「拉風輸入法」。
 
-安裝後前往「系統設定 → 鍵盤 → 文字輸入 → 編輯」，加入「拉風輸入法」。macOS 26（Tahoe）一定要手動加入；較舊的版本通常由安裝程式自動完成。
-
-若安裝包被 Gatekeeper 阻擋，到「系統設定 → 隱私權與安全性」按「仍要打開」。
+若 macOS 阻擋安裝，請前往「系統設定 → 隱私權與安全性」，選擇「仍要打開」。
 
 > [!NOTE]
 > **Homebrew Cask 已停止更新。** 用 Homebrew 裝過的使用者：先備份設定與訓練資料，再直接用新的 `.pkg` 覆蓋安裝，不需要先解除安裝。之後改由輸入法內建的更新功能管理，請不要再對這個 Cask 執行 `upgrade`、`uninstall` 或 `--zap`，以免刪掉輸入法與資料。
