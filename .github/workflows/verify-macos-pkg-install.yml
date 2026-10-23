@@ -158,7 +158,17 @@ jobs:
 
           # The replaced bundle is still registered with the text input system.
           tis="/Library/Application Support/llavon-ime/tools/llavon-ime-tis"
-          if ! "${tis}" status com.llavon.inputmethod.LlavonIME; then
+          registered=0
+          # postinstall performs one final registration after Installer has
+          # settled because its own bundle registration can prune the source.
+          for _ in {1..15}; do
+            if "${tis}" status com.llavon.inputmethod.LlavonIME; then
+              registered=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${registered}" -ne 1 ]; then
             echo "the input source is not registered with the text input system" >&2
             exit 1
           fi
