@@ -19,7 +19,7 @@
 - 正式功能需要的資料、授權／署名資訊及可重現的資料產生工具屬於必要資源；不要把它們當成臨時檔案移除。
 - 提交前先檢查 `git status --short`、工作區 diff 與既有暫存內容，辨識其他工作／session 的修改。保留不在本次範圍內的內容，不要覆寫、刪除或混入提交；不確定用途或範圍時先確認。
 - 使用明確檔案路徑或選定的 diff 區塊暫存，不要使用 `git add .`、`git add -A` 或 `git commit -a`。同一檔案混有正式功能與實驗內容時，要拆開提交。
-- Commit 前檢查 `git diff --cached --stat`、`git diff --cached` 與 `git diff --cached --check`，確認沒有夾帶文件、臨時檔案、無關修改或未授權的 submodule 指標變動。不要修改 `ime-core/` 或它的 submodule 指標。
+- Commit 前檢查 `git diff --cached --stat`、`git diff --cached` 與 `git diff --cached --check`，確認沒有夾帶文件、臨時檔案、無關修改或未授權的 submodule 指標變動。只有使用者明確授權時才可修改 `ime-core/`；它的 submodule 指標需另行明確授權才能更新。
 - 驗證實際要提交的版本；部分暫存時，不可只測包含其他本機修改的完整工作區。移除臨時檔案時一併檢查建置、測試與連結引用；檔案若仍有本機用途，保留本機副本並加入適當忽略規則。
 - 新增相依套件或修改建置流程時，同步檢查相關 CI 的套件安裝與步驟順序。Push 後確認相關 CI 結果，未完成或失敗時不要宣稱全部通過。
 - Commit 訊息要清楚描述該批變更。未經使用者明確要求，不要 amend 已推送的提交、重寫遠端歷史或 force push。

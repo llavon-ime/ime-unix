@@ -1,5 +1,6 @@
 #include "raw_key_harness.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 
 using namespace llavon::ime::rawkey;
@@ -56,4 +57,19 @@ RAWKEY_SUITE("singleton ei preserves the input character", singleton_ei) {
     harness.expect_commit("欸");
     RAWKEY_ASSERT(harness.pump_until([&] { return harness.composition_empty(); }));
     RAWKEY_ASSERT(harness.last_commit() == "欸");
+}
+
+RAWKEY_SUITE("zhi third tone includes 脂", zhi_third_tone_fat) {
+    Harness harness;
+    harness.set_config("CandidatePageSize", "9");
+
+    harness.type("53");
+    RAWKEY_ASSERT(harness.session()->buffer.segment_reading(0) == u"ㄓˇ");
+    harness.key("Down");
+    RAWKEY_ASSERT(harness.has_candidates());
+    harness.key("Page_Down");
+    const auto page = harness.candidates();
+    RAWKEY_ASSERT(std::ranges::find(page, "脂") != page.end());
+    harness.choose_text("脂");
+    harness.expect_commit("脂");
 }
