@@ -11,7 +11,7 @@ class HistoryGraph final : public QGraphicsView {
     Q_OBJECT
 public:
     explicit HistoryGraph(QWidget* parent = nullptr);
-    void setRuns(const QJsonArray& runs, const QString& activeModel);
+    void setRuns(const QJsonArray& runs, const QJsonArray& bases, const QString& activeModel);
     QString selectedId() const;
     void selectRun(const QString& id);
     void zoomBy(double factor);
@@ -32,6 +32,7 @@ private:
     QMap<QString, QString> parents_;
     QList<QGraphicsPathItem*> edges_;
     QJsonArray runs_;
+    QJsonArray bases_;
     QString activeModel_;
     bool rebuilding_ = false;
     bool firstShow_ = true;

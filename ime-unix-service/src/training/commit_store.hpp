@@ -64,7 +64,7 @@ private:
 // manual_only keeps only records that explicitly selected a candidate.
 std::vector<CommitRecord> read_commits(sqlite3* db, const std::string& state,
                                        const CommitCipher& cipher, int offset, int limit,
-                                       bool manual_only = false);
+                                       bool manual_only = false, std::int64_t base_run_id = 0);
 std::vector<CommitRecord> read_commits_by_id(sqlite3* db, const std::vector<std::string>& ids,
                                              const CommitCipher& cipher);
 

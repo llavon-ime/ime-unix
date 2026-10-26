@@ -23,6 +23,7 @@
 #include <QFrame>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -51,6 +52,7 @@
 #include <QScrollBar>
 #include <QScopeGuard>
 #include <sqlite3.h>
+#include <cstring>
 #include <memory>
 
 using llavon::lora::Backend;
@@ -64,6 +66,7 @@ private slots:
     void jobLogFollowing();
     void realTraining();
     void historyGraphInteractions();
+    void legacyRunKeepsItsBaseModel();
     void unifiedSettings();
     void pageLaunchRouting();
     void deferredPhrasePage();
@@ -356,14 +359,19 @@ void NativeTests::historyGraphInteractions() {
     QCOMPARE(sqlite3_open((directory.path() + "/commits.sqlite3").toUtf8().constData(), &db), SQLITE_OK);
     const char* sql = R"SQL(
         CREATE TABLE lora_runs(id INTEGER PRIMARY KEY, completed_at TEXT, record_count INTEGER,
-          model_path TEXT, optimizer_steps INTEGER, rank INTEGER, alpha INTEGER, dropout REAL,
+          model_path TEXT, adapter_path TEXT, base_revision TEXT, base_model_fingerprint TEXT,
+          optimizer_steps INTEGER, rank INTEGER, alpha INTEGER, dropout REAL,
           target_modules TEXT, cumulative_record_count INTEGER, parent_id INTEGER, training_request_json TEXT);
+        CREATE TABLE lora_base_models(fingerprint TEXT PRIMARY KEY, revision TEXT, model_path TEXT);
+        INSERT INTO lora_base_models VALUES
+          ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','revision-a','/test/base-a.gguf'),
+          ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','revision-b','/test/base-b.gguf');
         INSERT INTO lora_runs VALUES
-          (1,'2026-09-27T09:20:00Z',24,'/test/1.gguf',72,8,16,0,'q_proj,v_proj',24,0,'{"strength":"ultra-low"}'),
-          (2,'2026-09-28T08:45:00Z',18,'/test/2.gguf',54,8,16,0,'q_proj,v_proj',42,1,'{"strength":"low"}'),
-          (3,'2026-09-28T12:30:00Z',32,'/test/3.gguf',96,8,16,0,'q_proj,v_proj',56,1,'{"strength":"medium"}'),
-          (4,'2026-09-29T10:10:00Z',12,'/test/4.gguf',36,8,16,0,'q_proj,v_proj',54,2,'{"strength":"low"}'),
-          (5,'2026-09-30T09:00:00Z',20,'/test/5.gguf',60,8,16,0,'q_proj,v_proj',76,3,'{"strength":"high"}');
+          (1,'2026-09-27T09:20:00Z',24,'/test/1.gguf','/test/1/adapter','revision-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',72,8,16,0,'q_proj,v_proj',24,0,'{"strength":"ultra-low"}'),
+          (2,'2026-09-28T08:45:00Z',18,'/test/2.gguf','/test/2/adapter','revision-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',54,8,16,0,'q_proj,v_proj',42,1,'{"strength":"low"}'),
+          (3,'2026-09-28T12:30:00Z',32,'/test/3.gguf','/test/3/adapter','revision-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',96,8,16,0,'q_proj,v_proj',56,1,'{"strength":"medium"}'),
+          (4,'2026-09-29T10:10:00Z',12,'/test/4.gguf','/test/4/adapter','revision-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',36,8,16,0,'q_proj,v_proj',54,2,'{"strength":"low"}'),
+          (5,'2026-09-30T09:00:00Z',20,'/test/5.gguf','/test/5/adapter','revision-a','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',60,8,16,0,'q_proj,v_proj',76,3,'{"strength":"high"}');
     )SQL";
     const int status = sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
     sqlite3_close(db); QCOMPARE(status, SQLITE_OK);
@@ -373,11 +381,13 @@ void NativeTests::historyGraphInteractions() {
     backend.start(); QTRY_VERIFY(ready.count() > 0);
     window.showPage("history");
     auto* graph = widget<llavon::lora::HistoryGraph>(window, "history");
-    QTRY_COMPARE(graph->nodeCount(), 6);
+    QTRY_COMPARE(graph->nodeCount(), 7);
     const auto node = [graph](const QString& id) -> QGraphicsItem* {
         for (auto* item : graph->scene()->items()) if (item->data(0).toString() == id) return item;
         return nullptr;
     };
+    QVERIFY(node("base:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+    QVERIFY(node("base:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     QVERIFY(node("1")); QVERIFY(node("2")); QVERIFY(node("3"));
     QVERIFY(node("2")->pos().x() < node("3")->pos().x());
     QVERIFY(node("2")->pos().y() > node("1")->pos().y());
@@ -444,6 +454,69 @@ void NativeTests::historyGraphInteractions() {
     capture(window, "10-history-node-graph");
     window.resize(800, 620); QTest::qWait(100); click(window, "resetGraph");
     capture(window, "11-history-compact");
+}
+
+void NativeTests::legacyRunKeepsItsBaseModel() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto assetsPath = directory.path() + "/assets";
+    const QString oldRevision(40, 'a');
+    const QString currentRevision(40, 'b');
+    const auto writeCheckpoint = [&](const QString& revision, const QByteArray& marker) {
+        const auto root = assetsPath + "/" + revision;
+        QVERIFY(QDir().mkpath(root));
+        for (const auto& name : {"config.json", "ime_vocab.json", "model.safetensors"}) {
+            QFile file(root + "/" + name); QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write(marker + name), marker.size() + static_cast<qint64>(std::strlen(name)));
+        }
+    };
+    writeCheckpoint(oldRevision, "old-");
+    writeCheckpoint(currentRevision, "new-");
+    QFile current(assetsPath + "/current.revision"); QVERIFY(current.open(QIODevice::WriteOnly));
+    QCOMPARE(current.write(currentRevision.toUtf8() + '\n'), qint64(41)); current.close();
+
+    sqlite3* db = nullptr;
+    QCOMPARE(sqlite3_open((directory.path() + "/commits.sqlite3").toUtf8().constData(), &db), SQLITE_OK);
+    const auto sql = QStringLiteral(
+        "CREATE TABLE lora_runs(id INTEGER PRIMARY KEY,base_revision TEXT NOT NULL,"
+        "adapter_path TEXT NOT NULL,model_path TEXT NOT NULL,record_count INTEGER NOT NULL,"
+        "completed_at TEXT NOT NULL);"
+        "INSERT INTO lora_runs VALUES(1,'%1','/old/adapter','/old/model.gguf',3,'2026-10-01T00:00:00Z');")
+        .arg(oldRevision).toUtf8();
+    const int status = sqlite3_exec(db, sql.constData(), nullptr, nullptr, nullptr);
+    sqlite3_close(db); QCOMPARE(status, SQLITE_OK);
+
+    Environment assets("LLAVON_IME_LORA_ASSETS_DIR", assetsPath.toUtf8());
+    Backend backend(LLAVON_NATIVE_BACKEND,
+        {"--state-dir", directory.path(), "--cli", LLAVON_TEST_CLI});
+    QSignalSpy started(&backend, &Backend::ready); QSignalSpy errors(&backend, &Backend::error);
+    backend.start(); QTRY_COMPARE(started.count(), 1);
+    bool received = false;
+    QJsonObject history;
+    backend.request("/api/history", {}, [&](const QJsonValue& value) {
+        history = value.toObject(); received = true;
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(received, 10000);
+    QCOMPARE(errors.count(), 0);
+
+    QString oldFingerprint, currentFingerprint;
+    const auto bases = history.value("bases").toArray();
+    QCOMPARE(bases.size(), 2);
+    for (const auto value : bases) {
+        const auto base = value.toObject();
+        if (base.value("revision").toString() == oldRevision)
+            oldFingerprint = base.value("fingerprint").toString();
+        if (base.value("current").toBool()) {
+            QCOMPARE(base.value("revision").toString(), currentRevision);
+            currentFingerprint = base.value("fingerprint").toString();
+        }
+    }
+    QCOMPARE(oldFingerprint.size(), 64);
+    QCOMPARE(currentFingerprint.size(), 64);
+    QVERIFY(oldFingerprint != currentFingerprint);
+    const auto runs = history.value("runs").toArray();
+    QCOMPARE(runs.size(), 1);
+    QCOMPARE(runs.first().toObject().value("base_model_revision").toString(), oldRevision);
+    QCOMPARE(runs.first().toObject().value("base_model_fingerprint").toString(), oldFingerprint);
 }
 
 void NativeTests::unifiedSettings() {

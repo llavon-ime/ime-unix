@@ -1,6 +1,7 @@
 #include "pipe/protocol.hpp"
 #include "session/session_manager.hpp"
 #include "training/commit_store.hpp"
+#include "training/base_model_fingerprint.hpp"
 #include "training/lora_history_lca.hpp"
 #include "training/numeric_dataset.hpp"
 #include "training/sqlite.hpp"
@@ -315,7 +316,7 @@ bool commit_test() {
             if (store.record(disabled)) throw std::runtime_error("stored while collection was disabled");
             store.set_recording_enabled(true);
         }
-        if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+        if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK)
             throw std::runtime_error("could not inspect commit database");
         {
             sqlite3_stmt* stmt = nullptr;
@@ -377,6 +378,18 @@ bool commit_test() {
                 migrated.front().context != "早安" || migrated.front().answer != "你好" ||
                 migrated.front().readings.size() != 2)
                 throw std::runtime_error("legacy rows were not converted");
+            const auto lineage_sql =
+                "INSERT INTO lora_runs(base_revision,adapter_path,model_path,record_count) "
+                "VALUES('revision','adapter','model',1);"
+                "INSERT INTO lora_run_commits(run_id,commit_id) VALUES(1,'45000000000000000000000000000000');";
+            if (sqlite3_exec(db, lineage_sql, nullptr, nullptr, nullptr) != SQLITE_OK)
+                throw std::runtime_error("could not create per-base training lineage");
+            const auto available_after_run = read_commits(db, "pending", cipher, 0, 10, false, 1);
+            const auto trained_after_run = read_commits(db, "trained", cipher, 0, 10, false, 1);
+            if (available_after_run.size() != 3 || find(available_after_run, recorded_id) != nullptr ||
+                trained_after_run.size() != 2 || find(trained_after_run, recorded_id) == nullptr ||
+                find(trained_after_run, legacy_id) == nullptr)
+                throw std::runtime_error("training availability did not follow the selected lineage");
         }
         const auto config = directory / "config.json";
         std::ofstream(config) << R"({"vocab_size":18546,"max_position_embeddings":384})";
@@ -515,7 +528,36 @@ bool lora_lca_test() {
     if (tarjan_lca(duplicate, 1, 1)) good = false;                // duplicate IDs
     const std::vector<LoraHistoryParent> orphan{{1, 0}, {2, 99}};
     if (tarjan_lca(orphan, 1, 2)) good = false;                   // missing parent
+    const std::vector<LoraHistoryParent> separate_models{{1, -2}, {2, -2}, {3, -3}};
+    good = good && tarjan_lca(separate_models, 1, 2) == -2;
+    if (tarjan_lca(separate_models, 1, 3)) good = false;
+    good = good && tarjan_lca(separate_models, -2, 1) == -2;
     return good;
+}
+
+bool base_model_fingerprint_test() {
+    using ime::unix_service::compute_base_model_fingerprint;
+    using ime::unix_service::valid_base_model_fingerprint;
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("llavon-base-fingerprint-test-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    try {
+        std::ofstream(directory / "config.json", std::ios::binary) << "{}\n";
+        std::ofstream(directory / "ime_vocab.json", std::ios::binary) << "[\"<PAD>\"]\n";
+        std::ofstream model(directory / "model.safetensors", std::ios::binary);
+        for (int byte = 0; byte < 32; ++byte) model.put(static_cast<char>(byte));
+        model.close();
+        const auto fingerprint = compute_base_model_fingerprint(directory);
+        const bool good = fingerprint == "fda1ef14c385ce8ee72a964ee85c8eaedbc791be8a715465a1c3d03a5de90009" &&
+            valid_base_model_fingerprint(fingerprint) && !valid_base_model_fingerprint(fingerprint.substr(1)) &&
+            !valid_base_model_fingerprint("FDA1EF14C385CE8EE72A964EE85C8EAEDBC791BE8A715465A1C3D03A5DE90009");
+        std::filesystem::remove_all(directory);
+        return good;
+    } catch (...) {
+        std::filesystem::remove_all(directory);
+        return false;
+    }
 }
 
 bool sqlite_exception_test() {
@@ -539,7 +581,8 @@ int main() {
     const Case cases[] = {{"protocol", protocol_test}, {"core-adapter", core_adapter_test},
                           {"core-runtime", core_runtime_test}, {"vulkan-pipeline-cache-config", vulkan_pipeline_cache_config_test},
                           {"session", session_test}, {"commit", commit_test},
-                          {"lora-lca", lora_lca_test}, {"sqlite-exception", sqlite_exception_test}};
+                          {"lora-lca", lora_lca_test}, {"base-model-fingerprint", base_model_fingerprint_test},
+                          {"sqlite-exception", sqlite_exception_test}};
     bool good = true;
     for (const auto& item : cases) {
         if (item.run()) continue;

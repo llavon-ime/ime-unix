@@ -3,6 +3,7 @@
 #include "training/commit_crypto.hpp"
 
 #include <filesystem>
+#include <cstdint>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -29,6 +30,6 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
                                       const std::filesystem::path& output, int max_sequence_length,
                                       const std::unordered_set<std::string>* selected_ids = nullptr,
                                       const commit_crypto::Decryption* decryption = nullptr,
-                                      bool manual_only = false);
+                                      bool manual_only = false, std::int64_t base_run_id = 0);
 
 }  // namespace ime::unix_service

@@ -490,6 +490,8 @@ QWidget* Manager::trainingPage() {
             QString field = key; field.replace('_', '-');
             if (run.contains(key)) options_[field]->setText(text(run.value(key)));
         }
+        offset_ = 0;
+        QTimer::singleShot(0, this, &Manager::refresh);
     });
     return scrollPage(page);
 }
@@ -542,7 +544,7 @@ QWidget* Manager::historyPage() {
     connect(history_, &HistoryGraph::runSelected, this, [this, useBase, apply](const QString& id) {
         useBase->setEnabled(!id.isEmpty() && !actionPending_); apply->setEnabled(!id.isEmpty() && !running_ && !actionPending_);
         if (id.isEmpty()) { historyDetail_->clear(); historyDetail_->setToolTip({}); return; }
-        if (id == "base") {
+        if (id == "base" || id.startsWith("base:")) {
             // Keep the details slot stable while removing text already on the
             // base node; toggling the slot would shift the graph's viewport.
             historyDetail_->clear();
@@ -550,8 +552,9 @@ QWidget* Manager::historyPage() {
         }
         const auto run = historyRuns_.value(id);
         const auto parent = text(run.value("parent_id"));
+        const auto fingerprint = run.value("base_model_fingerprint").toString();
         historyDetail_->setText(QStringLiteral("訓練 #%1  ←  %2\nRank %3 · Alpha %4 · Dropout %5 · %6")
-            .arg(id, parent == "0" ? "Base model" : "#" + parent, text(run.value("rank")),
+            .arg(id, parent == "0" ? "Base model " + fingerprint.left(8) : "#" + parent, text(run.value("rank")),
                  text(run.value("alpha")), text(run.value("dropout")), run.value("target_modules").toString()));
         historyDetail_->setToolTip(run.value("model_path").toString() + "\n" +
             QString::fromUtf8(QJsonDocument(run.value("request").toObject()).toJson(QJsonDocument::Indented)));
@@ -584,7 +587,8 @@ void Manager::refresh() {
         if (value.isObject()) renderProtection(value.toObject());
         done();
     });
-    backend_->request("/api/pending-count", {}, [this, done](const QJsonValue& value) {
+    const auto baseSelection = base_ ? base_->currentData().toString() : QString{};
+    backend_->request("/api/pending-count?base=" + baseSelection, {}, [this, done](const QJsonValue& value) {
         if (value.isObject()) {
             const auto totals = value.toObject();
             counts_->setText(QStringLiteral("手動選字 %1").arg(totals.value("manual").toInt()));
@@ -597,7 +601,9 @@ void Manager::refresh() {
     const QString path = QStringLiteral("/api/records?state=%1&offset=%2&manual=%3")
         .arg(filter_->currentData().toString()).arg(offset_).arg(manualView_->isChecked() ? 1 : 0);
     // The existing filter parser accepts manual=1; omit the parameter otherwise.
-    backend_->request(manualView_->isChecked() ? path : path.left(path.lastIndexOf('&')), {}, [this, done](const QJsonValue& value) {
+    const auto recordPath = (manualView_->isChecked() ? path : path.left(path.lastIndexOf('&'))) +
+        "&base=" + baseSelection;
+    backend_->request(recordPath, {}, [this, done](const QJsonValue& value) {
         if (value.isObject()) renderRecords(value.toObject());
         done();
     });
@@ -753,8 +759,19 @@ void Manager::renderHistory(const QJsonObject& history) {
     const auto oldBase = base_->currentData().toString();
     const bool first = base_->count() == 1 && base_->currentData(Qt::UserRole + 1).isNull();
     const QSignalBlocker blocker(base_);
-    base_->clear(); base_->addItem(QStringLiteral("Base model · 從頭開始"), "");
+    base_->clear();
     historyRuns_.clear();
+    const auto bases = history.value("bases").toArray();
+    for (const auto value : bases) {
+        const auto model = value.toObject();
+        const auto fingerprint = model.value("fingerprint").toString();
+        const auto id = model.value("id").toString("base:" + fingerprint);
+        auto title = QStringLiteral("Base model %1").arg(fingerprint.left(8));
+        if (model.value("current").toBool()) title += QStringLiteral(" · 目前下載");
+        base_->addItem(title, id); base_->setItemData(base_->count() - 1, model, Qt::UserRole + 1);
+        historyRuns_.insert(id, model);
+    }
+    if (base_->count() == 0) base_->addItem(QStringLiteral("Base model · 從頭開始"), "");
     const auto runs = history.value("runs").toArray();
     for (const auto value : runs) {
         const auto run = value.toObject(); const auto id = text(run.value("id"));
@@ -762,20 +779,41 @@ void Manager::renderHistory(const QJsonObject& history) {
         base_->addItem(title, id); base_->setItemData(base_->count() - 1, run, Qt::UserRole + 1);
         historyRuns_.insert(id, run);
     }
-    history_->setRuns(runs, state_.value("active_model_path").toString());
+    history_->setRuns(runs, bases, state_.value("active_model_path").toString());
     int index = base_->findData(oldBase);
-    if (first && runs.size()) index = 1;
+    if (first) {
+        const auto active = state_.value("active_model_path").toString();
+        if (!active.isEmpty()) {
+            for (int candidate = 0; candidate < base_->count(); ++candidate)
+                if (base_->itemData(candidate, Qt::UserRole + 1).toJsonObject().value("model_path").toString() == active) {
+                    index = candidate; break;
+                }
+        } else if (!bases.isEmpty()) {
+            for (int candidate = 0; candidate < base_->count(); ++candidate)
+                if (base_->itemData(candidate, Qt::UserRole + 1).toJsonObject().value("current").toBool()) {
+                    index = candidate; break;
+                }
+        }
+        if (index < 0 && !runs.isEmpty()) index = base_->findData(text(runs.first().toObject().value("id")));
+    }
+    if (first && index < 0 && !bases.isEmpty()) {
+        for (int candidate = 0; candidate < base_->count(); ++candidate)
+            if (base_->itemData(candidate, Qt::UserRole + 1).toJsonObject().value("current").toBool()) {
+                index = candidate; break;
+            }
+    }
     base_->setCurrentIndex(qMax(0, index));
-    if (first && index > 0) {
+    if (first && index >= 0) {
         const auto run = base_->currentData(Qt::UserRole + 1).toJsonObject();
         for (const auto& key : {"rank", "alpha", "dropout", "target_modules"}) {
             QString field = key; field.replace('_', '-');
             if (run.contains(key)) options_[field]->setText(text(run.value(key)));
         }
     }
-    base_->setItemData(0, false, Qt::UserRole + 1);
+    if (base_->count() && bases.isEmpty()) base_->setItemData(0, false, Qt::UserRole + 1);
     ancestor_->setVisible(!history.value("common_ancestor").isNull());
     ancestor_->setProperty("runId", text(history.value("common_ancestor")));
+    if (first) QTimer::singleShot(0, this, &Manager::refresh);
 }
 
 QJsonObject Manager::trainingRequest() const {
@@ -791,6 +829,7 @@ void Manager::train() {
     if (actionPending_ || running_) return;
     const auto body = trainingRequest();
     act("/api/count-trainable", {{"password", trainPassword_->text()}, {"max_seq_length", options_["max-seq-length"]->text()},
+        {"base_run_id", base_->currentData().toString()},
         {"only_manually_selected", manualTrain_->isChecked()}}, [this, body](const QJsonValue& value) {
         const auto report = value.toObject();
         skippedIds_.clear(); for (const auto id : report.value("skipped_ids").toArray()) skippedIds_.insert(id.toString());

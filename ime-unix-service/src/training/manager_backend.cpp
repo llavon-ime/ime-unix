@@ -1,4 +1,5 @@
 #include "commit_store.hpp"
+#include "base_model_fingerprint.hpp"
 #include "job_process.hpp"
 #include "manager_model_policy.hpp"
 #include "manager_database.hpp"
@@ -1870,6 +1871,171 @@ public:
 #endif
 
 private:
+    struct SelectedBase {
+        std::string run_id, fingerprint, revision;
+    };
+
+    json base_models() {
+        const auto assets = assets_root(options_);
+        const auto revision = trim(last_log(assets / "current.revision"));
+        const auto directory = assets / revision;
+        const bool ready = revision.size() == 40 && fs::is_regular_file(directory / "config.json") &&
+            fs::is_regular_file(directory / "ime_vocab.json") && fs::is_regular_file(directory / "model.safetensors");
+        if (ready && revision != cached_base_revision_) {
+            cached_base_fingerprint_ = ime::unix_service::compute_base_model_fingerprint(directory);
+            cached_base_revision_ = revision;
+        }
+        if (!fs::is_regular_file(db_)) {
+            json result = json::array();
+            if (ready) result.push_back({{"id", "base:" + cached_base_fingerprint_},
+                {"fingerprint", cached_base_fingerprint_}, {"revision", revision},
+                {"model_path", (runs_root(options_) / ("base-" + cached_base_fingerprint_) /
+                    "base-Q4_K_M.gguf").string()}, {"current", true}});
+            return result;
+        }
+        DatabaseHandle handle(db_);
+        auto* db = handle.get();
+        const auto step_done = [&](sqlite3_stmt* statement) {
+            if (sqlite3_step(statement) != SQLITE_DONE) throw std::runtime_error(sqlite3_errmsg(db));
+        };
+        const auto save_base = [&](const std::string& fingerprint, const std::string& saved_revision,
+                                   bool replace) {
+            auto save = ime::unix_service::sqlite::prepare(db, replace
+                ? "INSERT INTO lora_base_models(fingerprint,revision,model_path) VALUES (?,?,?) "
+                  "ON CONFLICT(fingerprint) DO UPDATE SET revision=excluded.revision,model_path=excluded.model_path"
+                : "INSERT OR IGNORE INTO lora_base_models(fingerprint,revision,model_path) VALUES (?,?,?)");
+            const auto output = (runs_root(options_) / ("base-" + fingerprint) / "base-Q4_K_M.gguf").string();
+            sqlite3_bind_text(save.get(), 1, fingerprint.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(save.get(), 2, saved_revision.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(save.get(), 3, output.c_str(), -1, SQLITE_TRANSIENT);
+            step_done(save.get());
+        };
+        if (ready) save_base(cached_base_fingerprint_, revision, true);
+        if (!base_models_scanned_) {
+            // A legacy run records the immutable Hugging Face revision but not
+            // its content fingerprint. Resolve every retained checkpoint by
+            // that revision: assigning all old runs to current.revision would
+            // make an adapter appear compatible after the user downloads a
+            // newer base model before opening this manager version.
+            std::vector<std::pair<std::string, std::string>> discovered;
+            if (ready) discovered.emplace_back(revision, cached_base_fingerprint_);
+            std::error_code scan_error;
+            for (const auto& entry : fs::directory_iterator(assets, scan_error)) {
+                if (scan_error) break;
+                const auto candidate = entry.path().filename().string();
+                if (!entry.is_directory(scan_error) || candidate.size() != 40 ||
+                    candidate.find_first_not_of("0123456789abcdef") != std::string::npos ||
+                    std::any_of(discovered.begin(), discovered.end(),
+                        [&](const auto& item) { return item.first == candidate; }))
+                    continue;
+                try {
+                    discovered.emplace_back(candidate,
+                        ime::unix_service::compute_base_model_fingerprint(entry.path()));
+                } catch (...) {
+                    // Incomplete downloads are registered only after they are published.
+                }
+            }
+            if (sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+                throw std::runtime_error(sqlite3_errmsg(db));
+            try {
+                auto migrate = ime::unix_service::sqlite::prepare(db,
+                    "UPDATE lora_runs SET base_model_fingerprint=?1 WHERE base_revision=?2");
+                for (const auto& [saved_revision, fingerprint] : discovered) {
+                    save_base(fingerprint, saved_revision, saved_revision == revision);
+                    sqlite3_bind_text(migrate.get(), 1, fingerprint.c_str(), -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(migrate.get(), 2, saved_revision.c_str(), -1, SQLITE_TRANSIENT);
+                    step_done(migrate.get());
+                    sqlite3_reset(migrate.get());
+                    sqlite3_clear_bindings(migrate.get());
+                }
+                if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
+                    throw std::runtime_error(sqlite3_errmsg(db));
+            } catch (...) {
+                sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+                throw;
+            }
+            base_models_scanned_ = true;
+        }
+        // Runs remain authoritative even if their checkpoint is no longer the
+        // currently downloaded one; this reconstructs catalogs from old DBs.
+        auto restore_catalog = ime::unix_service::sqlite::prepare(db,
+            "INSERT OR IGNORE INTO lora_base_models(fingerprint,revision,model_path) "
+            "SELECT base_model_fingerprint,base_revision,'' FROM lora_runs "
+            "WHERE length(base_model_fingerprint)=64");
+        step_done(restore_catalog.get());
+        auto repair_catalog = ime::unix_service::sqlite::prepare(db,
+            "UPDATE lora_base_models SET model_path=?1 || '/base-' || fingerprint || '/base-Q4_K_M.gguf' "
+            "WHERE model_path='' ");
+        const auto root_text = runs_root(options_).string();
+        sqlite3_bind_text(repair_catalog.get(), 1, root_text.c_str(), -1, SQLITE_TRANSIENT);
+        step_done(repair_catalog.get());
+        json result = json::array();
+        auto select = ime::unix_service::sqlite::prepare(db,
+            "SELECT fingerprint,revision,model_path FROM lora_base_models ORDER BY rowid");
+        while (sqlite3_step(select.get()) == SQLITE_ROW) {
+            const auto text = [&](int column) {
+                const auto* value = reinterpret_cast<const char*>(sqlite3_column_text(select.get(), column));
+                return value ? std::string(value) : std::string{};
+            };
+            const auto fingerprint = text(0);
+            if (!ime::unix_service::valid_base_model_fingerprint(fingerprint)) continue;
+            auto model = text(2);
+            if (model.empty()) model = (runs_root(options_) / ("base-" + fingerprint) / "base-Q4_K_M.gguf").string();
+            result.push_back({{"id", "base:" + fingerprint}, {"fingerprint", fingerprint},
+                {"revision", text(1)}, {"model_path", model},
+                {"current", ready && fingerprint == cached_base_fingerprint_}});
+        }
+        return result;
+    }
+
+    SelectedBase selected_base(const std::string& selection) {
+        const auto bases = base_models();
+        if (selection.starts_with("base:")) {
+            const auto fingerprint = selection.substr(5);
+            if (!ime::unix_service::valid_base_model_fingerprint(fingerprint))
+                throw std::runtime_error("無效的訓練基底");
+            for (const auto& base : bases)
+                if (base.value("fingerprint", "") == fingerprint)
+                    return {.run_id = {}, .fingerprint = fingerprint, .revision = base.value("revision", "")};
+            throw std::runtime_error("找不到訓練基底");
+        }
+        if (!selection.empty()) {
+            if (selection.size() > 18 || selection.find_first_not_of("0123456789") != std::string::npos)
+                throw std::runtime_error("無效的訓練基底");
+            const auto rows = query_database(db_,
+                ("SELECT COALESCE(base_model_fingerprint,''),base_revision FROM lora_runs WHERE id=" + selection).c_str(), 2);
+            if (rows.size() != 1) throw std::runtime_error("找不到訓練基底");
+            return {.run_id = selection, .fingerprint = rows[0][0].get<std::string>(),
+                    .revision = rows[0][1].get<std::string>()};
+        }
+        for (const auto& base : bases)
+            if (base.value("current", false))
+                return {.run_id = {}, .fingerprint = base.value("fingerprint", ""),
+                        .revision = base.value("revision", "")};
+        throw std::runtime_error("請先下載基礎模型");
+    }
+
+    std::int64_t availability_base_run(const std::string& selection) {
+        if (selection == "base" || selection.starts_with("base:")) return 0;
+        if (!selection.empty()) {
+            if (selection.size() > 18 || selection.find_first_not_of("0123456789") != std::string::npos)
+                throw std::runtime_error("無效的訓練基底");
+            const auto rows = query_database(db_, ("SELECT id FROM lora_runs WHERE id=" + selection).c_str(), 1);
+            if (rows.size() != 1) throw std::runtime_error("找不到訓練基底");
+            return std::stoll(selection);
+        }
+        const auto bases = base_models();
+        for (const auto& base : bases) {
+            if (!base.value("current", false)) continue;
+            const auto fingerprint = base.value("fingerprint", "");
+            const auto rows = query_database(db_,
+                ("SELECT id FROM lora_runs WHERE base_model_fingerprint='" + fingerprint +
+                 "' ORDER BY id DESC LIMIT 1").c_str(), 1);
+            if (!rows.empty()) return std::stoll(rows[0][0].get<std::string>());
+        }
+        return 0;
+    }
+
 #ifndef LLAVON_NATIVE_GUI
     // Hands the listening socket and page token to the reinstalled binary and
     // replaces this process image with it. Returns false when the replacement
@@ -2019,8 +2185,9 @@ private:
     // applied) removes all run models.
     void prune_obsolete_models(const fs::path& keep) const {
         std::error_code error;
-        const auto rows = query_database(db_, "SELECT model_path FROM lora_runs ORDER BY id DESC", 1);
-        if (rows.empty()) return;
+        const auto rows = query_database(db_,
+            "SELECT model_path,'personalized-Q4_K_M.gguf' FROM lora_runs "
+            "UNION ALL SELECT model_path,'base-Q4_K_M.gguf' FROM lora_base_models", 2);
         const auto root = fs::absolute(runs_root(options_), error).lexically_normal();
         if (error) return;
         std::optional<fs::path> kept;
@@ -2031,7 +2198,7 @@ private:
         for (const auto& row : rows) {
             const auto candidate = fs::absolute(row[0].get<std::string>(), error).lexically_normal();
             if (error) { error.clear(); continue; }
-            if (candidate.filename() != "personalized-Q4_K_M.gguf" ||
+            if (candidate.filename() != row[1].get<std::string>() ||
                 candidate.parent_path().parent_path() != root) continue;
             if (kept && candidate == *kept) continue;
             std::error_code ignored;
@@ -2039,17 +2206,34 @@ private:
         }
     }
 
-    json records(const std::string& requested) const {
+    std::pair<std::string, std::string> commit_filter(const std::string& state,
+                                                       std::int64_t base_run_id) const {
+        const auto lineage =
+            "WITH RECURSIVE lineage(id,parent_id) AS (SELECT id,parent_id FROM lora_runs WHERE id=" +
+            std::to_string(base_run_id) + " UNION ALL SELECT parent.id,parent.parent_id FROM lora_runs parent "
+            "JOIN lineage child ON parent.id=child.parent_id) ";
+        if (state == "excluded") return {lineage, "commits.state='excluded'"};
+        const std::string used =
+            "EXISTS(SELECT 1 FROM legacy_training_unknown legacy WHERE legacy.commit_id=commits.id) OR "
+            "EXISTS(SELECT 1 FROM lora_run_commits used JOIN lineage ON lineage.id=used.run_id "
+            "WHERE used.commit_id=commits.id)";
+        return {lineage, "commits.state='pending' AND " +
+            (state == "pending" ? "NOT (" + used + ")" : "(" + used + ")")};
+    }
+
+    json records(const std::string& requested) {
         const auto question = requested.find('?');
         const auto params = question == std::string::npos ? "" : requested.substr(question + 1);
         std::string state = "pending";
         int offset = 0;
         bool manual_only = false;
+        std::string base_selection;
         for (std::size_t start = 0; start < params.size();) {
             const auto end = params.find('&', start);
             const auto part = params.substr(start, end == std::string::npos ? end : end - start);
             if (part.starts_with("state=")) state = part.substr(6);
             else if (part == "manual=1") manual_only = true;
+            else if (part.starts_with("base=")) base_selection = part.substr(5);
             else if (part.starts_with("offset=")) {
                 const auto digits = part.substr(7);
                 const auto parsed = std::from_chars(digits.data(), digits.data() + digits.size(), offset);
@@ -2061,11 +2245,13 @@ private:
         }
         if (state != "pending" && state != "excluded" && state != "trained")
             throw std::runtime_error("invalid record state");
+        const auto base_run_id = availability_base_run(base_selection);
         const std::string manual_filter = manual_only
             ? " AND EXISTS(SELECT 1 FROM readings r WHERE r.commit_id=commits.id AND r.manually_selected=1)"
             : "";
+        const auto [prefix, predicate] = commit_filter(state, base_run_id);
         const auto counted = query_database(db_,
-            ("SELECT COUNT(*) FROM commits WHERE state='" + state + "'" + manual_filter).c_str(), 1);
+            (prefix + "SELECT COUNT(*) FROM commits WHERE " + predicate + manual_filter).c_str(), 1);
         const int total = counted.empty() ? 0 : std::stoi(counted[0][0].get<std::string>());
         if (!fs::is_regular_file(db_)) return {{"rows",json::array()}, {"has_more",false}, {"total",total}};
         const bool unlocked = cipher_.has_value() && cipher_->unlocked();
@@ -2075,7 +2261,7 @@ private:
             // Sealed records: the page learns that they exist, never what they
             // say. Selection only needs the IDs, so reviewing stays possible.
             const auto rows = query_database(db_,
-                ("SELECT id,committed_at FROM commits WHERE state='" + state + "'" + manual_filter + " "
+                (prefix + "SELECT id,committed_at FROM commits WHERE " + predicate + manual_filter + " "
                  "ORDER BY committed_at DESC,id DESC LIMIT " + std::to_string(kRecordsPerPage + 1) + " OFFSET " +
                  std::to_string(offset)).c_str(), 2);
             json locked_rows = json::array();
@@ -2090,7 +2276,7 @@ private:
         const auto& cipher = unlocked ? *cipher_ : locked;
         json entries = json::array();
         for (const auto& item : ime::unix_service::read_commits(handle.get(), state, cipher, offset, kRecordsPerPage + 1,
-                                                               manual_only)) {
+                                                               manual_only, base_run_id)) {
             json readings = json::array(), manual = json::array();
             for (const auto& reading : item.readings) readings.push_back(reading);
             for (const bool value : item.manual) manual.push_back(value);
@@ -2109,12 +2295,13 @@ private:
                                            [](const json& col){return col[1] == "training_request_json";});
         const auto rows = query_database(db_, requested ?
             "SELECT completed_at,record_count,model_path,optimizer_steps,rank,alpha,dropout,target_modules,id,"
-            "cumulative_record_count,COALESCE(parent_id,0),training_request_json FROM lora_runs ORDER BY id DESC LIMIT 20" :
+            "cumulative_record_count,COALESCE(parent_id,0),training_request_json,COALESCE(base_model_fingerprint,''),base_revision FROM lora_runs ORDER BY id DESC LIMIT 20" :
             extended ?
             "SELECT completed_at,record_count,model_path,optimizer_steps,rank,alpha,dropout,target_modules,id,"
-            "cumulative_record_count,COALESCE(parent_id,0) FROM lora_runs ORDER BY id DESC LIMIT 20" :
+            "cumulative_record_count,COALESCE(parent_id,0),COALESCE(base_model_fingerprint,''),base_revision FROM lora_runs ORDER BY id DESC LIMIT 20" :
             "SELECT completed_at,record_count,model_path,id,SUM(record_count) OVER (ORDER BY id) "
-            "FROM lora_runs ORDER BY id DESC LIMIT 20", requested ? 12 : (extended ? 11 : 5));
+            ",COALESCE(base_model_fingerprint,''),base_revision FROM lora_runs ORDER BY id DESC LIMIT 20",
+            requested ? 14 : (extended ? 13 : 7));
         json entries = json::array();
         for (const auto& row : rows) {
             json entry{{"completed_at",row[0]}, {"record_count",std::stoi(row[1].get<std::string>())},
@@ -2123,8 +2310,10 @@ private:
                        {"rank",extended ? row[4] : json("8")}, {"alpha",extended ? row[5] : json("16")},
                        {"dropout",extended ? row[6] : json("0")},
                        {"target_modules",extended ? row[7] : json("q_proj,v_proj")},
-                       {"id",extended ? row[8] : row[3]},
-                       {"parent_id",extended ? std::stoll(row[10].get<std::string>()) : 0LL}};
+                        {"id",extended ? row[8] : row[3]},
+                        {"parent_id",extended ? std::stoll(row[10].get<std::string>()) : 0LL},
+                        {"base_model_fingerprint", row[extended ? (requested ? 12 : 11) : 5]},
+                        {"base_model_revision", row[extended ? (requested ? 13 : 12) : 6]}};
             // The full request of a run decides the labels and details the
             // history shows; older runs simply carry none.
             if (requested && row[11].is_string()) {
@@ -2142,45 +2331,67 @@ private:
         return entries;
     }
 
-    json runs() const { return run_entries(); }
+    json runs() { (void)base_models(); return run_entries(); }
 
     // The history view adds the Tarjan shortcut of the Windows manager: the
     // common ancestor of the two newest runs when it is a third run.
-    json history() const {
+    json history() {
+        const auto bases = base_models();
         json entries = run_entries();
         json common = nullptr;
         if (entries.size() >= 2) {
-            const auto rows = query_database(db_, "SELECT id,COALESCE(parent_id,0) FROM lora_runs "
-                                                  "ORDER BY id DESC LIMIT 20", 2);
+            std::vector<std::pair<std::string, std::int64_t>> roots;
+            std::int64_t next_root = -2;
+            for (const auto& base : bases)
+                roots.emplace_back(base.value("fingerprint", ""), next_root--);
             std::vector<ime::unix_service::LoraHistoryParent> lineage;
-            lineage.reserve(rows.size());
-            for (const auto& row : rows)
-                lineage.push_back({std::stoll(row[0].get<std::string>()),
-                                   std::stoll(row[1].get<std::string>())});
+            lineage.reserve(entries.size());
+            for (const auto& entry : entries) {
+                auto parent = entry.value("parent_id", 0LL);
+                if (parent == 0) {
+                    const auto fingerprint = entry.value("base_model_fingerprint", "");
+                    const auto root = std::find_if(roots.begin(), roots.end(), [&](const auto& candidate) {
+                        return candidate.first == fingerprint;
+                    });
+                    if (root != roots.end()) parent = root->second;
+                }
+                lineage.push_back({std::stoll(entry.at("id").get<std::string>()), parent});
+            }
             if (lineage.size() >= 2) {
                 const auto ancestor = ime::unix_service::tarjan_lca(lineage, lineage[0].id, lineage[1].id);
-                if (ancestor && *ancestor != lineage[0].id && *ancestor != lineage[1].id) common = *ancestor;
+                if (ancestor && *ancestor != lineage[0].id && *ancestor != lineage[1].id) {
+                    const auto root = std::find_if(roots.begin(), roots.end(), [&](const auto& candidate) {
+                        return candidate.second == *ancestor;
+                    });
+                    common = root == roots.end() ? json(*ancestor) : json("base:" + root->first);
+                }
             }
         }
-        return {{"runs", std::move(entries)}, {"common_ancestor", common}};
+        return {{"runs", std::move(entries)}, {"bases", bases}, {"common_ancestor", common}};
     }
 
     // Counts per review category: pending (with its manually selected subset),
     // trained and excluded. The page shows one category at a time.
-    json pending_count() const {
+    json pending_count(const std::string& requested) {
+        std::string base_selection;
+        if (const auto marker = requested.find("?base="); marker != std::string::npos)
+            base_selection = requested.substr(marker + 6);
+        const auto base_run_id = availability_base_run(base_selection);
         json result{{"count", 0LL}, {"manual", 0LL}, {"trained", 0LL}, {"excluded", 0LL}};
-        const auto rows = query_database(db_,
+        const auto [pending_prefix, pending_predicate] = commit_filter("pending", base_run_id);
+        const auto rows = query_database(db_, (pending_prefix +
             "SELECT COUNT(*),COALESCE(SUM(EXISTS(SELECT 1 FROM readings r WHERE r.commit_id=commits.id "
-            "AND r.manually_selected=1)),0) FROM commits WHERE state='pending'", 2);
+            "AND r.manually_selected=1)),0) FROM commits WHERE " + pending_predicate).c_str(), 2);
         if (!rows.empty()) {
             result["count"] = std::stoll(rows[0][0].get<std::string>());
             result["manual"] = std::stoll(rows[0][1].get<std::string>());
         }
-        for (const auto& row : query_database(db_, "SELECT state,COUNT(*) FROM commits GROUP BY state", 2)) {
-            const auto state = row[0].get<std::string>();
-            if (state == "trained") result["trained"] = std::stoll(row[1].get<std::string>());
-            else if (state == "excluded") result["excluded"] = std::stoll(row[1].get<std::string>());
-        }
+        const auto [trained_prefix, trained_predicate] = commit_filter("trained", base_run_id);
+        const auto trained_rows = query_database(db_, (trained_prefix +
+            "SELECT COUNT(*) FROM commits WHERE " + trained_predicate).c_str(), 1);
+        if (!trained_rows.empty()) result["trained"] = std::stoll(trained_rows[0][0].get<std::string>());
+        const auto excluded = query_database(db_, "SELECT COUNT(*) FROM commits WHERE state='excluded'", 1);
+        if (!excluded.empty()) result["excluded"] = std::stoll(excluded[0][0].get<std::string>());
         return result;
     }
 
@@ -2245,6 +2456,7 @@ private:
         const bool ready = revision.size() == 40 && fs::is_regular_file(assets / revision / "config.json") &&
             fs::is_regular_file(assets / revision / "ime_vocab.json") &&
             fs::is_regular_file(assets / revision / "model.safetensors");
+        const auto bases = base_models();
         json update = nullptr;
         if (job_.kind == "check" && job_.state == "completed") {
             if (data.find("update-available=true") != std::string::npos) update = true;
@@ -2287,6 +2499,8 @@ private:
         return {{"job", {{"kind",job_.kind}, {"state",job_.state}, {"progress",progress}, {"percent",percent},
                          {"records",job_records}, {"log",data}}},
                 {"model_ready", ready}, {"revision", ready ? revision : ""},
+                {"base_model_fingerprint", ready ? cached_base_fingerprint_ : ""},
+                {"base_models", bases},
                 {"model_update_available", update},
                 {"active_model_path", configured_model_path()},
                 {"gpu", ime::unix_service::gpu_vendor()},
@@ -2338,7 +2552,7 @@ private:
         if (request.method == "GET") {
             const json result = request.path == "/api/state" ? state() :
                                 request.path == "/api/protection" ? protection() :
-                                request.path == "/api/pending-count" ? pending_count() :
+                                request.path.starts_with("/api/pending-count") ? pending_count(request.path) :
                                 request.path == "/api/readings" ? readings_table() :
                                 request.path.starts_with("/api/records?") || request.path == "/api/records" ? records(request.path) :
                                 request.path == "/api/runs" ? runs() :
@@ -2350,6 +2564,7 @@ private:
         const auto body = json::parse(request.body);
         if (!body.is_object()) throw std::runtime_error("expected JSON object");
         if (request.path == "/api/fetch") {
+            (void)base_models();  // Preserve the old root before current.revision changes.
             start_job("fetch", {"fetch-model", "--output-dir", assets_root(options_).string()}, {});
         } else if (request.path == "/api/check") {
             start_job("check", {"check-model", "--output-dir", assets_root(options_).string()}, {});
@@ -2378,9 +2593,8 @@ private:
             // The confirmation dialog shows the number of records that will
             // actually be trained, not the raw pending count.
             const auto assets = assets_root(options_);
-            std::ifstream revision_file(assets / "current.revision");
-            std::string revision;
-            revision_file >> revision;
+            const auto selected = selected_base(body.value("base_run_id", std::string{}));
+            const auto& revision = selected.revision;
             if (revision.size() != 40 || revision.find_first_not_of("0123456789abcdef") != std::string::npos ||
                 !fs::is_regular_file(assets / revision / "model.safetensors"))
                 throw std::runtime_error("請先下載基礎模型");
@@ -2404,6 +2618,7 @@ private:
             std::vector<std::string> args{"count-dataset", "--db", db_.string(),
                 "--model-dir", (assets / revision).string(), "--tables-dir", options_.tables.string(),
                 "--max-seq-length", max_length, "--only-manually-selected", manual_only ? "1" : "0"};
+            if (!selected.run_id.empty()) args.insert(args.end(), {"--base-run-id", selected.run_id});
             if (!password.empty()) args.insert(args.end(), {"--password-fd", "3"});
             const auto text = run_cli_capture(args, password);
             // The CLI prints one JSON report as its last line; warnings may
@@ -2422,24 +2637,19 @@ private:
             if (!trainer_ready(options_.trainer, options_.state))
                 throw std::runtime_error("LoRA Trainer 尚未安裝或版本不符，請安裝／更新 LoRA Trainer");
             const bool manual_only = body.value("only_manually_selected", false);
-            if (pending_count().at(manual_only ? "manual" : "count").get<std::int64_t>() == 0)
+            const auto base_selection = body.value("base_run_id", std::string{});
+            if (pending_count("/api/pending-count?base=" + base_selection)
+                    .at(manual_only ? "manual" : "count").get<std::int64_t>() == 0)
                 throw std::runtime_error(manual_only ? "目前沒有曾手動選字的資料" : "目前沒有尚未訓練的資料");
             const bool stabilize_intruders = body.value("stabilize_intruders", false);
             const auto strength = body.value("strength", std::string("advanced"));
             if (!ime::unix_service::lora_strength_from_name(strength))
                 throw std::runtime_error("無效的訓練強度");
-            std::string base_run_id;
-            if (body.contains("base_run_id") && body["base_run_id"].is_string())
-                base_run_id = body["base_run_id"].get<std::string>();
-            if (!base_run_id.empty() &&
-                (base_run_id.size() > 18 || base_run_id.find_first_not_of("0123456789") != std::string::npos))
-                throw std::runtime_error("無效的訓練基底");
+            const auto selected = selected_base(body.value("base_run_id", std::string{}));
             const auto params = body.at("options");
             if (!params.is_object()) throw std::runtime_error("無效的訓練參數");
             const auto assets = assets_root(options_);
-            std::ifstream revision_file(assets / "current.revision");
-            std::string revision;
-            revision_file >> revision;
+            const auto& revision = selected.revision;
             if (revision.size() != 40 || revision.find_first_not_of("0123456789abcdef") != std::string::npos ||
                 !fs::is_regular_file(assets / revision / "model.safetensors"))
                 throw std::runtime_error("請先下載基礎模型");
@@ -2476,7 +2686,8 @@ private:
             // the Windows manager resets them.
             args.insert(args.end(), {"--strength", strength, "--only-manually-selected", manual_only ? "1" : "0",
                                      "--stabilize-intruders", stabilize_intruders ? "1" : "0"});
-            if (!base_run_id.empty()) args.insert(args.end(), {"--base-run-id", base_run_id});
+            if (!selected.run_id.empty()) args.insert(args.end(), {"--base-run-id", selected.run_id});
+            else args.insert(args.end(), {"--base-run-id", "0", "--base-model-fingerprint", selected.fingerprint});
             if (!password.empty()) args.insert(args.end(), {"--password-fd", "3"});
             start_job("train", std::move(args), output, password);
         } else if (request.path == "/api/cancel") {
@@ -2486,12 +2697,24 @@ private:
             update_job();
             if (process_.running()) throw std::runtime_error("請等待目前工作完成");
             const auto id = body.at("id").get<std::string>();
-            if (id == "base") {
-                // Applying the base model clears the configured path, so the
-                // input method uses its installed default model again; the
-                // personalized models are removed like the Windows manager.
-                use_base_model();
-                prune_obsolete_models({});
+            if (id == "base" || id.starts_with("base:")) {
+                const auto selected = selected_base(id == "base" ? std::string{} : id);
+                if (selected.fingerprint == cached_base_fingerprint_) {
+                    // The current root is the model shipped with the service.
+                    use_base_model();
+                    prune_obsolete_models({});
+                } else {
+                    const auto output = runs_root(options_) /
+                        ("base-" + selected.fingerprint) / "base-Q4_K_M.gguf";
+                    if (fs::is_regular_file(output) && fs::file_size(output) > 0) {
+                        use_model(output); prune_obsolete_models(output);
+                    } else {
+                        pending_export_apply_ = output;
+                        start_job("export", {"export-base-model", "--db", db_.string(),
+                            "--model-dir", (assets_root(options_) / selected.revision).string(),
+                            "--output", output.string(), "--base-model-fingerprint", selected.fingerprint}, {});
+                    }
+                }
             } else {
                 if (id.empty() || id.size() > 18 || id.find_first_not_of("0123456789") != std::string::npos)
                     throw std::runtime_error("invalid training run");
@@ -2539,6 +2762,8 @@ private:
     Clock::time_point last_seen_{};
     json readings_cache_ = json::object();
     bool readings_loaded_ = false;
+    bool base_models_scanned_ = false;
+    std::string cached_base_revision_, cached_base_fingerprint_;
     // The manager watches its own binary so a reinstall replaces the running
     // build the same way the memory helper is replaced.
 #ifndef LLAVON_NATIVE_GUI

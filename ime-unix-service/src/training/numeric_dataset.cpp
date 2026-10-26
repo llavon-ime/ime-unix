@@ -208,9 +208,16 @@ std::optional<json> build_row(const Row& row, const Tables& tables, int max_leng
 NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& tables_dir,
                                       const std::filesystem::path& model_config,
                                       const std::filesystem::path& output, int max_sequence_length,
-                                      const std::unordered_set<std::string>* selected_ids,
-                                      const commit_crypto::Decryption* decryption,
-                                      bool manual_only) {
+                                       const std::unordered_set<std::string>* selected_ids,
+                                       const commit_crypto::Decryption* decryption,
+                                       bool manual_only, std::int64_t base_run_id) {
+    if (base_run_id < 0) throw std::invalid_argument("invalid LoRA base run ID");
+    if (base_run_id != 0) {
+        const auto base = sqlite::prepare(db, "SELECT 1 FROM lora_runs WHERE id=?");
+        sqlite3_bind_int64(base.get(), 1, base_run_id);
+        if (sqlite3_step(base.get()) != SQLITE_ROW)
+            throw std::invalid_argument("LoRA base run does not exist");
+    }
     const auto config = load(model_config);
     NumericDataset result;
     result.vocab_size = config.at("vocab_size").get<int>();
@@ -219,10 +226,17 @@ NumericDataset write_numeric_dataset(sqlite3* db, const std::filesystem::path& t
         throw std::invalid_argument("training sequence length exceeds checkpoint configuration");
     const auto tables = load_tables(tables_dir, result.vocab_size, model_config.parent_path() / "ime_vocab.json");
     result.pad_token_id = tables.special.at("<PAD>");
-    auto owned_query = sqlite::prepare(db, "SELECT c.id,c.context,c.answer,r.reading,r.position,r.character,r.manually_selected,"
-                                "c.schema_version FROM commits c JOIN readings r ON r.commit_id=c.id "
-                                "WHERE c.state='pending' ORDER BY c.id,r.position");
+    auto owned_query = sqlite::prepare(db,
+        "WITH RECURSIVE lineage(id,parent_id) AS ("
+        "SELECT id,parent_id FROM lora_runs WHERE id=?1 UNION ALL "
+        "SELECT parent.id,parent.parent_id FROM lora_runs parent JOIN lineage child ON parent.id=child.parent_id) "
+        "SELECT c.id,c.context,c.answer,r.reading,r.position,r.character,r.manually_selected,c.schema_version "
+        "FROM commits c JOIN readings r ON r.commit_id=c.id WHERE c.state='pending' "
+        "AND NOT EXISTS(SELECT 1 FROM legacy_training_unknown legacy WHERE legacy.commit_id=c.id) "
+        "AND NOT EXISTS(SELECT 1 FROM lora_run_commits used JOIN lineage ON lineage.id=used.run_id "
+        "WHERE used.commit_id=c.id) ORDER BY c.id,r.position");
     auto* query = owned_query.get();
+    sqlite3_bind_int64(query, 1, base_run_id);
     // Only rows sealed after the password was configured are trainable; a
     // password-verified caller must never see a plaintext row slip through.
     const bool decrypt = decryption != nullptr && decryption->configured;
