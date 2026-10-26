@@ -105,6 +105,14 @@ jobs:
             exit 1
           fi
 
+      - name: Read release notes from annotated tag
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          python3 scripts/tag-release-notes.py \
+            --tag "${RELEASE_TAG}" \
+            --output "${RUNNER_TEMP}/release-summary.md"
+
       - name: Require Sparkle keys and select Apple signing mode
         id: signing
         env:
@@ -267,6 +275,7 @@ jobs:
           python3 scripts/macos-appcast.py --version "${RELEASE_VERSION}" \
             --package "${RELEASE_PKG}" --signature "${signature}" \
             --repository "${GITHUB_REPOSITORY}" ${previous_args[@]+"${previous_args[@]}"} \
+            --release-notes "${RUNNER_TEMP}/release-summary.md" \
             --output dist/macos/appcast.xml
           "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" dist/macos/appcast.xml
           "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${key_file}" --verify dist/macos/appcast.xml
@@ -279,9 +288,10 @@ jobs:
             "${{ steps.package.outputs.pkg }}"
             "dist/macos/appcast.xml"
           )
-          notes="拉風輸入法 macOS 安裝套件。"
+          release_notes="${RUNNER_TEMP}/macos-release-notes.md"
+          cp "${RUNNER_TEMP}/release-summary.md" "${release_notes}"
+          printf '\n拉風輸入法 macOS 安裝套件。\n' >> "${release_notes}"
           if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
-            notes="拉風輸入法 macOS 安裝套件（Apple Silicon）。"
             install_notes="${RUNNER_TEMP}/macos-install-notes.md"
             cat > "${install_notes}" <<'NOTES'
           ### macOS 安裝與自動更新（Apple Silicon）
@@ -320,13 +330,13 @@ jobs:
             gh release create "${tag}" "${assets[@]}" \
               --verify-tag \
               --title "${tag}" \
-              --notes "${notes}" || \
+              --notes-file "${release_notes}" || \
               gh release upload "${tag}" "${assets[@]}" --clobber
           else
             gh release create "${tag}" "${assets[@]}" \
               --target "${GITHUB_SHA}" \
               --title "${tag}" \
-              --notes "${notes}" || \
+              --notes-file "${release_notes}" || \
               gh release upload "${tag}" "${assets[@]}" --clobber
           fi
           # Publishing and re-stating the tag keeps the release attached to the
@@ -340,20 +350,10 @@ jobs:
           curl --fail --silent --show-error --location --head "${asset_url}" >/dev/null
           gh release view "${tag}" --json isDraft --jq '.isDraft' | grep -qx false
           if [[ "${{ steps.signing.outputs.signed }}" != true ]]; then
-            gh release view "${tag}" --json body --jq '.body // ""' > "${RUNNER_TEMP}/release-notes.md"
-            python3 - "${RUNNER_TEMP}/release-notes.md" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-          path = Path(sys.argv[1])
-          text = path.read_text()
-          text = re.sub(r'(?ms)^### macOS (?:manual installation|installation and updates|安裝與自動更新)[^\n]*\n.*?(?=^###? |\Z)', '', text)
-          path.write_text(text.rstrip() + '\n')
-          PY
-            printf '\n' >> "${RUNNER_TEMP}/release-notes.md"
-            cat "${install_notes}" >> "${RUNNER_TEMP}/release-notes.md"
-            gh release edit "${tag}" --notes-file "${RUNNER_TEMP}/release-notes.md"
+            printf '\n' >> "${release_notes}"
+            cat "${install_notes}" >> "${release_notes}"
           fi
+          gh release edit "${tag}" --notes-file "${release_notes}"
 
       - name: Publish macOS update feed after the package is reachable
         run: |

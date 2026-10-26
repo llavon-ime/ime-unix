@@ -6,7 +6,7 @@ prepare_sparkle
 work="$(mktemp -d "${TMPDIR:-/tmp}/llavon-updates.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
 
-python3 -m unittest discover -s "${ROOT_DIR}/scripts/tests" -p test_macos_appcast.py
+python3 -m unittest discover -s "${ROOT_DIR}/scripts/tests" -p 'test_*.py'
 swiftc -warnings-as-errors -parse-as-library \
     "${ROOT_DIR}/macos/Core/UpdateInstallationGate.swift" \
     "${ROOT_DIR}/macos/Tests/UpdateGateTests.swift" -o "${work}/gate-tests"
@@ -28,10 +28,12 @@ SWIFT
 public_key="$(swift "${work}/test-key.swift" "${work}/private-key")"
 package="${work}/llavon-ime-1.2.3-arm64.pkg"
 printf 'signature test package\n' > "${package}"
+printf '改善自動更新\n\n- 顯示版本摘要\n' > "${work}/release-notes.md"
 signature="$("${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${work}/private-key" -p "${package}")"
 swift "${ROOT_DIR}/macos/scripts/verify-update-signature.swift" "${public_key}" "${signature}" "${package}"
 python3 "${ROOT_DIR}/scripts/macos-appcast.py" --version 1.2.3 --package "${package}" \
-    --signature "${signature}" --repository llavon-ime/ime-unix --output "${work}/appcast.xml"
+    --signature "${signature}" --repository llavon-ime/ime-unix \
+    --release-notes "${work}/release-notes.md" --output "${work}/appcast.xml"
 "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${work}/private-key" "${work}/appcast.xml"
 "${SPARKLE_DIR}/bin/sign_update" --ed-key-file "${work}/private-key" --verify "${work}/appcast.xml"
 printf 'tampered\n' >> "${package}"

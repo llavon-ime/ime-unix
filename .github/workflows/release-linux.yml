@@ -304,6 +304,12 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
+      - name: Read release notes from annotated tag
+        run: |
+          python3 scripts/tag-release-notes.py \
+            --tag "${RELEASE_TAG}" \
+            --output "${RUNNER_TEMP}/release-summary.md"
+
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
@@ -336,6 +342,9 @@ jobs:
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
+          release_notes="${RUNNER_TEMP}/linux-release-notes.md"
+          cp "${RUNNER_TEMP}/release-summary.md" "${release_notes}"
+          printf '\nLlavon IME packages for macOS, Debian/Ubuntu, and Fedora.\n' >> "${release_notes}"
           # A moved tag leaves its release behind as a draft that the by-tag
           # lookups cannot see, and `gh release create` refuses to replace it.
           # Drop those leftovers so the tag gets a release that is reachable
@@ -345,7 +354,7 @@ jobs:
             while read -r id; do gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${id}"; done
           if ! gh release view "${tag}" >/dev/null 2>&1; then
             gh release create "${tag}" --verify-tag --title "${tag}" \
-              --notes "Llavon IME packages for macOS, Debian/Ubuntu, and Fedora." || \
+              --notes-file "${release_notes}" || \
               gh release view "${tag}" >/dev/null
           fi
           gh release upload "${tag}" dist/linux/*.deb dist/linux/*.rpm --clobber
