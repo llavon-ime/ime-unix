@@ -565,10 +565,18 @@ void NativeTests::unifiedSettings() {
         const auto field = item.toObject();
         QVERIFY2(window.findChild<QWidget*>("setting_" + field.value("key").toString()), qPrintable(field.value("key").toString()));
     }
+    groups->setCurrentIndex(0);
+    auto* model = widget<QLineEdit>(window, "setting_model_path");
+    auto* useDefault = widget<QPushButton>(window, "useDefaultModel");
+    QVERIFY(!model->text().isEmpty()); QVERIFY(useDefault->isVisible());
+    click(window, "useDefaultModel");
+    QVERIFY(model->text().isEmpty()); QVERIFY(!useDefault->isVisible());
     auto* count = widget<QSpinBox>(window, "setting_candidate_page_size"); QCOMPARE(count->value(), 7);
     count->setValue(9);
-    window.showPage("history"); window.showPage("settings"); QCOMPARE(count->value(), 9);
-    click(window, "saveSettings"); QCOMPARE(store.load().value("candidate_page_size").toInt(), 9);
+    window.showPage("history"); window.showPage("settings"); QCOMPARE(count->value(), 9); QVERIFY(model->text().isEmpty());
+    click(window, "saveSettings");
+    const auto updated = store.load();
+    QCOMPARE(updated.value("candidate_page_size").toInt(), 9); QVERIFY(updated.value("model_path").toString().isEmpty());
     groups->setCurrentIndex(1); capture(window, "12-unified-settings");
     groups->setCurrentIndex(0); capture(window, "13-runtime-settings");
     window.showPage("phrases");

@@ -243,11 +243,24 @@ void SettingsPage::buildGroup(const QString& group) {
         if (key == "model_path") {
             auto* row = new QWidget; auto* horizontal = new QHBoxLayout(row); horizontal->setContentsMargins(0, 0, 0, 0);
             auto* browse = new QPushButton(QStringLiteral("選擇檔案…")); browse->setMinimumHeight(34);
-            horizontal->addWidget(input, 1); horizontal->addWidget(browse);
+            auto* useDefault = new QPushButton(QStringLiteral("使用預設")); useDefault->setObjectName("useDefaultModel");
+            useDefault->setMinimumHeight(34);
+            useDefault->setToolTip(QStringLiteral("清除自訂模型路徑；按「儲存並套用」後改用隨輸入法安裝的模型。"));
+            horizontal->addWidget(input, 1); horizontal->addWidget(browse); horizontal->addWidget(useDefault);
             connect(browse, &QPushButton::clicked, this, [this, input] {
                 const auto path = QFileDialog::getOpenFileName(this, QStringLiteral("選擇推論模型"), {}, "GGUF (*.gguf);;All files (*)");
                 if (!path.isEmpty()) qobject_cast<QLineEdit*>(input)->setText(path);
             });
+            const auto updateDefaultButton = [input, useDefault] {
+                useDefault->setVisible(!qobject_cast<QLineEdit*>(input)->text().trimmed().isEmpty());
+            };
+            connect(qobject_cast<QLineEdit*>(input), &QLineEdit::textChanged, useDefault,
+                    [updateDefaultButton](const QString&) { updateDefaultButton(); });
+            connect(useDefault, &QPushButton::clicked, this, [this, input] {
+                qobject_cast<QLineEdit*>(input)->clear();
+                showStatus(QStringLiteral("將改用安裝的預設模型；請按「儲存並套用」完成。"));
+            });
+            updateDefaultButton();
             rowLayout->addWidget(title); rowLayout->addWidget(row);
         } else {
             auto* horizontal = new QHBoxLayout; horizontal->setSpacing(16);
