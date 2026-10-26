@@ -94,8 +94,12 @@ jobs:
       - name: Verify release source
         run: |
           set -euo pipefail
+          # checkout creates the triggering tag as a commit-direct ref. Fetch
+          # the remote tag object again so annotated release notes remain
+          # available to tag-release-notes.py.
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = tag
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            git fetch origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
             git checkout --detach "${RELEASE_TAG}^{commit}"
           fi
           if [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" != "$(git rev-parse HEAD)" ]] || \
@@ -303,6 +307,8 @@ jobs:
 
       - name: Read release notes from annotated tag
         run: |
+          git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = tag
           python3 scripts/tag-release-notes.py \
             --tag "${RELEASE_TAG}" \
             --output "${RUNNER_TEMP}/release-summary.md"
