@@ -35,10 +35,11 @@ static int register_app(const char *app_path) {
 }
 
 // On macOS 15 and earlier the enabled input sources live in the user's
-// com.apple.HIToolbox preferences, and writing the parent bundle entry there
-// is what makes a freshly installed third-party input source show up at the
-// next login: TISEnableInputSource returns noErr for third-party input
-// methods but writes nothing, so it cannot be used for this.
+// com.apple.HIToolbox preferences. Write the selectable .Default input mode,
+// not the non-selectable parent input method. Enabling both makes macOS 26's
+// Text Input editor combine their identical names as "Llavon, Llavon" after
+// the old preferences are migrated. TISEnableInputSource returns noErr for
+// third-party input methods but writes nothing, so it cannot be used here.
 //
 // macOS 26 moved the enabled third-party input sources to
 // com.apple.inputsources, a store owned by the system's input source service.
@@ -59,62 +60,108 @@ static int enable_input_source(const char *bundle_id) {
         fprintf(stderr, "invalid bundle id: %s\n", bundle_id);
         return 1;
     }
+    CFStringRef mode = CFStringCreateWithFormat(NULL, NULL, CFSTR("%@.Default"), bundle);
+    if (mode == NULL) {
+        CFRelease(bundle);
+        fprintf(stderr, "failed to build the default input mode id\n");
+        return 1;
+    }
 
     CFStringRef domain = CFSTR("com.apple.HIToolbox");
     CFStringRef key = CFSTR("AppleEnabledInputSources");
     CFStringRef bundle_key = CFSTR("Bundle ID");
-    CFArrayRef existing =
-        (CFArrayRef)CFPreferencesCopyValue(key, domain, kCFPreferencesCurrentUser,
-                                           kCFPreferencesAnyHost);
+    CFStringRef mode_key = CFSTR("Input Mode");
+    CFTypeRef existing_value =
+        CFPreferencesCopyValue(key, domain, kCFPreferencesCurrentUser,
+                               kCFPreferencesAnyHost);
+    if (existing_value != NULL && CFGetTypeID(existing_value) != CFArrayGetTypeID()) {
+        CFRelease(existing_value);
+        CFRelease(mode);
+        CFRelease(bundle);
+        fprintf(stderr, "AppleEnabledInputSources is not an array\n");
+        return 1;
+    }
+    CFArrayRef existing = (CFArrayRef)existing_value;
+    const CFIndex count = existing != NULL ? CFArrayGetCount(existing) : 0;
+    CFMutableArrayRef updated = CFArrayCreateMutable(NULL, count + 1, &kCFTypeArrayCallBacks);
+    if (updated == NULL) {
+        if (existing != NULL) CFRelease(existing);
+        CFRelease(mode);
+        CFRelease(bundle);
+        fprintf(stderr, "failed to build the enabled input source list\n");
+        return 1;
+    }
 
     bool present = false;
-    CFIndex count = existing != NULL ? CFArrayGetCount(existing) : 0;
-    for (CFIndex i = 0; i < count && !present; ++i) {
+    bool changed = false;
+    for (CFIndex i = 0; i < count; ++i) {
         CFDictionaryRef entry = (CFDictionaryRef)CFArrayGetValueAtIndex(existing, i);
         if (entry == NULL || CFGetTypeID(entry) != CFDictionaryGetTypeID()) {
+            if (entry != NULL) CFArrayAppendValue(updated, entry);
             continue;
         }
         CFStringRef entry_bundle = (CFStringRef)CFDictionaryGetValue(entry, bundle_key);
-        if (entry_bundle != NULL &&
-            CFStringCompare(entry_bundle, bundle, 0) == kCFCompareEqualTo) {
-            present = true;
+        const bool matching_bundle = entry_bundle != NULL &&
+            CFGetTypeID(entry_bundle) == CFStringGetTypeID() &&
+            CFStringCompare(entry_bundle, bundle, 0) == kCFCompareEqualTo;
+        if (!matching_bundle) {
+            CFArrayAppendValue(updated, entry);
+            continue;
         }
+
+        CFStringRef entry_mode = (CFStringRef)CFDictionaryGetValue(entry, mode_key);
+        if (entry_mode == NULL || CFGetTypeID(entry_mode) != CFStringGetTypeID()) {
+            changed = true;
+            continue;
+        }
+
+        const bool default_mode = CFStringCompare(entry_mode, mode, 0) == kCFCompareEqualTo;
+        if (default_mode && present) {
+            changed = true;
+            continue;
+        }
+        if (default_mode) present = true;
+        CFArrayAppendValue(updated, entry);
     }
 
     if (!present) {
-        CFMutableArrayRef updated =
-            existing != NULL ? CFArrayCreateMutableCopy(NULL, count + 1, existing)
-                             : CFArrayCreateMutable(NULL, 1, &kCFTypeArrayCallBacks);
-        if (updated == NULL) {
-            if (existing != NULL) CFRelease(existing);
-            CFRelease(bundle);
-            fprintf(stderr, "failed to build the enabled input source list\n");
-            return 1;
-        }
-        const void *entry_keys[] = { bundle_key, CFSTR("InputSourceKind") };
-        const void *entry_values[] = { bundle, CFSTR("Keyboard Input Method") };
-        CFDictionaryRef entry = CFDictionaryCreate(NULL, entry_keys, entry_values, 2,
+        const void *entry_keys[] = { bundle_key, mode_key, CFSTR("InputSourceKind") };
+        const void *entry_values[] = { bundle, mode, CFSTR("Input Mode") };
+        CFDictionaryRef entry = CFDictionaryCreate(NULL, entry_keys, entry_values, 3,
                                                    &kCFTypeDictionaryKeyCallBacks,
                                                    &kCFTypeDictionaryValueCallBacks);
-        if (entry != NULL) {
-            CFArrayAppendValue(updated, entry);
-            CFRelease(entry);
+        if (entry == NULL) {
+            CFRelease(updated);
+            if (existing != NULL) CFRelease(existing);
+            CFRelease(mode);
+            CFRelease(bundle);
+            fprintf(stderr, "failed to build the default input mode entry\n");
+            return 1;
         }
+        CFArrayAppendValue(updated, entry);
+        CFRelease(entry);
+        changed = true;
+    }
+
+    if (changed) {
         CFPreferencesSetValue(key, updated, domain, kCFPreferencesCurrentUser,
                               kCFPreferencesAnyHost);
-        CFRelease(updated);
         if (!CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)) {
+            CFRelease(updated);
             if (existing != NULL) CFRelease(existing);
+            CFRelease(mode);
             CFRelease(bundle);
             fprintf(stderr, "could not write AppleEnabledInputSources\n");
             return 1;
         }
     }
+    CFRelease(updated);
     if (existing != NULL) {
         CFRelease(existing);
     }
 
-    printf("%s enabled=1 %s\n", bundle_id, present ? "present" : "added");
+    printf("%s.Default enabled=1 %s\n", bundle_id, present ? "present" : "added");
+    CFRelease(mode);
     CFRelease(bundle);
     return 0;
 }
