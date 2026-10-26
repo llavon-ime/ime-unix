@@ -48,7 +48,8 @@ public:
         painter->drawRoundedRect(QRectF(0, 0, nodeWidth, nodeHeight), 9, 9);
         auto font = painter->font(); font.setPixelSize(11); font.setWeight(QFont::Normal); painter->setFont(font);
         painter->setPen(c.secondary);
-        painter->drawText(16, 25, data(0) == "base" ? QStringLiteral("原始版本") : "LoRA · " + data(0).toString());
+        const bool base = data(0).toString() == "base" || data(0).toString().startsWith("base:");
+        painter->drawText(16, 25, base ? QStringLiteral("原始版本") : "LoRA · " + data(0).toString());
         if (active_ || latest_) {
             painter->setPen(active_ ? c.accent : c.secondary);
             painter->drawText(QRectF(115, 10, 98, 22), Qt::AlignRight | Qt::AlignVCenter,
@@ -111,8 +112,8 @@ void HistoryGraph::selectRun(const QString& id) {
     }
 }
 
-void HistoryGraph::setRuns(const QJsonArray& runs, const QString& activeModel) {
-    if (!nodes_.isEmpty() && runs == runs_ && activeModel == activeModel_) return;
+void HistoryGraph::setRuns(const QJsonArray& runs, const QJsonArray& bases, const QString& activeModel) {
+    if (!nodes_.isEmpty() && runs == runs_ && bases == bases_ && activeModel == activeModel_) return;
     const bool initial = nodes_.isEmpty();
     const auto selected = selectedId();
     const auto scrollX = horizontalScrollBar()->value();
@@ -121,10 +122,24 @@ void HistoryGraph::setRuns(const QJsonArray& runs, const QString& activeModel) {
     for (auto it = nodes_.cbegin(); it != nodes_.cend(); ++it) positions.insert(it.key(), it.value()->pos());
     rebuilding_ = true;
     scene()->clear(); nodes_.clear(); parents_.clear(); edges_.clear();
-    runs_ = runs; activeModel_ = activeModel;
-    auto* root = new HistoryNode("base", "Base model", QStringLiteral("原始模型 · 所有分支的起點"),
-                                 QStringLiteral("選取可回復預設模型"), activeModel.isEmpty(), false, [this] { updateEdges(); });
-    scene()->addItem(root); nodes_.insert("base", root);
+    runs_ = runs; bases_ = bases; activeModel_ = activeModel;
+    if (bases.isEmpty()) {
+        auto* root = new HistoryNode("base", "Base model", QStringLiteral("原始模型 · 所有分支的起點"),
+            QStringLiteral("選取可回復預設模型"), activeModel.isEmpty(), false, [this] { updateEdges(); });
+        scene()->addItem(root); nodes_.insert("base", root);
+    } else for (const auto value : bases) {
+        const auto base = value.toObject();
+        const auto fingerprint = base.value("fingerprint").toString();
+        const auto id = base.value("id").toString("base:" + fingerprint);
+        const auto revision = base.value("revision").toString();
+        const bool active = activeModel.isEmpty() ? base.value("current").toBool()
+            : base.value("model_path").toString() == activeModel;
+        auto* root = new HistoryNode(id, QStringLiteral("Base model %1").arg(fingerprint.left(8)),
+            QStringLiteral("原始模型 · %1").arg(revision.left(12)),
+            base.value("current").toBool() ? QStringLiteral("目前下載的基底") : QStringLiteral("可重新匯出並套用"),
+            active, false, [this] { updateEdges(); });
+        scene()->addItem(root); nodes_.insert(id, root);
+    }
     for (const auto value : runs) {
         const auto run = value.toObject(); const auto id = valueText(run.value("id"));
         if (id == "base" || nodes_.contains(id)) continue;
@@ -139,15 +154,20 @@ void HistoryGraph::setRuns(const QJsonArray& runs, const QString& activeModel) {
             value == runs.first(), [this] { updateEdges(); });
         scene()->addItem(node); nodes_.insert(id, node);
         auto parent = valueText(run.value("parent_id"));
-        parents_.insert(id, parent == "0" ? "base" : parent);
+        const auto root = "base:" + run.value("base_model_fingerprint").toString();
+        parents_.insert(id, parent == "0" ? (nodes_.contains(root) ? root : "base") : parent);
     }
     // Avoid invalid ancestry creating cycles or detached nodes.
+    QString fallbackRoot = "base";
+    if (!nodes_.contains(fallbackRoot))
+        for (auto it = nodes_.cbegin(); it != nodes_.cend(); ++it)
+            if (it.key().startsWith("base:")) { fallbackRoot = it.key(); break; }
     for (auto it = parents_.begin(); it != parents_.end(); ++it) {
         QSet<QString> visited{it.key()}; auto ancestor = it.value();
-        while (ancestor != "base" && nodes_.contains(ancestor) && !visited.contains(ancestor)) {
-            visited.insert(ancestor); ancestor = parents_.value(ancestor, "base");
+        while (!ancestor.startsWith("base") && nodes_.contains(ancestor) && !visited.contains(ancestor)) {
+            visited.insert(ancestor); ancestor = parents_.value(ancestor, fallbackRoot);
         }
-        if (!nodes_.contains(it.value()) || visited.contains(ancestor)) it.value() = "base";
+        if (!nodes_.contains(it.value()) || visited.contains(ancestor)) it.value() = fallbackRoot;
     }
     for (qsizetype index = 0; index < parents_.size(); ++index) {
         auto* edge = scene()->addPath({}, QPen(appearance().secondary, 1.5));
@@ -158,7 +178,15 @@ void HistoryGraph::setRuns(const QJsonArray& runs, const QString& activeModel) {
     for (auto it = positions.cbegin(); it != positions.cend(); ++it)
         if (nodes_.contains(it.key())) nodes_[it.key()]->setPos(it.value());
     updateEdges();
-    if (initial) selectRun("base");
+    if (initial && !bases.isEmpty()) {
+        auto selectedBase = bases.first().toObject().value("id").toString();
+        for (const auto value : bases) {
+            const auto base = value.toObject();
+            if (base.value("current").toBool()) { selectedBase = base.value("id").toString(); break; }
+        }
+        selectRun(selectedBase);
+    }
+    else if (initial) selectRun("base");
     else if (nodes_.contains(selected)) selectRun(selected);
     else emit runSelected({});
     if (initial) resetView();
@@ -184,7 +212,11 @@ void HistoryGraph::arrangeNodes() {
         nodes_[id]->setPos(x, depth * 194);
         return x;
     };
-    if (nodes_.contains("base")) place("base", 0);
+    QStringList roots;
+    for (auto it = nodes_.cbegin(); it != nodes_.cend(); ++it)
+        if (it.key() == "base" || it.key().startsWith("base:")) roots.append(it.key());
+    std::sort(roots.begin(), roots.end());
+    for (const auto& root : roots) place(root, 0);
     updateEdges();
 }
 

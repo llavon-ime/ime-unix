@@ -1,4 +1,5 @@
 #include "commit_store.hpp"
+#include "base_model_fingerprint.hpp"
 #include "libtorch_cache.hpp"
 #include "lora_presets.hpp"
 #include "numeric_dataset.hpp"
@@ -671,43 +672,79 @@ void ensure_run_history(Database& db) {    std::set<std::string> columns;
              {"rank", "INTEGER NOT NULL DEFAULT 8"}, {"alpha", "REAL NOT NULL DEFAULT 16"},
              {"dropout", "REAL NOT NULL DEFAULT 0"}, {"target_modules", "TEXT NOT NULL DEFAULT 'q_proj,v_proj'"},
              {"optimizer_steps", "INTEGER NOT NULL DEFAULT 0"}, {"parent_id", "INTEGER"},
+             {"base_model_fingerprint", "TEXT"},
              {"cumulative_record_count", "INTEGER NOT NULL DEFAULT 0"},
              {"training_request_json", "TEXT"}}) {
         if (!columns.contains(name)) db.exec(("ALTER TABLE lora_runs ADD COLUMN " + name + " " + definition).c_str());
     }
+    db.exec("CREATE TABLE IF NOT EXISTS lora_base_models (fingerprint TEXT PRIMARY KEY "
+            "CHECK(length(fingerprint)=64),revision TEXT NOT NULL,model_path TEXT NOT NULL)");
+    db.exec("CREATE TABLE IF NOT EXISTS lora_run_commits (run_id INTEGER NOT NULL REFERENCES lora_runs(id),"
+            "commit_id TEXT NOT NULL REFERENCES commits(id) ON DELETE CASCADE,"
+            "PRIMARY KEY(run_id,commit_id)) WITHOUT ROWID");
 }
 
 void publish_run(Database& db, const ime::unix_service::NumericDataset& dataset,
-                 const fs::path& adapter, const fs::path& model, const std::string& revision,
-                 int rank, double alpha, double dropout, const std::string& modules,
+                  const fs::path& adapter, const fs::path& model, const std::string& revision,
+                  const std::string& fingerprint,
+                  int rank, double alpha, double dropout, const std::string& modules,
                  std::int64_t parent_id, std::int64_t base_cumulative, const std::string& request_json) {
     int steps = 0;
     if (fs::is_regular_file(adapter / "training_state.json"))
         steps = nlohmann::json::parse(std::ifstream(adapter / "training_state.json")).at("step").get<int>();
     db.exec("BEGIN IMMEDIATE");
     try {
-        Statement update(db.get(), "UPDATE commits SET state='trained' WHERE id=? AND state='pending'");
+        Statement eligible(db.get(),
+            "WITH RECURSIVE lineage(id,parent_id) AS ("
+            "SELECT id,parent_id FROM lora_runs WHERE id=?1 UNION ALL "
+            "SELECT parent.id,parent.parent_id FROM lora_runs parent JOIN lineage child ON parent.id=child.parent_id) "
+            "SELECT 1 FROM commits WHERE id=?2 AND state='pending' "
+            "AND NOT EXISTS(SELECT 1 FROM legacy_training_unknown legacy WHERE legacy.commit_id=commits.id) "
+            "AND NOT EXISTS(SELECT 1 FROM lora_run_commits used JOIN lineage ON lineage.id=used.run_id "
+            "WHERE used.commit_id=commits.id)");
         for (const auto& id : dataset.included_ids) {
-            sqlite3_reset(update.get()); sqlite3_clear_bindings(update.get());
-            update.bind(1, id);
-            (void)update.next();
-            if (sqlite3_changes(db.get()) != 1) throw std::runtime_error("training records changed during export");
+            sqlite3_bind_int64(eligible.get(), 1, parent_id);
+            eligible.bind(2, id);
+            if (eligible.next() != SQLITE_ROW)
+                throw std::runtime_error("training records changed during export");
+            sqlite3_reset(eligible.get());
+            sqlite3_clear_bindings(eligible.get());
         }
-        Statement insert(db.get(), "INSERT INTO lora_runs(base_revision,adapter_path,model_path,record_count,rank,alpha,dropout,target_modules,optimizer_steps,parent_id,cumulative_record_count,training_request_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
-        insert.bind(1, revision); insert.bind(2, adapter.string()); insert.bind(3, model.string());
-        sqlite3_bind_int64(insert.get(), 4, static_cast<sqlite3_int64>(dataset.included_ids.size()));
-        sqlite3_bind_int(insert.get(), 5, rank);
-        sqlite3_bind_double(insert.get(), 6, alpha);
-        sqlite3_bind_double(insert.get(), 7, dropout);
-        insert.bind(8, modules);
-        sqlite3_bind_int(insert.get(), 9, steps);
+        if (parent_id) {
+            Statement parent(db.get(), "SELECT COALESCE(base_model_fingerprint,''),base_revision,"
+                                       "COALESCE(cumulative_record_count,0) FROM lora_runs WHERE id=?");
+            sqlite3_bind_int64(parent.get(), 1, parent_id);
+            if (parent.next() != SQLITE_ROW || parent.text(0) != fingerprint || parent.text(1) != revision ||
+                sqlite3_column_int64(parent.get(), 2) != base_cumulative)
+                throw std::runtime_error("training base changed during export");
+        }
+        Statement catalog(db.get(), "INSERT INTO lora_base_models(fingerprint,revision,model_path) VALUES (?,?,?) "
+                                    "ON CONFLICT(fingerprint) DO UPDATE SET revision=excluded.revision");
+        catalog.bind(1, fingerprint); catalog.bind(2, revision); catalog.bind(3, std::string{}); (void)catalog.next();
+        Statement insert(db.get(), "INSERT INTO lora_runs(base_revision,base_model_fingerprint,adapter_path,model_path,record_count,rank,alpha,dropout,target_modules,optimizer_steps,parent_id,cumulative_record_count,training_request_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
+        insert.bind(1, revision); insert.bind(2, fingerprint); insert.bind(3, adapter.string()); insert.bind(4, model.string());
+        sqlite3_bind_int64(insert.get(), 5, static_cast<sqlite3_int64>(dataset.included_ids.size()));
+        sqlite3_bind_int(insert.get(), 6, rank);
+        sqlite3_bind_double(insert.get(), 7, alpha);
+        sqlite3_bind_double(insert.get(), 8, dropout);
+        insert.bind(9, modules);
+        sqlite3_bind_int(insert.get(), 10, steps);
         // A run that branches from an earlier adapter records that parent; a
         // run from the base model keeps no parent at all.
-        if (parent_id) sqlite3_bind_int64(insert.get(), 10, parent_id);
-        else sqlite3_bind_null(insert.get(), 10);
-        sqlite3_bind_int64(insert.get(), 11, base_cumulative + static_cast<sqlite3_int64>(dataset.included_ids.size()));
-        insert.bind(12, request_json);
+        if (parent_id) sqlite3_bind_int64(insert.get(), 11, parent_id);
+        else sqlite3_bind_null(insert.get(), 11);
+        sqlite3_bind_int64(insert.get(), 12, base_cumulative + static_cast<sqlite3_int64>(dataset.included_ids.size()));
+        insert.bind(13, request_json);
         (void)insert.next();
+        const auto run_id = sqlite3_last_insert_rowid(db.get());
+        Statement used(db.get(), "INSERT INTO lora_run_commits(run_id,commit_id) VALUES (?,?)");
+        for (const auto& id : dataset.included_ids) {
+            sqlite3_bind_int64(used.get(), 1, run_id);
+            used.bind(2, id);
+            (void)used.next();
+            sqlite3_reset(used.get());
+            sqlite3_clear_bindings(used.get());
+        }
         db.exec("COMMIT");
     } catch (...) { sqlite3_exec(db.get(), "ROLLBACK", nullptr, nullptr, nullptr); throw; }
 }
@@ -794,6 +831,7 @@ TrainingParameters resolve_parameters(const Options& options, ime::unix_service:
 struct TrainingBase {
     std::int64_t id = 0;
     std::string revision;
+    std::string fingerprint;
     int rank = 0;
     double alpha = 0;
     double dropout = 0;
@@ -804,13 +842,13 @@ struct TrainingBase {
 
 TrainingBase resolve_training_base(Database& db, const Options& options) {
     TrainingBase base;
-    const bool explicit_choice = options.contains("--base-run-id");
+    const bool explicit_choice = options.contains("--base-run-id") || options.contains("--base-model-fingerprint");
     const std::int64_t requested = integer64_option(options, "--base-run-id", 0, 0,
                                                     std::numeric_limits<std::int64_t>::max());
     Statement query(db.get(), explicit_choice
-        ? "SELECT id,base_revision,rank,alpha,dropout,target_modules,adapter_path,"
+        ? "SELECT id,base_revision,COALESCE(base_model_fingerprint,''),rank,alpha,dropout,target_modules,adapter_path,"
           "COALESCE(cumulative_record_count,0) FROM lora_runs WHERE id=?"
-        : "SELECT id,base_revision,rank,alpha,dropout,target_modules,adapter_path,"
+        : "SELECT id,base_revision,COALESCE(base_model_fingerprint,''),rank,alpha,dropout,target_modules,adapter_path,"
           "COALESCE(cumulative_record_count,0) FROM lora_runs ORDER BY id DESC LIMIT 1");
     if (explicit_choice) sqlite3_bind_int64(query.get(), 1, requested);
     if (query.next() != SQLITE_ROW) {
@@ -821,12 +859,13 @@ TrainingBase resolve_training_base(Database& db, const Options& options) {
     }
     base.id = sqlite3_column_int64(query.get(), 0);
     base.revision = query.text(1);
-    base.rank = sqlite3_column_int(query.get(), 2);
-    base.alpha = sqlite3_column_double(query.get(), 3);
-    base.dropout = sqlite3_column_double(query.get(), 4);
-    base.modules = query.text(5);
-    base.adapter_path = query.text(6);
-    base.cumulative = sqlite3_column_int64(query.get(), 7);
+    base.fingerprint = query.text(2);
+    base.rank = sqlite3_column_int(query.get(), 3);
+    base.alpha = sqlite3_column_double(query.get(), 4);
+    base.dropout = sqlite3_column_double(query.get(), 5);
+    base.modules = query.text(6);
+    base.adapter_path = query.text(7);
+    base.cumulative = sqlite3_column_int64(query.get(), 8);
     return base;
 }
 
@@ -848,15 +887,38 @@ fs::path verified_trainer(const fs::path& db_path) {
 // intermediate f16 file is removed again; only the adapter is kept.
 void export_model(const fs::path& trainer, const fs::path& model_dir, const fs::path& adapter,
                   const fs::path& gguf) {
+    fs::create_directories(gguf.parent_path());
     auto f16 = gguf;
-    f16.replace_filename("personalized-f16.gguf");
-    run(trainer, {"export-gguf", "--model-config", (model_dir / "config.json").string(),
-                  "--model", model_dir.string(), "--vocab-file", (model_dir / "ime_vocab.json").string(),
-                  "--adapter", adapter.string(), "--outfile", f16.string(), "--outtype", "f16",
-                  "--quantize", "Q4_K_M", "--quantized-outfile", gguf.string(), "--force"});
-    if (!fs::is_regular_file(gguf) || fs::file_size(gguf) == 0)
-        throw std::runtime_error("trainer did not produce a GGUF model");
-    fs::remove(f16);
+    f16.replace_filename("restored-personalized-f16.gguf");
+    auto temporary = gguf;
+    temporary += ".restoring";
+    std::error_code ignored;
+    fs::remove(temporary, ignored);
+    std::vector<std::string> arguments{"export-gguf", "--model-config", (model_dir / "config.json").string(),
+        "--model", model_dir.string(), "--vocab-file", (model_dir / "ime_vocab.json").string()};
+    if (!adapter.empty()) arguments.insert(arguments.end(), {"--adapter", adapter.string()});
+    arguments.insert(arguments.end(), {"--outfile", f16.string(), "--outtype", "f16",
+        "--quantize", "Q4_K_M", "--quantized-outfile", temporary.string(), "--force"});
+    try {
+        run(trainer, arguments);
+        if (!fs::is_regular_file(temporary) || fs::file_size(temporary) == 0)
+            throw std::runtime_error("trainer did not produce a GGUF model");
+        fs::rename(temporary, gguf);
+        fs::remove(f16, ignored);
+    } catch (...) {
+        fs::remove(temporary, ignored);
+        fs::remove(f16, ignored);
+        throw;
+    }
+}
+
+void export_base_model(const fs::path& model_dir, const fs::path& output,
+                       const fs::path& db_path, std::string_view expected_fingerprint) {
+    const auto fingerprint = ime::unix_service::compute_base_model_fingerprint(model_dir);
+    if (!expected_fingerprint.empty() && fingerprint != expected_fingerprint)
+        throw std::runtime_error("selected base model fingerprint does not match its files");
+    export_model(verified_trainer(db_path), model_dir, {}, output);
+    std::cout << "model=" << output << '\n';
 }
 
 // Re-exports the GGUF of a finished run from its retained adapter, mirroring
@@ -864,12 +926,14 @@ void export_model(const fs::path& trainer, const fs::path& model_dir, const fs::
 void export_run_model(Database& db, std::int64_t run_id, const fs::path& model_dir,
                       const fs::path& db_path) {
     ensure_run_history(db);
-    Statement query(db.get(), "SELECT base_revision,adapter_path,model_path FROM lora_runs WHERE id=?");
+    Statement query(db.get(), "SELECT base_revision,adapter_path,model_path,COALESCE(base_model_fingerprint,'') "
+                              "FROM lora_runs WHERE id=?");
     sqlite3_bind_int64(query.get(), 1, run_id);
     if (query.next() != SQLITE_ROW) throw std::runtime_error("training run not found");
     const std::string revision = query.text(0);
     const fs::path adapter = query.text(1);
     const fs::path gguf = query.text(2);
+    const std::string fingerprint = query.text(3);
     if (!fs::is_regular_file(adapter / "adapter_model.safetensors"))
         throw std::runtime_error("run adapter is missing");
     const fs::path training_model_dir = model_dir.parent_path() / revision;
@@ -877,6 +941,8 @@ void export_run_model(Database& db, std::int64_t run_id, const fs::path& model_d
         !fs::is_regular_file(training_model_dir / "ime_vocab.json") ||
         !fs::is_regular_file(training_model_dir / "model.safetensors"))
         throw std::runtime_error("run's base checkpoint is missing");
+    if (!fingerprint.empty() && ime::unix_service::compute_base_model_fingerprint(training_model_dir) != fingerprint)
+        throw std::runtime_error("run's base checkpoint fingerprint changed");
     const auto trainer = verified_trainer(db_path);
     export_model(trainer, training_model_dir, adapter, gguf);
     std::cout << "model=" << gguf << '\n';
@@ -894,7 +960,8 @@ void count_dataset(sqlite3* db, const Options& options, const fs::path& model_di
         ("llavon-ime-count-" + std::to_string(::getpid()) + ".jsonl");
     const auto decryption = cipher.decryption();
     const auto dataset = ime::unix_service::write_numeric_dataset(
-        db, tables, model_dir / "config.json", temporary, max_length, nullptr, &decryption, manual_only);
+        db, tables, model_dir / "config.json", temporary, max_length, nullptr, &decryption, manual_only,
+        integer64_option(options, "--base-run-id", 0, 0, std::numeric_limits<std::int64_t>::max()));
     fs::remove(temporary);
     // The skipped ids let the manager mark records that will never train; the
     // list is capped so a huge pending set cannot flood the page.
@@ -952,6 +1019,26 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
             !fs::is_regular_file(training_model_dir / "model.safetensors"))
             throw std::runtime_error("base run's base checkpoint is missing");
     }
+    const auto fingerprint = ime::unix_service::compute_base_model_fingerprint(training_model_dir);
+    if (base.id != 0 && !base.fingerprint.empty() && fingerprint != base.fingerprint)
+        throw std::runtime_error("base run's base checkpoint fingerprint changed");
+    if (base.id != 0 && base.fingerprint.empty()) {
+        Statement migrate(db.get(), "UPDATE lora_runs SET base_model_fingerprint=? "
+                                    "WHERE id=? AND base_revision=? AND "
+                                    "(base_model_fingerprint IS NULL OR base_model_fingerprint='')");
+        migrate.bind(1, fingerprint);
+        sqlite3_bind_int64(migrate.get(), 2, base.id);
+        migrate.bind(3, base.revision);
+        (void)migrate.next();
+        if (sqlite3_changes(db.get()) != 1)
+            throw std::runtime_error("base run changed while its checkpoint was verified");
+        base.fingerprint = fingerprint;
+    }
+    const auto requested_fingerprint = optional(options, "--base-model-fingerprint", "");
+    if (!requested_fingerprint.empty() &&
+        (!ime::unix_service::valid_base_model_fingerprint(requested_fingerprint) ||
+         requested_fingerprint != fingerprint))
+        throw std::runtime_error("selected base model fingerprint does not match its files");
     const bool manual_only = integer_option(options, "--only-manually-selected", 0, 0, 1) != 0;
     const bool stabilize = integer_option(options, "--stabilize-intruders", 0, 0, 1) != 0;
     std::unordered_set<std::string> selected;
@@ -999,7 +1086,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
     const auto decryption = cipher.decryption();
     const auto dataset = ime::unix_service::write_numeric_dataset(db.get(), tables, training_model_dir / "config.json",
         dataset_path, parameters.max_length, options.contains("--selected-ids") ? &selected : nullptr, &decryption,
-        manual_only);
+        manual_only, base.id);
     if (dataset.included_ids.empty()) throw std::runtime_error("no trainable pending Bopomofo records");
     std::cout << "trainable=" << dataset.included_ids.size() << " skipped=" << dataset.skipped << std::endl;
     // The manager keeps the full parameter set of every run so the history
@@ -1011,6 +1098,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         {"stabilize_intruders", stabilize},
         {"parent_id", base.id},
         {"base_model_revision", revision},
+        {"base_model_fingerprint", fingerprint},
         {"trainer_commit", LLAVON_IME_LORA_PINNED_COMMIT},
         {"trainer_version", trainer_version.value("version", "")},
         {"record_count", dataset.included_ids.size()},
@@ -1087,7 +1175,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
         published_rank = final_config.value("r", parameters.rank);
         published_alpha = final_config.value("lora_alpha", parameters.alpha);
     } catch (...) {}
-    publish_run(db, dataset, adapter, gguf, revision, published_rank, published_alpha, parameters.dropout,
+    publish_run(db, dataset, adapter, gguf, revision, fingerprint, published_rank, published_alpha, parameters.dropout,
                 parameters.modules, base.id, base.cumulative, request.dump());
     if (stabilize) {
         std::error_code ignored;
@@ -1101,7 +1189,7 @@ void train(Database& db, const Options& options, const fs::path& model_dir, cons
 int main(int argc, char** argv) {
     try {
         ::umask(0077);  // Datasets and adapter outputs contain user typing.
-        if (argc < 2) throw std::invalid_argument("usage: llavon-ime-lora check-model|fetch-model|check-trainer|install-trainer|protection-status|configure-password|set-recording|reset-conversation-data|list|exclude|delete|dataset|count-dataset|train|export-model [--option value ...]");
+        if (argc < 2) throw std::invalid_argument("usage: llavon-ime-lora check-model|fetch-model|check-trainer|install-trainer|protection-status|configure-password|set-recording|reset-conversation-data|list|exclude|delete|dataset|count-dataset|train|export-model|export-base-model [--option value ...]");
         const auto options = parse(argc, argv);
         if (std::string_view(argv[1]) == "install-trainer") {
             install_trainer(fs::absolute(require(options, "--output-dir")));
@@ -1156,6 +1244,11 @@ int main(int argc, char** argv) {
                                                  std::numeric_limits<std::int64_t>::max());
             export_run_model(db, run_id, fs::absolute(require(options, "--model-dir")), database);
         }
+        else if (action == "export-base-model") {
+            export_base_model(fs::absolute(require(options, "--model-dir")),
+                fs::absolute(require(options, "--output")), database,
+                require(options, "--base-model-fingerprint"));
+        }
         else if (action == "count-dataset") {
             const fs::path model_dir = fs::absolute(require(options, "--model-dir"));
             const fs::path tables = fs::absolute(require(options, "--tables-dir"));
@@ -1174,7 +1267,8 @@ int main(int argc, char** argv) {
                 const auto decryption = cipher.decryption();
                 const auto dataset = ime::unix_service::write_numeric_dataset(
                     db.get(), tables, model_dir / "config.json", require(options, "--output"), 384, nullptr,
-                    &decryption, integer_option(options, "--only-manually-selected", 0, 0, 1) != 0);
+                    &decryption, integer_option(options, "--only-manually-selected", 0, 0, 1) != 0,
+                    integer64_option(options, "--base-run-id", 0, 0, std::numeric_limits<std::int64_t>::max()));
                 if (dataset.included_ids.empty()) throw std::runtime_error("no trainable pending Bopomofo records");
                 std::cout << "trainable=" << dataset.included_ids.size() << " skipped=" << dataset.skipped << '\n';
             }

@@ -89,6 +89,7 @@ add_executable(llavon-ime-lora
     src/training/libtorch_cache.cpp
     src/training/numeric_dataset.cpp
     src/training/commit_store.cpp
+    src/training/base_model_fingerprint.cpp
 )
 target_compile_features(llavon-ime-lora PRIVATE cxx_std_23)
 set_target_properties(llavon-ime-lora PROPERTIES CXX_EXTENSIONS OFF)
@@ -139,6 +140,7 @@ if(IME_UNIX_SERVICE_BUILD_TESTS)
         src/engine/stderr_logger.cpp
         src/session/session_manager.cpp
         src/training/commit_store.cpp
+        src/training/base_model_fingerprint.cpp
         src/training/numeric_dataset.cpp
         src/training/lora_history_lca.cpp
     )

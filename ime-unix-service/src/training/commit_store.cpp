@@ -141,9 +141,34 @@ void initialize_commit_database(sqlite3* db) {
                 "manually_selected INTEGER NOT NULL CHECK(manually_selected IN (0,1)), "
                 "PRIMARY KEY(commit_id,position))");
     execute(db, "CREATE INDEX IF NOT EXISTS commits_state_time ON commits(state,committed_at,id)");
-    execute(db, "CREATE TABLE IF NOT EXISTS lora_runs (id INTEGER PRIMARY KEY, base_revision TEXT NOT NULL, "
+    execute(db, "CREATE TABLE IF NOT EXISTS lora_runs (id INTEGER PRIMARY KEY, "
+                "parent_id INTEGER REFERENCES lora_runs(id), "
+                "base_revision TEXT NOT NULL, base_model_fingerprint TEXT, "
                 "adapter_path TEXT NOT NULL, model_path TEXT NOT NULL, record_count INTEGER NOT NULL, "
                 "completed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))");
+    bool fingerprint = false, parent_id = false;
+    {
+        Statement info(db, "PRAGMA table_info(lora_runs)");
+        while (sqlite3_step(info.get()) == SQLITE_ROW)
+            if (column_text(info.get(), 1) == "base_model_fingerprint") fingerprint = true;
+            else if (column_text(info.get(), 1) == "parent_id") parent_id = true;
+    }
+    if (!fingerprint) execute(db, "ALTER TABLE lora_runs ADD COLUMN base_model_fingerprint TEXT");
+    if (!parent_id) execute(db, "ALTER TABLE lora_runs ADD COLUMN parent_id INTEGER");
+    execute(db, "CREATE INDEX IF NOT EXISTS lora_runs_parent_id ON lora_runs(parent_id)");
+    execute(db, "CREATE TABLE IF NOT EXISTS lora_base_models ("
+                "fingerprint TEXT PRIMARY KEY CHECK(length(fingerprint)=64), revision TEXT NOT NULL, "
+                "model_path TEXT NOT NULL)");
+    execute(db, "CREATE TABLE IF NOT EXISTS lora_run_commits ("
+                "run_id INTEGER NOT NULL REFERENCES lora_runs(id), "
+                "commit_id TEXT NOT NULL REFERENCES commits(id) ON DELETE CASCADE, "
+                "PRIMARY KEY(run_id,commit_id)) WITHOUT ROWID");
+    execute(db, "CREATE INDEX IF NOT EXISTS lora_run_commits_commit_run ON lora_run_commits(commit_id,run_id)");
+    execute(db, "CREATE TABLE IF NOT EXISTS legacy_training_unknown ("
+                "commit_id TEXT PRIMARY KEY REFERENCES commits(id) ON DELETE CASCADE)");
+    execute(db, "INSERT OR IGNORE INTO legacy_training_unknown(commit_id) "
+                "SELECT id FROM commits WHERE state='trained'");
+    execute(db, "UPDATE commits SET state='pending' WHERE state='trained'");
     execute(db, "CREATE TABLE IF NOT EXISTS commit_protection (id INTEGER PRIMARY KEY CHECK(id=1), "
                 "version INTEGER NOT NULL CHECK(version=1), salt TEXT NOT NULL, public_key TEXT NOT NULL, "
                 "enabled INTEGER NOT NULL CHECK(enabled IN (0,1)))");
@@ -432,17 +457,38 @@ CommitRecord load_record(sqlite3* db, sqlite3_stmt* query, const CommitCipher& c
 }  // namespace
 
 std::vector<CommitRecord> read_commits(sqlite3* db, const std::string& state,
-                                       const CommitCipher& cipher, int offset, int limit, bool manual_only) {
+                                       const CommitCipher& cipher, int offset, int limit, bool manual_only,
+                                       std::int64_t base_run_id) {
+    if (base_run_id < 0) throw std::invalid_argument("invalid LoRA base run ID");
+    if (base_run_id != 0) {
+        Statement base(db, "SELECT 1 FROM lora_runs WHERE id=?");
+        sqlite3_bind_int64(base.get(), 1, base_run_id);
+        if (sqlite3_step(base.get()) != SQLITE_ROW)
+            throw std::invalid_argument("LoRA base run does not exist");
+    }
     // Records that never explicitly selected a candidate take no part when the
     // view or the training run asks for manually selected data only.
     const std::string manual_filter = manual_only
         ? " AND EXISTS(SELECT 1 FROM readings r WHERE r.commit_id=commits.id AND r.manually_selected=1)"
         : "";
-    const std::string sql =
-        "SELECT id,committed_at,state,context,answer,schema_version FROM commits WHERE state=?" +
-        manual_filter + " ORDER BY committed_at DESC,id DESC LIMIT ? OFFSET ?";
+    if (state != "pending" && state != "trained" && state != "excluded")
+        throw std::invalid_argument("invalid commit state");
+    const std::string lineage =
+        "WITH RECURSIVE lineage(id,parent_id) AS ("
+        "SELECT id,parent_id FROM lora_runs WHERE id=?1 UNION ALL "
+        "SELECT parent.id,parent.parent_id FROM lora_runs parent JOIN lineage child ON parent.id=child.parent_id) ";
+    const std::string used =
+        "EXISTS(SELECT 1 FROM legacy_training_unknown legacy WHERE legacy.commit_id=commits.id) OR "
+        "EXISTS(SELECT 1 FROM lora_run_commits used JOIN lineage ON lineage.id=used.run_id "
+        "WHERE used.commit_id=commits.id)";
+    const std::string filter = state == "excluded" ? "commits.state='excluded'" :
+        "commits.state='pending' AND " + (state == "pending" ? "NOT (" + used + ")" : "(" + used + ")");
+    const std::string sql = lineage +
+        "SELECT id,committed_at,'" + state + "',context,answer,schema_version FROM commits WHERE " +
+        filter + manual_filter + " ORDER BY committed_at DESC,id DESC LIMIT ?2 OFFSET ?3";
     Statement query(db, sql.c_str());
-    query.text(1, state); query.integer(2, std::max(1, limit)); query.integer(3, std::max(0, offset));
+    sqlite3_bind_int64(query.get(), 1, base_run_id);
+    query.integer(2, std::max(1, limit)); query.integer(3, std::max(0, offset));
     std::vector<CommitRecord> result;
     while (sqlite3_step(query.get()) == SQLITE_ROW) result.push_back(load_record(db, query.get(), cipher));
     return result;

@@ -19,11 +19,19 @@ std::optional<std::int64_t> tarjan_lca(
         if (run.id <= 0 || !index.emplace(run.id, ids.size()).second) return std::nullopt;
         ids.push_back(run.id);
     }
+    for (const auto& run : runs) {
+        if (run.parent_id < 0 && !index.contains(run.parent_id)) {
+            index.emplace(run.parent_id, ids.size());
+            ids.push_back(run.parent_id);
+        }
+    }
     const auto first = index.find(first_id);
     const auto second = index.find(second_id);
     if (first == index.end() || second == index.end()) return std::nullopt;
 
     std::vector<std::vector<std::size_t>> children(ids.size());
+    for (std::size_t node = runs.size() + 1; node < ids.size(); ++node)
+        children[0].push_back(node);
     for (std::size_t offset = 0; offset < runs.size(); ++offset) {
         const auto parent = index.find(runs[offset].parent_id);
         if (parent == index.end()) return std::nullopt;
@@ -89,7 +97,8 @@ std::optional<std::int64_t> tarjan_lca(
         }
     }
     if (visited != ids.size() || !answer) return std::nullopt;
-    return ids[*answer];
+    const bool forest = std::ranges::any_of(runs, [](const auto& run) { return run.parent_id < 0; });
+    return forest && ids[*answer] == 0 ? std::nullopt : std::optional{ids[*answer]};
 }
 
 }  // namespace ime::unix_service

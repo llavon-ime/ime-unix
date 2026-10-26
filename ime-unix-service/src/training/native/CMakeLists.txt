@@ -41,7 +41,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         message(FATAL_ERROR "LLAVON_LORA_COMMIT must be a 40-digit pinned commit")
     endif()
     set(LLAVON_IME_INSTALLED_LORA_TRAINER_PATH "${CMAKE_INSTALL_FULL_LIBDIR}/llavon-ime/tools/lora/llavon-lora")
-    add_executable(llavon-ime-lora ../lora_cli.cpp ../libtorch_cache.cpp ../numeric_dataset.cpp ../commit_store.cpp)
+    add_executable(llavon-ime-lora ../lora_cli.cpp ../libtorch_cache.cpp ../numeric_dataset.cpp ../commit_store.cpp ../base_model_fingerprint.cpp)
     target_compile_features(llavon-ime-lora PRIVATE cxx_std_23)
     set_target_properties(llavon-ime-lora PROPERTIES CXX_EXTENSIONS OFF)
     llavon_ime_enable_warnings(llavon-ime-lora)
@@ -112,7 +112,8 @@ set_target_properties(llavon_job_process PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(llavon_job_process PUBLIC unofficial-sodium::sodium)
 llavon_ime_enable_warnings(llavon_job_process)
 add_executable(llavon-ime-lora-backend "${training}/manager_backend.cpp" "${training}/commit_store.cpp"
-    "${training}/lora_history_lca.cpp" "${training}/manager_database.cpp" "${training}/manager_model_policy.cpp")
+    "${training}/lora_history_lca.cpp" "${training}/base_model_fingerprint.cpp"
+    "${training}/manager_database.cpp" "${training}/manager_model_policy.cpp")
 target_compile_features(llavon-ime-lora-backend PRIVATE cxx_std_23)
 set_target_properties(llavon-ime-lora-backend PROPERTIES CXX_EXTENSIONS OFF)
 target_compile_definitions(llavon-ime-lora-backend PRIVATE LLAVON_NATIVE_GUI=1
