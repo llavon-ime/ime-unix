@@ -20,9 +20,7 @@ defaults:
 
 env:
   MODEL_REPOSITORY: "tony65535/llavon-ime-llama-250m-GGUF"
-  MODEL_REVISION: "fae44704fb1a7361bcc1150bf910c1d74fa367a4"
   MODEL_FILE_NAME: "llavon-ime-llama-250m-Q4_K_M.gguf"
-  MODEL_SHA256: "e0205904a65b735ed735b709d5e1502ebbe31fbd1393042573af9843d39e2ab8"
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
 
 jobs:
@@ -135,11 +133,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p models
-          curl --fail --location --retry 3 \
-            --output "models/${MODEL_FILE_NAME}" \
-            "https://huggingface.co/${MODEL_REPOSITORY}/resolve/${MODEL_REVISION}/${MODEL_FILE_NAME}"
-          test -s "models/${MODEL_FILE_NAME}"
-          echo "${MODEL_SHA256}  models/${MODEL_FILE_NAME}" | sha256sum --check -
+          python3 scripts/download-huggingface-model.py \
+            --repository "${MODEL_REPOSITORY}" \
+            --filename "${MODEL_FILE_NAME}" \
+            --output "models/${MODEL_FILE_NAME}"
 
       # v0.9.2's code is frozen, but its RPM file list omitted native settings
       # resources. Use the manifest pinned to this workflow revision on retries.

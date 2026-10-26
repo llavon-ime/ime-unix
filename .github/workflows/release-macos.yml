@@ -21,9 +21,7 @@ concurrency:
 
 env:
   MODEL_REPOSITORY: "tony65535/llavon-ime-llama-250m-GGUF"
-  MODEL_REVISION: "fae44704fb1a7361bcc1150bf910c1d74fa367a4"
   MODEL_FILE_NAME: "llavon-ime-llama-250m-Q4_K_M.gguf"
-  MODEL_SHA256: "e0205904a65b735ed735b709d5e1502ebbe31fbd1393042573af9843d39e2ab8"
   RELEASE_REPOSITORY: ${{ github.repository }}
 
 jobs:
@@ -191,11 +189,10 @@ jobs:
           set -euo pipefail
           mkdir -p models
           model_path="models/${MODEL_FILE_NAME}"
-          curl --fail --location --retry 3 \
-            --output "${model_path}" \
-            "https://huggingface.co/${MODEL_REPOSITORY}/resolve/${MODEL_REVISION}/${MODEL_FILE_NAME}"
-          test -s "${model_path}"
-          echo "${MODEL_SHA256}  ${model_path}" | shasum -a 256 --check -
+          python3 scripts/download-huggingface-model.py \
+            --repository "${MODEL_REPOSITORY}" \
+            --filename "${MODEL_FILE_NAME}" \
+            --output "${model_path}"
           case "${model_path}" in
             *.gguf) ;;
             *)
