@@ -16,10 +16,13 @@ class AppcastTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
-    def feed(self, version, signature=SIGNATURE, previous=None, content=b"test pkg"):
+    def feed(self, version, signature=SIGNATURE, previous=None, content=b"test pkg",
+             release_notes="修正輸入來源\n\n- 改善更新流程"):
         package = self.root / f"llavon-ime-{version}-arm64.pkg"
         package.write_bytes(content)
-        return APPCAST.generate(version, package, signature, "llavon-ime/ime-unix", previous)
+        return APPCAST.generate(
+            version, package, signature, "llavon-ime/ime-unix", release_notes, previous
+        )
 
     def save(self, feed):
         previous = self.root / "previous.xml"
@@ -31,6 +34,10 @@ class AppcastTests(unittest.TestCase):
 
     def test_signed_package_metadata(self):
         item = self.feed("1.2.3").find("./channel/item")
+        self.assertEqual(
+            item.findtext("description"),
+            "修正輸入來源\n\n- 改善更新流程\n\n安裝更新時需要管理員授權。",
+        )
         self.assertEqual(item.findtext(f"{{{APPCAST.SPARKLE}}}minimumSystemVersion"), "13.0")
         enclosure = item.find("enclosure")
         self.assertEqual(enclosure.get(f"{{{APPCAST.SPARKLE}}}installationType"), "package")
@@ -58,6 +65,10 @@ class AppcastTests(unittest.TestCase):
                 self.feed("1.2.3", signature=signature)
         with self.assertRaises(ValueError):
             self.feed("1.2.3", content=b"")
+
+    def test_empty_release_notes_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.feed("1.2.3", release_notes=" \n")
 
     def test_previous_feed_cannot_change_download_origin(self):
         feed = self.feed("1.2.3")

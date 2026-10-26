@@ -23,3 +23,11 @@
 - 驗證實際要提交的版本；部分暫存時，不可只測包含其他本機修改的完整工作區。移除臨時檔案時一併檢查建置、測試與連結引用；檔案若仍有本機用途，保留本機副本並加入適當忽略規則。
 - 新增相依套件或修改建置流程時，同步檢查相關 CI 的套件安裝與步驟順序。Push 後確認相關 CI 結果，未完成或失敗時不要宣稱全部通過。
 - Commit 訊息要清楚描述該批變更。未經使用者明確要求，不要 amend 已推送的提交、重寫遠端歷史或 force push。
+
+## 發布與 tag 規則
+
+- 建立版本 tag 前必須遵循根目錄的 `RELEASING.md`；未經使用者明確指定版本並授權，不得自行建立或推送 tag。
+- Release notes 與 annotated tag message 必須使用繁體中文。撰寫前必須比較上一個正式版本 tag 到預定發布 commit 的完整變更，不可只依賴近期對話、單一 commit 或記憶整理。
+- Release notes 應從使用者角度說明「新增、改善、修正、相容性或已知限制」，保持用詞、標點、分類與句型一致；不要直接貼 commit 清單，也不要把純 CI、研究、重構或內部實作細節當成主要更新內容。
+- 只能建立 annotated 或 signed tag，不得使用 lightweight tag。建立前先向使用者展示版本號、比較範圍與完整 tag message；取得確認後才能 push。
+- 不得移動、覆寫或 force-push 已發布的 tag。發布後必須確認 macOS 與 Linux release workflow、GitHub Release 資產、release notes，以及 macOS Sparkle appcast 的版本與摘要。

@@ -58,9 +58,11 @@ if [ -n "${console_user}" ] && id "${console_user}" >/dev/null 2>&1; then
     # source, which is what leaves the input menu without 「拉風輸入法」 after an
     # install. Register the new bundle and, where the OS allows it, enable the
     # source again. TISEnableInputSource is a no-op for third-party input
-    # methods, so `enable` writes the enabled-sources preference directly on
+    # methods, so `enable` writes the selectable .Default mode directly on
     # macOS 15 and earlier; the source then shows up at the next login, when
-    # the input menu is rebuilt from it. macOS 26 keeps the enabled
+    # the input menu is rebuilt from it. Writing the non-selectable parent as
+    # well makes newer macOS versions display the input method name twice.
+    # macOS 26 keeps the enabled
     # third-party sources in a protected store that only System Settings
     # writes, so there the source has to be added there once. An upgrade
     # keeps the state it already has and needs nothing.

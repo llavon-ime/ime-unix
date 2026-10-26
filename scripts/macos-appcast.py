@@ -18,12 +18,15 @@ def version_tuple(version):
     return tuple(map(int, version.split(".")))
 
 
-def generate(version, package, signature, repository, previous=None):
+def generate(version, package, signature, repository, release_notes, previous=None):
     version_tuple(version)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("invalid GitHub repository")
     if len(base64.b64decode(signature, validate=True)) != 64:
         raise ValueError("invalid Ed25519 signature")
+    release_notes = release_notes.strip()
+    if not release_notes:
+        raise ValueError("release notes must not be empty")
     package = Path(package)
     if package.name != f"llavon-ime-{version}-arm64.pkg" or package.stat().st_size == 0:
         raise ValueError("expected a non-empty arm64 release pkg")
@@ -38,8 +41,10 @@ def generate(version, package, signature, repository, previous=None):
     ET.SubElement(item, f"{{{SPARKLE}}}version").text = version
     ET.SubElement(item, f"{{{SPARKLE}}}shortVersionString").text = version
     ET.SubElement(item, f"{{{SPARKLE}}}minimumSystemVersion").text = "13.0"
-    # Inline plain text avoids loading remote web content in the IME process.
-    ET.SubElement(item, "description").text = "更新輸入法、預測服務與套件內附工具。安裝需要管理員授權。"
+    # Inline notes avoid loading remote web content in the IME process.
+    ET.SubElement(item, "description").text = (
+        f"{release_notes}\n\n安裝更新時需要管理員授權。"
+    )
     ET.SubElement(item, "enclosure", {
         "url": f"https://github.com/{repository}/releases/download/v{version}/{package.name}",
         "length": str(package.stat().st_size),
@@ -75,10 +80,12 @@ def main():
     parser.add_argument("--package", required=True, type=Path)
     parser.add_argument("--signature", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--release-notes", required=True, type=Path)
     parser.add_argument("--previous", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
-    tree = generate(args.version, args.package, args.signature, args.repository, args.previous)
+    release_notes = args.release_notes.read_text(encoding="utf-8")
+    tree = generate(args.version, args.package, args.signature, args.repository, release_notes, args.previous)
     tree.write(args.output, encoding="utf-8", xml_declaration=True)
 
 
