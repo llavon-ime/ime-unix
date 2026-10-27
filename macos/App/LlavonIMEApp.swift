@@ -1,4 +1,3 @@
-import Carbon
 import Cocoa
 import InputMethodKit
 
@@ -21,11 +20,6 @@ final class LlavonAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         EngineBridge.shared.startResolved()
-
-        // Register with the text input system on launch so a freshly installed
-        // copy becomes selectable without waiting for the next login.
-        let status = TISRegisterInputSource(Bundle.main.bundleURL as CFURL)
-        NSLog("llavon-ime: TISRegisterInputSource -> \(status)")
 
         let identifier = Bundle.main.bundleIdentifier ?? "com.llavon.inputmethod.LlavonIME"
         let connectionName = Bundle.main.infoDictionary?["InputMethodConnectionName"] as? String

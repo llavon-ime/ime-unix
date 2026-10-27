@@ -8,6 +8,7 @@ namespace llavon::ime {
 
 struct Config {
     std::string model_path;
+    std::string inference_provider = "auto";
     int context_length = 512;
     int thread_count = 1;
     int gpu_layers = 0;

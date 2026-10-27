@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 
+#include "engine/core_runtime.hpp"
 #include "platform/server_strategy.hpp"
 #include "pipe/protocol.hpp"
 #include "platform/unix_socket_server.hpp"
@@ -20,6 +21,7 @@ void print_usage(const char* exe) {
     std::cout << "Usage: " << exe << " [options]\n"
               << "  --model PATH\n"
               << "  --tables PATH\n"
+              << "  --inference-provider auto|mlx|llama_cpp (default auto)\n"
               << "  --context-length N       (default 512)\n"
               << "  --threads N              (default 8)\n"
               << "  --gpu-layers auto|N      (default auto)\n"
@@ -102,6 +104,9 @@ int main(int argc, char* argv[]) {
                 options.runtime.model_path = require_value("--model");
             } else if (argument == "--tables") {
                 options.runtime.tables_dir = require_value("--tables");
+            } else if (argument == "--inference-provider") {
+                options.runtime.inference_provider = ime::unix_service::detail::parse_inference_provider(
+                    require_value("--inference-provider"));
             } else if (argument == "--vulkan-pipeline-cache-dir") {
                 options.runtime.vulkan_pipeline_cache_dir = require_value("--vulkan-pipeline-cache-dir");
             } else if (argument == "--context-length") {
@@ -137,6 +142,8 @@ int main(int argc, char* argv[]) {
         // applies the values the frontend has now instead of the ones it had
         // when it created its transport. They win over the command line.
         if (const char* value = env_value("LLAVON_IME_MODEL_PATH")) options.runtime.model_path = value;
+        if (const char* value = env_value("LLAVON_IME_INFERENCE_PROVIDER"))
+            options.runtime.inference_provider = ime::unix_service::detail::parse_inference_provider(value);
         if (const char* value = std::getenv("LLAVON_IME_VULKAN_PIPELINE_CACHE_DIR"))
             options.runtime.vulkan_pipeline_cache_dir = value;
         if (const char* value = env_value("LLAVON_IME_CONTEXT_LENGTH"))

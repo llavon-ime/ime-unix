@@ -2,6 +2,7 @@
 
 #ifndef _WIN32
 
+#include "config/config.hpp"
 #include "engine/service_transport.hpp"
 #include "ipc/unix_socket.hpp"
 #include "protocol/protocol.hpp"
@@ -30,6 +31,20 @@ llavon::ime::protocol::ByteVector receive_frame(const llavon::ime::UnixSocketCon
 
 int run_service_transport_tests() {
     using namespace llavon::ime;
+    Config provider_config;
+    provider_config.model_path = "/models/test.gguf";
+    provider_config.inference_provider = "mlx";
+    provider_config.context_length = 256;
+    provider_config.thread_count = 4;
+    provider_config.gpu_layers = 8;
+    auto provider_options = service_options_from_config(provider_config);
+    if (provider_options.model_path != provider_config.model_path ||
+        provider_options.inference_provider != "mlx" || provider_options.context_length != 256 ||
+        provider_options.threads != 4 || provider_options.gpu_layers != 8) return EXIT_FAILURE;
+    auto changed_provider = provider_options;
+    changed_provider.inference_provider = "llama_cpp";
+    if (same_service_runtime(provider_options, changed_provider)) return EXIT_FAILURE;
+
     const auto socket_path = std::filesystem::temp_directory_path() /
                              ("llavon-ime-transport-test-" + std::to_string(getpid()) + ".sock");
     std::error_code error;

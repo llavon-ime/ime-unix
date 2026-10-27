@@ -114,10 +114,40 @@ bool vulkan_pipeline_cache_config_test() {
     config.threads = 2;
     config.gpu_layers = 0;
     const auto core_config = config.to_core_config();
+    const auto expected_automatic_provider = llavon::ime::core::inference_provider_available(
+        llavon::ime::core::InferenceProvider::mlx)
+        ? llavon::ime::core::InferenceProvider::mlx
+        : llavon::ime::core::InferenceProvider::llama_cpp;
     if (core_config.model_path != config.model_path || core_config.tables_dir != config.tables_dir ||
         core_config.vulkan_pipeline_cache_dir != config.vulkan_pipeline_cache_dir ||
         core_config.context_length != 256 || core_config.threads != 2 || core_config.gpu_layers != 0 ||
+        core_config.inference_provider != expected_automatic_provider ||
         core_config.inference_device.backend != llavon::ime::core::InferenceBackend::automatic) return false;
+
+    using ime::unix_service::detail::RuntimeInferenceProvider;
+    if (ime::unix_service::detail::parse_inference_provider("auto") != RuntimeInferenceProvider::automatic ||
+        ime::unix_service::detail::parse_inference_provider("mlx") != RuntimeInferenceProvider::mlx ||
+        ime::unix_service::detail::parse_inference_provider("llama_cpp") != RuntimeInferenceProvider::llama_cpp) {
+        return false;
+    }
+    bool invalid_provider_rejected = false;
+    try {
+        (void)ime::unix_service::detail::parse_inference_provider("metal");
+    } catch (const std::invalid_argument&) {
+        invalid_provider_rejected = true;
+    }
+    if (!invalid_provider_rejected) return false;
+    config.inference_provider = RuntimeInferenceProvider::mlx;
+    if (config.to_core_config().inference_provider != llavon::ime::core::InferenceProvider::mlx) return false;
+    config.inference_provider = RuntimeInferenceProvider::llama_cpp;
+    if (config.to_core_config().inference_provider != llavon::ime::core::InferenceProvider::llama_cpp) return false;
+    if (ime::unix_service::detail::fallback_inference_provider(
+            RuntimeInferenceProvider::mlx, llavon::ime::core::InferenceProvider::mlx) ||
+        ime::unix_service::detail::fallback_inference_provider(
+            RuntimeInferenceProvider::automatic, llavon::ime::core::InferenceProvider::llama_cpp) ||
+        ime::unix_service::detail::fallback_inference_provider(
+            RuntimeInferenceProvider::automatic, llavon::ime::core::InferenceProvider::mlx) !=
+            llavon::ime::core::InferenceProvider::llama_cpp) return false;
 
     // Explicitly disabling the cache is preserved; loading/inference must not
     // depend on being able to create a cache directory.

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <deque>
+#include <string>
 #include <thread>
 
 namespace llavon::ime {
@@ -22,6 +23,7 @@ struct ServiceTransportOptions {
     std::filesystem::path service_path;
     std::filesystem::path model_path;
     std::filesystem::path tables_dir;
+    std::string inference_provider = "auto";
     std::uint32_t context_length = 512;
     std::uint32_t threads = 8;
     int gpu_layers = -2;

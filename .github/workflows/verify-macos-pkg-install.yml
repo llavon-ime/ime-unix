@@ -26,8 +26,12 @@ concurrency:
 
 jobs:
   install:
-    name: Install a minimal package and verify the input source
-    runs-on: macos-26
+    name: Install and upgrade on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout ime-unix
@@ -110,8 +114,8 @@ jobs:
 
           test -x "${app}/Contents/MacOS/LlavonIME"
 
-          # The postinstall launches the app so the text input system finds the
-          # replaced bundle without a log out.
+          # The postinstall launches the installed executable so it is usable
+          # without a log out; registration remains installer-owned.
           for _ in 1 2 3 4 5; do
             pgrep -x LlavonIME >/dev/null 2>&1 && break
             sleep 1
@@ -138,6 +142,8 @@ jobs:
               | grep -q "${bundle_id}"
           fi
 
+          "${tis}" list "${bundle_id}" | sort > "${RUNNER_TEMP}/input-sources-before-upgrade"
+
       - name: Verify an upgrade keeps working without a log out
         run: |
           set -euo pipefail
@@ -156,11 +162,12 @@ jobs:
           test -n "${after}"
           test "${after}" != "${before}"
 
-          # The replaced bundle is still registered with the text input system.
+          # The replaced bundle is still registered with the text input system,
+          # without registering another copy during the upgrade or app launch.
           tis="/Library/Application Support/llavon-ime/tools/llavon-ime-tis"
           registered=0
-          # postinstall performs one final registration after Installer has
-          # settled because its own bundle registration can prune the source.
+          # TIS can take a moment to refresh the existing registration after
+          # the bundle is replaced; polling must not register it again.
           for _ in {1..15}; do
             if "${tis}" status com.llavon.inputmethod.LlavonIME; then
               registered=1
@@ -170,6 +177,13 @@ jobs:
           done
           if [ "${registered}" -ne 1 ]; then
             echo "the input source is not registered with the text input system" >&2
+            exit 1
+          fi
+
+          "${tis}" list com.llavon.inputmethod.LlavonIME | sort > "${RUNNER_TEMP}/input-sources-after-upgrade"
+          if ! cmp -s "${RUNNER_TEMP}/input-sources-before-upgrade" "${RUNNER_TEMP}/input-sources-after-upgrade"; then
+            echo "the upgrade changed the registered input-source list" >&2
+            diff -u "${RUNNER_TEMP}/input-sources-before-upgrade" "${RUNNER_TEMP}/input-sources-after-upgrade" || true
             exit 1
           fi
 

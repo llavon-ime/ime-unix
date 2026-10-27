@@ -68,7 +68,7 @@ int run_real_service_tests() {
     if (enabled == nullptr || enabled[0] == '\0') return EXIT_SUCCESS;
 
     const auto config = load_config();
-    ServiceTransportOptions options;
+    auto options = service_options_from_config(config);
     if (const char* socket = std::getenv("LLAVON_IME_UNIX_SOCKET_PATH"); socket != nullptr && socket[0] != '\0') {
         options.socket_path = socket;
         // An externally supplied socket is owned by the caller (for example
@@ -78,12 +78,7 @@ int run_real_service_tests() {
         options.socket_path = std::filesystem::temp_directory_path() /
                               ("llavon-ime-real-service-" + std::to_string(getpid()) + ".sock");
     }
-    options.model_path = config.model_path;
     options.tables_dir = std::filesystem::path(LLAVON_IME_TEST_TABLE_PATH).parent_path();
-    options.context_length = static_cast<std::uint32_t>(config.context_length);
-    options.threads = static_cast<std::uint32_t>(config.thread_count);
-    options.gpu_layers = config.gpu_layers;
-    options.idle_timeout_seconds = static_cast<std::uint32_t>(config.idle_timeout_seconds);
     ServiceTransport transport(options);
 
     Waiter waiter;

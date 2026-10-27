@@ -244,8 +244,14 @@ if [[ "${INSTALL}" == "1" ]]; then
         user_destination="${HOME}/Library/Input Methods/${APP_NAME}.app"
     fi
     destination="${install_dir}/${APP_NAME}.app"
+    fresh_install=1
+    if [[ -d "${destination}" ]]; then
+        fresh_install=0
+    fi
 
-    # The helper re-registers the input source after the bundle moves.
+    # The helper registers a new input source after the bundle moves. Existing
+    # registrations are preserved because registering an upgrade again creates
+    # duplicate entries on macOS 15.
     have_tis_tool=0
     if build_tis_tool 2>/dev/null; then
         have_tis_tool=1
@@ -295,10 +301,8 @@ if [[ "${INSTALL}" == "1" ]]; then
         fi
     fi
 
-    # Launch the input method once before touching the input source: a moved
-    # bundle leaves the text input system pointing at the old path, and the
-    # app's own registration is what makes the new bundle current. Launching
-    # it here also makes the input method usable without logging out.
+    # Launch the new executable so it is usable without logging out. The app
+    # itself intentionally never registers the input source.
     if open "${destination}" 2>/dev/null; then
         for _ in 1 2 3 4 5; do
             pgrep -x "${APP_NAME}" >/dev/null 2>&1 && break
@@ -318,7 +322,7 @@ if [[ "${INSTALL}" == "1" ]]; then
     # the enabled third-party sources in a protected store that only System
     # Settings writes, so there the source has to be added there once. An
     # upgrade keeps the state it already has and needs nothing.
-    if [[ "${have_tis_tool}" == "1" ]]; then
+    if [[ "${have_tis_tool}" == "1" && "${fresh_install}" == "1" ]]; then
         "${TIS_TOOL}" register "${destination}" >/dev/null 2>&1 || true
 
         enable_output=""
@@ -342,7 +346,7 @@ if [[ "${INSTALL}" == "1" ]]; then
 
     cat <<'EOF'
 Installed. Select 「拉風輸入法」 under System Settings > Keyboard > Input Sources.
-The input source is re-registered on install; if it does not appear, log out
+The input source is registered on first install; if it does not appear, log out
 and back in once, then add it again.
 EOF
 fi
