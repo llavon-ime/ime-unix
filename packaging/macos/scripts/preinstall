@@ -6,7 +6,7 @@ SUPPORT_ROOT="/Library/Application Support/llavon-ime"
 INSTALL_STATE="${SUPPORT_ROOT}/.package-install-state"
 
 # postinstall must register only a genuinely new input source. Record whether
-# the bundle existed before removing it; every invocation overwrites stale
+# the bundle existed before refreshing it; every invocation overwrites stale
 # state left by an interrupted installation.
 /bin/mkdir -p "${SUPPORT_ROOT}"
 /bin/rm -f "${INSTALL_STATE}"
@@ -18,9 +18,11 @@ fi
 /usr/bin/install -m 0600 /dev/null "${INSTALL_STATE}"
 printf '%s\n' "${install_kind}" > "${INSTALL_STATE}"
 
-# Remove the previous copy so the new bundle cannot be merged with stale files.
-if [ -d "${APP}" ]; then
-    /bin/rm -rf "${APP}"
+# Keep the registered bundle path present during an upgrade so macOS does not
+# discard its TIS record. Removing Contents still prevents stale bundle files
+# from being merged into the new installation.
+if [ "${install_kind}" = "upgrade" ]; then
+    /bin/rm -rf "${APP}/Contents"
 fi
 
 # The fcitx5-based package bundled Fcitx5.app; this package ships the native
