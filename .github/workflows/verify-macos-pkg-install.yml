@@ -221,8 +221,8 @@ jobs:
             exit 1
           fi
 
-          # The macOS 15 repair is a one-shot user job, not a delayed retry
-          # loop. It must unload itself after checking the final TIS state.
+          # The post-transaction repair is a one-shot user job, not a delayed
+          # retry loop. It must unload itself after checking the final TIS state.
           registration_label="com.llavon.inputmethod.LlavonIME.register-after-upgrade"
           registration_job_removed=0
           for _ in {1..5}; do
