@@ -25,13 +25,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  install:
-    name: Install and upgrade on ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
+  build:
+    name: Build deployment-target app
+    runs-on: macos-26
 
     steps:
       - name: Checkout ime-unix
@@ -52,6 +48,44 @@ jobs:
 
       - name: Build the app
         run: macos/scripts/build-native-app.sh
+
+      - name: Archive the app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/macos/LlavonIME.app "${RUNNER_TEMP}/LlavonIME.app.zip"
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-input-method-app
+          path: ${{ runner.temp }}/LlavonIME.app.zip
+          retention-days: 1
+
+  install:
+    name: Install and upgrade on ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout ime-unix
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download the app
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-input-method-app
+          path: ${{ runner.temp }}
+
+      - name: Extract the app
+        run: |
+          mkdir -p dist/macos
+          ditto -x -k "${RUNNER_TEMP}/LlavonIME.app.zip" dist/macos
 
       - name: Build the test package
         run: |
@@ -186,6 +220,19 @@ jobs:
             diff -u "${RUNNER_TEMP}/input-sources-before-upgrade" "${RUNNER_TEMP}/input-sources-after-upgrade" || true
             exit 1
           fi
+
+          # The post-transaction repair is a one-shot user job, not a delayed
+          # retry loop. It must unload itself after checking the final TIS state.
+          registration_label="com.llavon.inputmethod.LlavonIME.register-after-upgrade"
+          registration_job_removed=0
+          for _ in {1..5}; do
+            if ! launchctl print "gui/$(id -u)/${registration_label}" >/dev/null 2>&1; then
+              registration_job_removed=1
+              break
+            fi
+            sleep 1
+          done
+          test "${registration_job_removed}" -eq 1
 
           # On macOS 15 and earlier the enabled input source survives the
           # upgrade in the HIToolbox list; macOS 26 keeps it in a protected
