@@ -99,6 +99,14 @@ static bool test_config_schema() {
 
     // The exported schema describes every field for host UIs.
     const auto schema = config_schema_json();
+    const auto defaults = default_config();
+    ok = ok && defaults.inference_provider == "auto";
+    const auto explicit_provider = config_from_json({{"inference_provider", "llama_cpp"}});
+    ok = ok && explicit_provider.inference_provider == "llama_cpp";
+    const auto provider_alias = config_from_json({{"inference_provider", "llama.cpp"}});
+    ok = ok && provider_alias.inference_provider == "llama_cpp";
+    const auto invalid_provider = config_from_json({{"inference_provider", "metal"}});
+    ok = ok && invalid_provider.inference_provider == "auto";
     ok = ok && std::ranges::none_of(fields, [](const auto& field) {
         return field.key == "smart_model_preview" || field.ini_key == "SmartModelPreview";
     });

@@ -352,7 +352,7 @@ void SettingsPage::save() {
         }
         else {
             const auto updated = values();
-            for (const auto* key : {"model_path", "context_length", "thread_count", "gpu_layers", "idle_timeout_seconds"})
+            for (const auto* key : {"model_path", "inference_provider", "context_length", "thread_count", "gpu_layers", "idle_timeout_seconds"})
                 runtime = runtime || updated.value(key) != original_.value(key);
             store_.save(updated); original_ = updated;
         }

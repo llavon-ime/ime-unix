@@ -4,10 +4,45 @@
 
 #include <array>
 #include <cstdlib>
+#include <iostream>
 #include <stdexcept>
 #include <utility>
 
 namespace ime::unix_service {
+
+detail::RuntimeInferenceProvider detail::parse_inference_provider(std::string_view value) {
+    if (value == "auto") return RuntimeInferenceProvider::automatic;
+    if (value == "mlx") return RuntimeInferenceProvider::mlx;
+    if (value == "llama_cpp") return RuntimeInferenceProvider::llama_cpp;
+    throw std::invalid_argument("invalid inference provider: " + std::string(value));
+}
+
+llavon::ime::core::InferenceProvider detail::resolve_inference_provider(
+    RuntimeInferenceProvider provider) noexcept {
+    switch (provider) {
+        case RuntimeInferenceProvider::automatic:
+            return llavon::ime::core::inference_provider_available(
+                       llavon::ime::core::InferenceProvider::mlx)
+                ? llavon::ime::core::InferenceProvider::mlx
+                : llavon::ime::core::InferenceProvider::llama_cpp;
+        case RuntimeInferenceProvider::mlx:
+            return llavon::ime::core::InferenceProvider::mlx;
+        case RuntimeInferenceProvider::llama_cpp:
+            return llavon::ime::core::InferenceProvider::llama_cpp;
+    }
+    return llavon::ime::core::InferenceProvider::llama_cpp;
+}
+
+std::optional<llavon::ime::core::InferenceProvider> detail::fallback_inference_provider(
+    RuntimeInferenceProvider configured,
+    llavon::ime::core::InferenceProvider failed) noexcept {
+    if (configured == RuntimeInferenceProvider::automatic &&
+        failed == llavon::ime::core::InferenceProvider::mlx &&
+        llavon::ime::core::inference_provider_available(llavon::ime::core::InferenceProvider::llama_cpp)) {
+        return llavon::ime::core::InferenceProvider::llama_cpp;
+    }
+    return std::nullopt;
+}
 
 std::filesystem::path detail::resolve_vulkan_pipeline_cache_dir(std::string_view cache_home, std::string_view home) {
     const std::filesystem::path cache_root(cache_home);
@@ -40,6 +75,7 @@ llavon::ime::core::CoreConfig RuntimeConfig::to_core_config(std::shared_ptr<llav
         .context_length = context_length,
         .threads = threads,
         .gpu_layers = gpu_layers,
+        .inference_provider = detail::resolve_inference_provider(inference_provider),
         .inference_device = {},
         .logger = std::move(logger),
     };
@@ -93,7 +129,19 @@ void CoreRuntime::ensure_loaded() {
     std::call_once(load_once_, [this]() {
         validate_configuration();
         auto logger = std::make_shared<StderrLogger>();
-        auto core = std::make_shared<llavon::ime::core::Core>(config_.to_core_config(logger));
+        auto core_config = config_.to_core_config(logger);
+        std::shared_ptr<llavon::ime::core::Core> core;
+        try {
+            core = std::make_shared<llavon::ime::core::Core>(core_config);
+        } catch (const std::exception& error) {
+            const auto fallback = detail::fallback_inference_provider(
+                config_.inference_provider, core_config.inference_provider);
+            if (!fallback) throw;
+            std::clog << "[SRV] MLX initialization failed (" << error.what()
+                      << "); falling back to llama.cpp\n";
+            core_config.inference_provider = *fallback;
+            core = std::make_shared<llavon::ime::core::Core>(core_config);
+        }
         std::lock_guard lock(state_mutex_);
         core_ = std::move(core);
         logger_ = std::move(logger);

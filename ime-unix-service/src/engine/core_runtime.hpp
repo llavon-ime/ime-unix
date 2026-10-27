@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string_view>
 
 namespace ime::unix_service {
@@ -16,6 +17,18 @@ namespace detail {
 
 std::filesystem::path resolve_vulkan_pipeline_cache_dir(std::string_view cache_home, std::string_view home);
 
+enum class RuntimeInferenceProvider : std::uint8_t {
+    automatic,
+    mlx,
+    llama_cpp,
+};
+
+RuntimeInferenceProvider parse_inference_provider(std::string_view value);
+llavon::ime::core::InferenceProvider resolve_inference_provider(RuntimeInferenceProvider provider) noexcept;
+std::optional<llavon::ime::core::InferenceProvider> fallback_inference_provider(
+    RuntimeInferenceProvider configured,
+    llavon::ime::core::InferenceProvider failed) noexcept;
+
 }  // namespace detail
 
 std::filesystem::path default_vulkan_pipeline_cache_dir();
@@ -24,6 +37,7 @@ struct RuntimeConfig {
     std::filesystem::path model_path;
     std::filesystem::path tables_dir;
     std::filesystem::path vulkan_pipeline_cache_dir = default_vulkan_pipeline_cache_dir();
+    detail::RuntimeInferenceProvider inference_provider = detail::RuntimeInferenceProvider::automatic;
     std::uint32_t context_length = 512;
     std::uint32_t threads = 8;
     int gpu_layers = -2;

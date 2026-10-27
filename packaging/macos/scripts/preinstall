@@ -1,9 +1,26 @@
 #!/bin/sh
 set -eu
 
+APP="/Library/Input Methods/LlavonIME.app"
+SUPPORT_ROOT="/Library/Application Support/llavon-ime"
+INSTALL_STATE="${SUPPORT_ROOT}/.package-install-state"
+
+# postinstall must register only a genuinely new input source. Record whether
+# the bundle existed before removing it; every invocation overwrites stale
+# state left by an interrupted installation.
+/bin/mkdir -p "${SUPPORT_ROOT}"
+/bin/rm -f "${INSTALL_STATE}"
+if [ -d "${APP}" ]; then
+    install_kind=upgrade
+else
+    install_kind=fresh
+fi
+/usr/bin/install -m 0600 /dev/null "${INSTALL_STATE}"
+printf '%s\n' "${install_kind}" > "${INSTALL_STATE}"
+
 # Remove the previous copy so the new bundle cannot be merged with stale files.
-if [ -d "/Library/Input Methods/LlavonIME.app" ]; then
-    /bin/rm -rf "/Library/Input Methods/LlavonIME.app"
+if [ -d "${APP}" ]; then
+    /bin/rm -rf "${APP}"
 fi
 
 # The fcitx5-based package bundled Fcitx5.app; this package ships the native

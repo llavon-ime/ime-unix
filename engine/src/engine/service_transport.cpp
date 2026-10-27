@@ -39,6 +39,9 @@ void validate_limits(const ServiceTransportOptions& options) {
         options.connect_timeout.count() <= 0 || options.handshake_timeout.count() <= 0 ||
         options.request_timeout.count() <= 0 || options.cold_prediction_timeout.count() <= 0)
         throw std::invalid_argument("invalid transport limits");
+    if (options.inference_provider != "auto" && options.inference_provider != "mlx" &&
+        options.inference_provider != "llama_cpp")
+        throw std::invalid_argument("invalid inference provider");
 }
 
 bool launch_service(std::vector<std::string>& arguments) {
@@ -81,6 +84,7 @@ protocol::ByteVector recv_frame(int fd, socket_io::Deadline deadline) {
 ServiceTransportOptions service_options_from_config(const Config& config, ServiceTransportOptions options,
                                                    bool preserve_model_path) {
     if (!preserve_model_path) options.model_path = config.model_path;
+    options.inference_provider = config.inference_provider;
     options.context_length = static_cast<std::uint32_t>(std::max(1, config.context_length));
     options.threads = static_cast<std::uint32_t>(std::max(1, config.thread_count));
     options.gpu_layers = config.gpu_layers;
@@ -89,7 +93,8 @@ ServiceTransportOptions service_options_from_config(const Config& config, Servic
 }
 
 bool same_service_runtime(const ServiceTransportOptions& left, const ServiceTransportOptions& right) {
-    return left.model_path == right.model_path && left.context_length == right.context_length &&
+    return left.model_path == right.model_path && left.inference_provider == right.inference_provider &&
+           left.context_length == right.context_length &&
            left.threads == right.threads && left.gpu_layers == right.gpu_layers &&
            left.idle_timeout_seconds == right.idle_timeout_seconds;
 }
@@ -370,6 +375,7 @@ bool ServiceTransport::ensure_connected() {
         arguments.emplace_back(options_.socket_path.string());
         if (!options_.model_path.empty()) { arguments.emplace_back("--model"); arguments.emplace_back(options_.model_path.string()); }
         if (!options_.tables_dir.empty()) { arguments.emplace_back("--tables"); arguments.emplace_back(options_.tables_dir.string()); }
+        arguments.emplace_back("--inference-provider"); arguments.emplace_back(options_.inference_provider);
         arguments.emplace_back("--context-length"); arguments.emplace_back(std::to_string(options_.context_length));
         arguments.emplace_back("--threads"); arguments.emplace_back(std::to_string(options_.threads));
         arguments.emplace_back("--gpu-layers"); arguments.emplace_back(options_.gpu_layers == -2 ? "auto" : std::to_string(options_.gpu_layers));
