@@ -221,6 +221,19 @@ jobs:
             exit 1
           fi
 
+          # The macOS 15 repair is a one-shot user job, not a delayed retry
+          # loop. It must unload itself after checking the final TIS state.
+          registration_label="com.llavon.inputmethod.LlavonIME.register-after-upgrade"
+          registration_job_removed=0
+          for _ in {1..5}; do
+            if ! launchctl print "gui/$(id -u)/${registration_label}" >/dev/null 2>&1; then
+              registration_job_removed=1
+              break
+            fi
+            sleep 1
+          done
+          test "${registration_job_removed}" -eq 1
+
           # On macOS 15 and earlier the enabled input source survives the
           # upgrade in the HIToolbox list; macOS 26 keeps it in a protected
           # store that only System Settings writes, so there is nothing to

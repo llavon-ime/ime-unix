@@ -107,6 +107,30 @@ if [ -n "${console_user}" ] && id "${console_user}" >/dev/null 2>&1; then
         esac
     fi
 
+    # macOS 15 removes the existing TIS record only after postinstall returns
+    # and PackageKit touches the replaced bundle. Submit one user-session job
+    # that runs after that transaction has settled. It checks first and calls
+    # TISRegisterInputSource at most once, so an installation whose record was
+    # preserved cannot acquire a duplicate. macOS 26 preserves the record and
+    # must not be registered again.
+    os_major="$(/usr/bin/sw_vers -productVersion 2>/dev/null | /usr/bin/cut -d. -f1 || true)"
+    case "${os_major}" in
+        ''|*[!0-9]*) os_major=0 ;;
+    esac
+    if [ -x "${TIS_TOOL}" ] && [ "${install_kind}" = "upgrade" ] && \
+            [ "${os_major}" -gt 0 ] && [ "${os_major}" -lt 26 ]; then
+        registration_label="com.llavon.inputmethod.LlavonIME.register-after-upgrade"
+        # Coalesce immediately repeated upgrades into one pending check. The
+        # submitted job removes itself after running because launchctl treats
+        # submitted jobs as keepalive by default.
+        as_user /bin/launchctl remove "${registration_label}" >/dev/null 2>&1 || true
+        if ! as_user /bin/launchctl submit -l "${registration_label}" -- \
+                /bin/sh -c 'sleep 5; "$1" register-if-missing "$2" "$3"; /bin/launchctl remove "$4"' \
+                sh "${TIS_TOOL}" "${APP}" "${bundle_id}" "${registration_label}"; then
+            echo "llavon-ime: could not schedule the one-time input-source registration check; log out and back in once." >&2
+        fi
+    fi
+
     # TextInputSwitcher caches input source icons in memory and ignores
     # SIGTERM, so a stale instance keeps showing an icon-less switcher HUD.
     # CursorUIViewService is left alone: killing it takes the caret UI down

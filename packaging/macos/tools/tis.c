@@ -337,6 +337,9 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "register") == 0) {
         return register_app(argv[2]);
     }
+    if (argc == 4 && strcmp(argv[1], "register-if-missing") == 0) {
+        return print_status(argv[3]) == 0 ? 0 : register_app(argv[2]);
+    }
     if (argc == 3 && strcmp(argv[1], "enable") == 0) {
         return enable_input_source(argv[2]);
     }
@@ -349,7 +352,7 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "list") == 0) {
         return list_input_sources(argv[2]);
     }
-    fprintf(stderr, "usage: %s current | select-ascii | register <app-path> | enable <bundle-id> | select <input-source-id> | status <bundle-id> | list <bundle-id>\n",
+    fprintf(stderr, "usage: %s current | select-ascii | register <app-path> | register-if-missing <app-path> <bundle-id> | enable <bundle-id> | select <input-source-id> | status <bundle-id> | list <bundle-id>\n",
             argv[0]);
     return 2;
 }
