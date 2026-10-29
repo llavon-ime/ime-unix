@@ -34,6 +34,16 @@ struct MixedDecisionState {
     }
 };
 
+struct PendingInputProvenance {
+    MixedInputOrigin origin = MixedInputOrigin::Standalone;
+
+    bool follows_chinese() const noexcept {
+        return origin == MixedInputOrigin::AfterChineseCommit;
+    }
+    void clear() noexcept { origin = MixedInputOrigin::Standalone; }
+    void establish_after_chinese() noexcept { origin = MixedInputOrigin::AfterChineseCommit; }
+};
+
 // Where the last resolved context came from. The memory probe is only worth
 // its writes when nothing else produced text.
 enum class ContextSource : std::uint8_t { None, Client, Accessibility, Memory };
@@ -51,6 +61,10 @@ struct InputSession {
     SymbolMenuState symbol_menu;
     PendingInput pending_token;
     MixedDecisionState mixed_decision;
+    // Direct uppercase output can commit the Chinese composition and the first
+    // ASCII character before the rest of the token enters PendingInput. This
+    // provenance remains separate from exact raw input and decoder decisions.
+    PendingInputProvenance pending_provenance;
     // Text before the caret as read from the current prediction source for the
     // pending request. Never accumulated by this IME.
     std::u16string context_text;
@@ -60,6 +74,11 @@ struct InputSession {
     // Any later edit or lifecycle boundary cancels this intent.
     std::optional<InputKey> deferred_commit;
 
+    void clear_pending_input() {
+        pending_token.clear();
+        mixed_decision.clear();
+        pending_provenance.clear();
+    }
     InputStateKind kind() const { return input_state_kind(state); }
     bool empty() const { return kind() == InputStateKind::Empty; }
     bool inputting() const { return kind() == InputStateKind::Inputting; }

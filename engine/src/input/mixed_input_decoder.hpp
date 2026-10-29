@@ -46,6 +46,19 @@ struct MixedPath {
     bool boundary_model_refined = false;
 };
 
+enum class MixedInputOrigin {
+    Standalone,
+    AfterChineseCommit,
+};
+
+// Per-event state that influences ranking without becoming part of the raw
+// input. The previous preview is borrowed only for the duration of decode().
+struct MixedDecodeContext {
+    std::u16string_view preceding_text = {};
+    MixedInputOrigin pending_origin = MixedInputOrigin::Standalone;
+    const MixedPath* previous_preview = nullptr;
+};
+
 struct MixedDecodeResult {
     std::u16string raw;
     std::vector<MixedPath> paths;
@@ -81,7 +94,7 @@ public:
                       LatinScoreFn latin_score = {}, ChineseScoreFn chinese_score = {});
 
     MixedDecodeResult decode(std::u16string_view raw, BopomofoKeyboardLayout layout, bool space_tone,
-                             std::u16string_view context = {}) const;
+                             MixedDecodeContext context = {}) const;
 
     // Best/preferred path first, then raw, an explicit boundary repair when
     // available, and the remaining ranked alternatives.

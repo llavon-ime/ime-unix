@@ -613,6 +613,29 @@ void Manager::refresh() {
     });
 }
 
+void Manager::prepareForUpdate(std::function<void(UpdatePreparation)> reply) {
+    const auto dirty = [this] { return settings_->isDirty() || (phrases_ && phrases_->isDirty()); };
+    if (dirty() || actionPending_) { reply(UpdatePreparation::Blocked); return; }
+    if (running_) {
+        updatePending_ = true;
+        reply(UpdatePreparation::Deferred);
+        return;
+    }
+    if (!backend_->isRunning()) { reply(UpdatePreparation::Ready); return; }
+    // Ask the helper instead of relying only on the last three-second UI poll:
+    // an installer must never interrupt a job that has just started.
+    backend_->request("/api/state", {}, [this, dirty, reply = std::move(reply)](const QJsonValue& value) {
+        const auto job = value.toObject().value("job").toObject();
+        if (!value.isObject() || dirty() || actionPending_) { reply(UpdatePreparation::Blocked); return; }
+        if (job.value("state").toString() == "running") {
+            updatePending_ = true;
+            reply(UpdatePreparation::Deferred);
+            return;
+        }
+        reply(UpdatePreparation::Ready);
+    });
+}
+
 void Manager::act(const QString& path, const QJsonObject& body, Backend::Reply reply) {
 #ifdef Q_OS_LINUX
     if (updates_ && updates_->busy() &&
@@ -750,6 +773,10 @@ void Manager::renderState(const QJsonObject& state) {
     updateRecordActions();
     if (oldJob.value("state") != job.value("state") && !running_ && job.value("state") != "idle") notice(job_->text(), job.value("state") == "failed");
     else if (message_->text() == QStringLiteral("正在連接…")) notice({});
+    if (updatePending_ && oldJob.value("state") == "running" && !running_) {
+        updatePending_ = false;
+        emit deferredUpdateReady();
+    }
 }
 
 QString Manager::selectedRun() const {

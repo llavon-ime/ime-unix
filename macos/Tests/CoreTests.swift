@@ -166,6 +166,7 @@ struct CoreTests {
 
         Self.testEngineConfig()
         Self.testKeyboardLayouts(tablePath: tablePath)
+        Self.testCandidateSelection(tablePath: tablePath)
         Self.testSmartEditing(tablePath: tablePath)
         Self.testSmartCursorInsertion(tablePath: tablePath)
         Self.testSmartLocalErrors(tablePath: tablePath)
@@ -212,6 +213,69 @@ struct CoreTests {
                 queue.pumpUntilIdle()
             }
         }
+    }
+
+    private static func testCandidateSelection(tablePath: String) {
+        let queue = PumpQueue()
+        let core = EngineCore()
+        core.setPostToMain { queue.post($0) }
+        core.start(options: EngineStartOptions(tablePath: tablePath,
+            configJson: #"{"smart_english":false}"#,
+            autoStartService: false, enableAccessibility: false))
+        let host = RecordingHost()
+        let context = core.allocateContext()
+        core.attach(context, host: host)
+
+        type(core, context, "su3")
+        _ = core.sendKey(context, keyCode: 0x31, charactersIgnoringModifiers: " ",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        guard let opened = core.snapshot(context), opened.candidates.count > 2 else {
+            fatalError("expected multiple candidates")
+        }
+        let keyboardChoice = opened.candidates[1]
+        let redrawsBeforeMove = host.redraws
+        precondition(core.sendKey(context, keyCode: 0x7d, charactersIgnoringModifiers: nil,
+                                  modifiers: KeyModifiers(), capsLock: false, isRelease: false),
+                     "Down must be consumed by the candidate list")
+        precondition(core.snapshot(context)?.cursor == 1, "Down must move the candidate cursor")
+        precondition(host.redraws > redrawsBeforeMove, "Down must redraw marked text")
+        let redrawsBeforeSelection = host.redraws
+        precondition(core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                                  modifiers: KeyModifiers(), capsLock: false, isRelease: false),
+                     "Return must select the candidate under the cursor")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == keyboardChoice,
+                     "Return must apply the highlighted candidate")
+        precondition(core.snapshot(context)?.hasCandidates == false)
+        precondition(host.redraws > redrawsBeforeSelection,
+                     "candidate selection must replace the client's marked text")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
+        precondition(host.commits.last == keyboardChoice,
+                     "committed text must preserve the keyboard-selected candidate")
+
+        type(core, context, "su3")
+        _ = core.sendKey(context, keyCode: 0x31, charactersIgnoringModifiers: " ",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        guard let clickable = core.snapshot(context), clickable.candidates.count > 2 else {
+            fatalError("expected clickable candidates")
+        }
+        let clickedChoice = clickable.candidates[2]
+        let redrawsBeforeClick = host.redraws
+        core.selectCandidate(context, index: 2)
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == clickedChoice,
+                     "panel selection must apply the clicked candidate")
+        precondition(host.redraws > redrawsBeforeClick,
+                     "panel selection must replace the client's marked text")
+        _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                         modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+        queue.pumpUntilIdle()
+        precondition(host.commits.last == clickedChoice,
+                     "committed text must preserve the clicked candidate")
+
+        core.detach(context)
+        core.stop()
+        queue.pumpUntilIdle()
     }
 
     private static func testSmartEditing(tablePath: String) {
@@ -310,6 +374,29 @@ struct CoreTests {
                              modifiers: KeyModifiers(), capsLock: false, isRelease: false)
             queue.pumpUntilIdle()
             precondition(host.commits.last == "你你好，好")
+
+            type(core, context, keys)
+            let edgeText = core.snapshot(context)?.preedit.map(\.text).joined()
+            for _ in 0..<3 {
+                let redraws = host.redraws
+                let handled = core.sendKey(context, keyCode: 0x7b, charactersIgnoringModifiers: nil,
+                                           modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                precondition(handled, "\(layout): Left must stay handled at the preedit boundary")
+                precondition(host.redraws > redraws, "\(layout): Left must reassert marked text")
+                precondition(core.snapshot(context)?.preedit.map(\.text).joined() == edgeText)
+            }
+            for _ in 0..<3 {
+                let redraws = host.redraws
+                let handled = core.sendKey(context, keyCode: 0x7c, charactersIgnoringModifiers: nil,
+                                           modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+                precondition(handled, "\(layout): Right must stay handled at the preedit boundary")
+                precondition(host.redraws > redraws, "\(layout): Right must reassert marked text")
+                precondition(core.snapshot(context)?.preedit.map(\.text).joined() == edgeText)
+            }
+            _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
+                             modifiers: KeyModifiers(), capsLock: false, isRelease: false)
+            queue.pumpUntilIdle()
+            precondition(host.commits.last == "你好")
             core.detach(context)
             core.stop()
             queue.pumpUntilIdle()

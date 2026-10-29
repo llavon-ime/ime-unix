@@ -35,8 +35,6 @@ enum class CandidateKeyAction {
     // Route the key with the rest of the input rules: the candidate list did
     // not claim it.
     Unhandled,
-    // Leave the key to the application without consuming it.
-    PassThrough,
     // Consume the key without changing the view.
     Handled,
     // Consume the key and refresh the candidate panel.

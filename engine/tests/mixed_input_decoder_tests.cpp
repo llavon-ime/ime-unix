@@ -46,6 +46,7 @@ public:
         ok &= test_hsu_dyf();
         ok &= test_space_first_tone();
         ok &= test_qwerty_283();
+        ok &= test_boundary_continuity();
         ok &= test_lossless_cover();
         ok &= test_raw_fallback_always_first();
         ok &= test_literal_tie_guard();
@@ -197,6 +198,34 @@ private:
         // Suffix parsing is grammatical and does not depend on the lexicon.
         const auto result = decoder_.decode(utf16("qwerty283"), BopomofoKeyboardLayout::Standard, false);
         bool ok = check_path("qwerty283", result, utf16("qwerty打"));
+        return ok;
+    }
+
+    bool test_boundary_continuity() {
+        const MixedDecodeContext initial_context{
+            {}, MixedInputOrigin::AfterChineseCommit, nullptr};
+        const auto initial = decoder_.decode(utf16("ransformerai6"),
+                                             BopomofoKeyboardLayout::Standard, false,
+                                             initial_context);
+        bool ok = initial.best_path < initial.paths.size() &&
+            initial.paths[initial.best_path].rendered == utf16("ransformer模");
+        if (!ok) {
+            std::printf("[FAIL] established ASCII island did not close\n");
+            return false;
+        }
+
+        const MixedDecodeContext continued_context{
+            {}, MixedInputOrigin::AfterChineseCommit, &initial.paths[initial.best_path]};
+        const auto continued = decoder_.decode(utf16("ransformerai6v"),
+                                               BopomofoKeyboardLayout::Standard, false,
+                                               continued_context);
+        ok &= continued.best_path < continued.paths.size() &&
+            continued.paths[continued.best_path].rendered == utf16("ransformer模v");
+
+        const auto standalone = decoder_.decode(utf16("ransformerai6"),
+                                                BopomofoKeyboardLayout::Standard, false);
+        ok &= standalone.paths[standalone.best_path].rendered == utf16("ransformerai6");
+        if (!ok) std::printf("[FAIL] mixed boundary continuity ranking\n");
         return ok;
     }
 

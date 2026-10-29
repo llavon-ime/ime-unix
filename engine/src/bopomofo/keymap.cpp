@@ -457,6 +457,14 @@ bool is_bopomofo_tone_key(char32_t key, BopomofoKeyboardLayout layout) {
     return false;
 }
 
+bool is_strong_bopomofo_tone_key(char32_t key, BopomofoKeyboardLayout layout) {
+    // Other layouts need their own mixed-input corpus before this policy is
+    // enabled: some direct layouts also assign tones to ordinary ASCII keys.
+    if (layout != BopomofoKeyboardLayout::Standard) return false;
+    const bool ascii_letter = (key >= U'a' && key <= U'z') || (key >= U'A' && key <= U'Z');
+    return key != U' ' && !ascii_letter && is_bopomofo_tone_key(key, layout);
+}
+
 std::optional<char32_t> lookup_bopomofo_key(char32_t key, BopomofoKeyboardLayout layout, bool accept_uppercase) {
     if (layout == BopomofoKeyboardLayout::Standard) return lookup_bopomofo_key(key, accept_uppercase);
     if (is_compact_bopomofo_layout(layout)) return std::nullopt;

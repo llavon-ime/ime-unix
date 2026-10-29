@@ -120,7 +120,7 @@ cmake -S "${ROOT_DIR}/engine" -B "${ENGINE_BUILD_DIR}" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
     -DCMAKE_TOOLCHAIN_FILE="${ROOT_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
     -DLLAVON_IME_ENGINE_BUILD_TESTS=OFF
-cmake --build "${ENGINE_BUILD_DIR}" --target llavon_ime_engine --parallel
+cmake --build "${ENGINE_BUILD_DIR}" --target llavon_ime_engine --parallel 2
 
 echo "Compiling the input method..."
 rm -rf "${APP_DIR}"

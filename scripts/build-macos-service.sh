@@ -60,7 +60,7 @@ case "$(uname -m)" in
         ;;
 esac
 
-for command in git cmake curl install sed pkg-config unzip; do
+for command in git cmake curl install python3 sed pkg-config unzip; do
     if ! command -v "${command}" >/dev/null 2>&1; then
         echo "Required command not found: ${command}" >&2
         if [[ "${command}" == "pkg-config" ]]; then
@@ -146,9 +146,16 @@ process_text_inode() {
 # keeps its address: the reinstalled manager hands the socket and the token
 # over, and the page reloads when it sees the new build.
 restart_stale_lora_manager() {
-    local gui_path="${LLAVON_IME_LORA_GUI_PATH:-${INSTALL_PREFIX}/bin/llavon-ime-lora-gui}"
+    local gui_launcher="${LLAVON_IME_LORA_GUI_PATH:-${INSTALL_PREFIX}/bin/llavon-ime-lora-gui}"
+    local gui_path="${gui_launcher}"
     local state_dir="${LLAVON_IME_LORA_STATE_DIR:-}"
-    local installed_inode pid exe text_inode url token endpoint status
+    local installed_inode pid exe text_inode url token endpoint status replace_status
+    # The macOS launcher is a shell wrapper. Compare the process against the
+    # executable inside the bundle, not against the wrapper inode; otherwise
+    # every native manager appears stale even when it already runs this build.
+    if [[ -x "${gui_launcher}.app/Contents/MacOS/llavon-ime-lora-gui" ]]; then
+        gui_path="${gui_launcher}.app/Contents/MacOS/llavon-ime-lora-gui"
+    fi
     if [[ ! -f "${gui_path}" ]]; then
         return 0
     fi
@@ -175,10 +182,18 @@ restart_stale_lora_manager() {
                 continue  # already the reinstalled build
             fi
         fi
-        # A native manager owns a separate activation lock, and may be training.
-        # It has no HTTP status endpoint; leave it open until the user closes it.
+        # The native manager reports live jobs and dirty edits over its private
+        # activation socket. An idle process exits and starts this installed
+        # build after releasing the singleton lock; active work is untouched.
         if [[ -f "${state_dir}/native-gui.lock" ]]; then
-            echo "Native LoRA manager (PID ${pid}) keeps running; reopen it after its work finishes to load the update." >&2
+            replace_status=0
+            "${gui_launcher}" --state-dir "${state_dir}" --replace-running >/dev/null 2>&1 || replace_status=$?
+            case "${replace_status}" in
+                0) echo "Replaced the idle native LoRA manager (PID ${pid}) with the new build." ;;
+                75) echo "Native LoRA manager (PID ${pid}) has unsaved edits; reopen it manually after saving." >&2 ;;
+                76) echo "Native LoRA manager (PID ${pid}) will switch to the new build after its active work finishes." ;;
+                *) echo "Native LoRA manager (PID ${pid}) predates safe replacement; reopen it manually to load the update." >&2 ;;
+            esac
             continue
         fi
         url="$(head -n 1 "${state_dir}/gui.lock" 2>/dev/null || true)"
@@ -206,9 +221,19 @@ echo "Building and testing ime-unix-service (Metal; the first build can take a w
     cmake --preset macos -DIME_UNIX_SERVICE_BUILD_TESTS=ON \
         -DLLAVON_IME_INSTALLED_LORA_TRAINER_PATH="${LORA_TRAINER_DIR}/llavon-lora" \
         ${LLAVON_DEBUG_FLAG}
-    cmake --build --preset macos --parallel
+    cmake --build --preset macos --parallel 2
     ctest --test-dir build/macos --output-on-failure
 )
+
+# Unit tests use lightweight runtimes and cannot detect a real GGUF loader
+# incompatibility. Probe the exact binary that is about to be installed so a
+# broken provider cannot replace a working system service and fail only on the
+# user's first prediction.
+echo "Smoke-testing the built prediction service with the installed model..."
+python3 "${ROOT_DIR}/scripts/verify-macos-service.py" \
+    --service "${ROOT_DIR}/ime-unix-service/build/macos/llavon-ime-unix-service" \
+    --model "${MODEL_INSTALL_PATH}" \
+    --tables "${ROOT_DIR}/ime-core/table"
 
 echo "Installing ime-unix-service into ${INSTALL_PREFIX}..."
 if [[ "${INSTALL_PREFIX}" == "${HOME}"/* ]]; then

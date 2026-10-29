@@ -220,3 +220,62 @@ RAWKEY_SUITE("smart cursor boundaries raw candidates retain the prefix and suffi
         harness.expect_commit("你你su3cl3好好");
     }
 }
+
+RAWKEY_SUITE("composition cursor consumes repeated plain arrows at both boundaries", composition_cursor_edge_arrows) {
+    for (const bool smart_english : {false, true}) {
+        auto options = smart("standard");
+        options.config.smart_english = smart_english;
+        Harness harness(options);
+        harness.type("su3cl3");
+        RAWKEY_ASSERT(harness.preedit() == "你好");
+
+        for (std::size_t caret = 1; caret <= 2; ++caret) {
+            RAWKEY_ASSERT(harness.key_accepted("Left"));
+            RAWKEY_ASSERT(harness.preedit() == "你好");
+            RAWKEY_ASSERT(harness.engine().render_state(1).caret == 2 - caret);
+        }
+        RAWKEY_ASSERT(harness.key_accepted("Left"));
+        RAWKEY_ASSERT(harness.preedit() == "你好");
+        RAWKEY_ASSERT(harness.engine().render_state(1).caret == 0);
+
+        for (std::size_t caret = 1; caret <= 2; ++caret) {
+            RAWKEY_ASSERT(harness.key_accepted("Right"));
+            RAWKEY_ASSERT(harness.preedit() == "你好");
+            RAWKEY_ASSERT(harness.engine().render_state(1).caret == caret);
+        }
+        RAWKEY_ASSERT(harness.key_accepted("Right"));
+        RAWKEY_ASSERT(harness.preedit() == "你好");
+        RAWKEY_ASSERT(harness.engine().render_state(1).caret == 2);
+        RAWKEY_ASSERT(harness.commits().empty());
+
+        // Shortcuts still belong to the host even at a composition boundary.
+        RAWKEY_ASSERT(!harness.key_accepted("Alt+Right"));
+        RAWKEY_ASSERT(harness.preedit() == "你好");
+        harness.expect_commit("你好");
+    }
+}
+
+RAWKEY_SUITE("candidate pages consume repeated arrows at both boundaries", candidate_page_edge_arrows) {
+    Harness harness;
+    harness.type("su3");
+    harness.key("Down");
+    RAWKEY_ASSERT(harness.has_candidates());
+    const auto preedit = harness.preedit();
+
+    RAWKEY_ASSERT(harness.key_accepted("Left"));
+    RAWKEY_ASSERT(harness.preedit() == preedit);
+    RAWKEY_ASSERT(harness.render_page() == 0);
+
+    const auto page_count = harness.engine().render_state(1).page_count;
+    for (int page = 1; page < page_count; ++page) {
+        RAWKEY_ASSERT(harness.key_accepted("Right"));
+        RAWKEY_ASSERT(harness.preedit() == preedit);
+        RAWKEY_ASSERT(harness.render_page() == page);
+    }
+    RAWKEY_ASSERT(harness.key_accepted("Right"));
+    RAWKEY_ASSERT(harness.preedit() == preedit);
+    RAWKEY_ASSERT(harness.render_page() == page_count - 1);
+    RAWKEY_ASSERT(harness.commits().empty());
+    harness.key("Escape");
+    harness.expect_commit(preedit);
+}
