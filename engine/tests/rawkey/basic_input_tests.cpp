@@ -73,3 +73,31 @@ RAWKEY_SUITE("zhi third tone includes 脂", zhi_third_tone_fat) {
     harness.choose_text("脂");
     harness.expect_commit("脂");
 }
+
+RAWKEY_SUITE("yu third tone excludes invalid candidates", yu_third_tone_candidates) {
+    Harness harness;
+    harness.set_config("CandidatePageSize", "50");
+
+    harness.type("m3");
+    RAWKEY_ASSERT(harness.session()->buffer.segment_reading(0) == u"ㄩˇ");
+    harness.key("Down");
+    RAWKEY_ASSERT(harness.has_candidates());
+    const auto candidates = harness.candidates();
+    RAWKEY_ASSERT(std::ranges::find(candidates, "与") == candidates.end());
+    RAWKEY_ASSERT(std::ranges::find(candidates, "噢") == candidates.end());
+    harness.expect_commit(candidates.front());
+}
+
+RAWKEY_SUITE("shi third tone includes 匙", shi_third_tone_spoon) {
+    Harness harness;
+    harness.set_config("CandidatePageSize", "50");
+
+    harness.type("g3");
+    RAWKEY_ASSERT(harness.session()->buffer.segment_reading(0) == u"ㄕˇ");
+    harness.key("Down");
+    RAWKEY_ASSERT(harness.has_candidates());
+    const auto candidates = harness.candidates();
+    RAWKEY_ASSERT(std::ranges::find(candidates, "匙") != candidates.end());
+    harness.choose_text("匙");
+    harness.expect_commit("匙");
+}
