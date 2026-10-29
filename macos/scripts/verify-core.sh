@@ -37,7 +37,7 @@ else
     configure_engine
     STANDARD_LIBRARY_FLAG="-lstdc++"
 fi
-cmake --build "${BUILD_DIR}/engine" --target llavon_ime_engine --parallel
+cmake --build "${BUILD_DIR}/engine" --target llavon_ime_engine --parallel 2
 
 swiftc -O -parse-as-library \
     -module-name LlavonIMECoreTests \

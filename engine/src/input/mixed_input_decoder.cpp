@@ -25,6 +25,9 @@ constexpr double kSymbolBase = 0.0;
 constexpr double kStructuredBoost = -1.0;
 constexpr double kKnownWordBoost = 4.0;
 constexpr double kSwitchPenalty = 3.0;
+// Continuity is one decoder feature on the same scale as a language switch,
+// not a second winner-selection policy in the event processor.
+constexpr double kBoundaryPersistenceBoost = kSwitchPenalty;
 constexpr double kFragmentPenalty = 3.0;
 // Zipf >= 5 means a very common completion; weak dictionary prefixes alone
 // must not override an already complete compact reading.
@@ -49,6 +52,34 @@ double first_tone_symbol_evidence(std::u16string_view body) {
 
 bool is_explicit_tone_key(char32_t key, BopomofoKeyboardLayout layout) {
     return is_bopomofo_tone_key(key, layout);
+}
+
+bool is_ascii_island_segment(MixedSegmentKind kind) {
+    return kind == MixedSegmentKind::Latin || kind == MixedSegmentKind::Number;
+}
+
+std::vector<std::size_t> closed_ascii_boundaries(const MixedPath& path,
+                                                 BopomofoKeyboardLayout layout) {
+    std::vector<std::size_t> boundaries;
+    for (std::size_t i = 0; i < path.segments.size(); ++i) {
+        const auto& segment = path.segments[i];
+        if (segment.kind != MixedSegmentKind::Bopomofo || segment.consumed_boundary ||
+            !is_strong_bopomofo_tone_key(segment.tone_key, layout)) {
+            continue;
+        }
+
+        auto previous = i;
+        while (previous > 0) {
+            --previous;
+            const auto& predecessor = path.segments[previous];
+            if (predecessor.consumed_boundary) continue;
+            if (predecessor.end == segment.begin && is_ascii_island_segment(predecessor.kind)) {
+                boundaries.push_back(segment.begin);
+            }
+            break;
+        }
+    }
+    return boundaries;
 }
 
 void append_codepoint(std::u16string& text, char32_t value) {
@@ -86,9 +117,12 @@ MixedInputDecoder::MixedInputDecoder(LookupFn lookup, FrequencyFn frequency,
 }
 
 MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKeyboardLayout layout,
-                                            bool space_tone, std::u16string_view context) const {
+                                            bool space_tone, MixedDecodeContext context) const {
     const size_t n = raw.size();
     if (n == 0) return {{}, {MixedPath{}}, 0};
+    const auto established_boundaries = context.previous_preview
+        ? closed_ascii_boundaries(*context.previous_preview, layout)
+        : std::vector<std::size_t>{};
 
     struct Edge {
         size_t end;
@@ -645,7 +679,8 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             score += 0.01;
         }
         if (segment.kind == MixedSegmentKind::Bopomofo) {
-            std::u16string history(context.substr(context.size() > 3 ? context.size() - 3 : 0));
+            const auto preceding = context.preceding_text;
+            std::u16string history(preceding.substr(preceding.size() > 3 ? preceding.size() - 3 : 0));
             if (entry.path) {
                 const auto& text = entry.path->rendered;
                 history += text.substr(text.size() > 3 ? text.size() - 3 : 0);
@@ -656,6 +691,15 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                         static_cast<std::ptrdiff_t>(candidate), segment.candidates.end());
         }
         const size_t prev_latin = entry.path ? entry.path->latin_count : 0;
+        const bool preserves_established_boundary = entry.path &&
+            is_ascii_island_segment(entry.path->segment.kind) &&
+            entry.path->segment.end == segment.begin &&
+            segment.kind == MixedSegmentKind::Bopomofo &&
+            is_strong_bopomofo_tone_key(segment.tone_key, layout) &&
+            std::ranges::find(established_boundaries, segment.begin) != established_boundaries.end();
+        // Apply this while extending the lattice so a stable path survives
+        // beam pruning and every consumer sees the same ranked result.
+        if (preserves_established_boundary) score += kBoundaryPersistenceBoost;
         // A known English word inside Chinese is one literal island: entry
         // already paid the switch penalty. Opaque tokens retain their costs.
         const bool resume_after_unknown = phrase_onset && entry.path && entry.path->prev &&
@@ -665,13 +709,40 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             std::ranges::all_of(entry.path->segment.raw, [](char16_t key) { return key >= u'a' && key <= u'z'; });
         const bool resume_after_word = entry.path && (entry.path->lexical_island || resume_after_unknown) &&
             (segment.kind == MixedSegmentKind::Bopomofo || segment.kind == MixedSegmentKind::BopomofoIncomplete);
+        // A completed ASCII island followed by a real, explicitly toned
+        // reading should not pay another language-switch penalty. Without this
+        // provenance, the longest literal edge keeps swallowing Chinese keys
+        // after numbers, technical words and hyphenated series names. The
+        // uppercase policy can commit the first letter together with preceding
+        // Chinese, so event provenance covers that split pending token.
+        //
+        // Space is deliberately excluded: ordinary English words followed by
+        // a separator must stay literal. Letter tone keys are likewise left to
+        // the layout-specific lexical rules because they are ordinary English
+        // letters and need stronger evidence than this boundary feature.
+        bool ascii_island_after_chinese = false;
+        if (entry.path && (entry.path->segment.kind == MixedSegmentKind::Latin ||
+                           entry.path->segment.kind == MixedSegmentKind::Number)) {
+            auto prefix = entry.path;
+            while (prefix && (prefix->segment.kind == MixedSegmentKind::Latin ||
+                              prefix->segment.kind == MixedSegmentKind::Number ||
+                              prefix->segment.kind == MixedSegmentKind::Symbol)) {
+                prefix = prefix->prev;
+            }
+            ascii_island_after_chinese = prefix
+                ? prefix->segment.kind == MixedSegmentKind::Bopomofo
+                : context.pending_origin == MixedInputOrigin::AfterChineseCommit;
+        }
+        const bool resume_after_established_ascii = ascii_island_after_chinese &&
+            segment.kind == MixedSegmentKind::Bopomofo &&
+            is_strong_bopomofo_tone_key(segment.tone_key, layout);
         if (entry.path && entry.path->segment.kind != segment.kind &&
             entry.path->segment.kind != MixedSegmentKind::Symbol && segment.kind != MixedSegmentKind::Symbol &&
             !(entry.path->segment.kind == MixedSegmentKind::Bopomofo &&
               (segment.kind == MixedSegmentKind::BopomofoIncomplete || segment.kind == MixedSegmentKind::BopomofoUnresolved)) &&
             !(entry.path->segment.kind == MixedSegmentKind::BopomofoUnresolved &&
               (segment.kind == MixedSegmentKind::Bopomofo || segment.kind == MixedSegmentKind::BopomofoIncomplete))) {
-            if (!resume_after_word) score -= kSwitchPenalty;
+            if (!resume_after_word && !resume_after_established_ascii) score -= kSwitchPenalty;
             if ((entry.path->segment.kind == MixedSegmentKind::Latin && entry.path->segment.raw.size() == 1) ||
                 (segment.kind == MixedSegmentKind::Latin && segment.raw.size() == 1)) score -= 1.0;
         }

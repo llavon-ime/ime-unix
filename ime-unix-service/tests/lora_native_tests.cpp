@@ -57,6 +57,7 @@
 
 using llavon::lora::Backend;
 using llavon::lora::Manager;
+using llavon::lora::UpdatePreparation;
 
 class NativeTests final : public QObject {
     Q_OBJECT
@@ -69,6 +70,7 @@ private slots:
     void legacyRunKeepsItsBaseModel();
     void unifiedSettings();
     void pageLaunchRouting();
+    void updateReplacementSafety();
     void deferredPhrasePage();
     void settingsWithoutTrainingBackend();
     void deferredSettingGroups();
@@ -227,13 +229,19 @@ void NativeTests::jobsAndErrors() {
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path(), "--cli", cli});
     Manager window(&backend); window.show();
     QSignalSpy ready(&window, &Manager::refreshed); QSignalSpy errors(&backend, &Backend::error);
+    QSignalSpy deferredUpdate(&window, &Manager::deferredUpdateReady);
     backend.start(); QTRY_VERIFY(ready.count() > 0);
     window.showPage("training");
     click(window, "fetch"); QTRY_VERIFY(widget<QPushButton>(window, "cancelJob")->isEnabled());
+    auto replacement = UpdatePreparation::Ready;
+    bool replacementAnswered = false;
+    window.prepareForUpdate([&](UpdatePreparation result) { replacement = result; replacementAnswered = true; });
+    QVERIFY(replacementAnswered); QCOMPARE(replacement, UpdatePreparation::Deferred);
     QVERIFY(!widget<QPushButton>(window, "fetch")->isEnabled());
     capture(window, "06-download-running");
     click(window, "cancelJob");
     QTRY_VERIFY_WITH_TIMEOUT(!widget<QPushButton>(window, "cancelJob")->isEnabled(), 10000);
+    QTRY_COMPARE_WITH_TIMEOUT(deferredUpdate.count(), 1, 10000);
     click(window, "installTrainer");
     QTRY_VERIFY_WITH_TIMEOUT(widget<QLabel>(window, "notice")->text().contains(QStringLiteral("失敗")), 10000);
     capture(window, "07-job-failed");
@@ -712,6 +720,40 @@ void NativeTests::pageLaunchRouting() {
         QVERIFY(app.waitForFinished(5000)); QCOMPARE(app.exitCode(), 0);
         delete socket;
     }
+    QProcess replacement;
+    replacement.start(LLAVON_TEST_GUI, {"--state-dir", directory.path(), "--replace-running"});
+    QVERIFY(server.waitForNewConnection(5000));
+    auto* socket = server.nextPendingConnection(); QVERIFY(socket);
+    if (!socket->canReadLine()) QVERIFY(socket->waitForReadyRead(3000));
+    QCOMPARE(socket->readLine().trimmed(), QByteArray("@replace"));
+    socket->write("busy\n"); socket->flush();
+    QVERIFY(replacement.waitForFinished(5000)); QCOMPARE(replacement.exitCode(), 75);
+    delete socket;
+}
+
+void NativeTests::updateReplacementSafety() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path(), "--cli", LLAVON_TEST_CLI});
+    Manager window(&backend, {}, "settings"); window.show();
+    auto preparation = UpdatePreparation::Blocked;
+    bool answered = false;
+    window.prepareForUpdate([&](UpdatePreparation result) { preparation = result; answered = true; });
+    QVERIFY(answered); QCOMPARE(preparation, UpdatePreparation::Ready);
+
+    auto* contextLength = widget<QSpinBox>(window, "setting_context_length");
+    contextLength->setValue(contextLength->value() + 1);
+    preparation = UpdatePreparation::Ready; answered = false;
+    window.prepareForUpdate([&](UpdatePreparation result) { preparation = result; answered = true; });
+    QVERIFY(answered); QCOMPARE(preparation, UpdatePreparation::Blocked);
+    click(window, "saveSettings");
+
+    window.showPage("records");
+    QSignalSpy ready(&window, &Manager::refreshed); backend.start();
+    QTRY_VERIFY_WITH_TIMEOUT(ready.count() > 0, 10000);
+    preparation = UpdatePreparation::Blocked; answered = false;
+    window.prepareForUpdate([&](UpdatePreparation result) { preparation = result; answered = true; });
+    QTRY_VERIFY_WITH_TIMEOUT(answered, 5000); QCOMPARE(preparation, UpdatePreparation::Ready);
 }
 
 void NativeTests::deferredPhrasePage() {

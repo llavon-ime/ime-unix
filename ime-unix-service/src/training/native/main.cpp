@@ -10,6 +10,9 @@
 #include <QLocalSocket>
 #include <QLockFile>
 #include <QMessageBox>
+#include <QPointer>
+#include <QProcess>
+#include <QThread>
 #include <QTimer>
 #include <cstdio>
 #include <string_view>
@@ -66,6 +69,7 @@ int main(int argc, char** argv) {
     // fonts and the widget platform plugin in the short-lived routing process.
     QStringList rawArguments;
     for (int index = 1; index < argc; ++index) rawArguments.append(QString::fromLocal8Bit(argv[index]));
+    const bool replaceRunning = rawArguments.removeAll("--replace-running") > 0;
     const auto state = stateDirectory(rawArguments);
     const auto name = activationName(state);
     if (QFileInfo::exists(state + "/native-gui.lock")) {
@@ -81,14 +85,31 @@ int main(int argc, char** argv) {
         }
         QLocalSocket socket; socket.connectToServer(name);
         if (socket.waitForConnected(100)) {
-            const auto message = page.toUtf8() + '\n';
+            const auto message = replaceRunning ? QByteArray("@replace\n") : page.toUtf8() + '\n';
             if (socket.write(message) == message.size()) {
                 socket.flush();
                 if (!socket.bytesToWrite() || socket.waitForBytesWritten(1000)) {
-                    trace("activation-forwarded"); return 0;
+                    if (!replaceRunning) { trace("activation-forwarded"); return 0; }
+                    if (!socket.canReadLine() && !socket.waitForReadyRead(5000)) return 74;
+                    const auto response = socket.readLine().trimmed();
+                    if (response == "busy") return 75;
+                    if (response == "deferred") return 76;
+                    if (response != "ready") return 74;
+                    socket.disconnectFromServer();
+                    if (socket.state() != QLocalSocket::UnconnectedState) socket.waitForDisconnected(1000);
+                    // Do not launch before the old process drops its singleton
+                    // lock, or the replacement routes back to the exiting app.
+                    QElapsedTimer deadline; deadline.start();
+                    while (QFileInfo::exists(state + "/native-gui.lock") && deadline.elapsed() < 10000)
+                        QThread::msleep(50);
+                    if (QFileInfo::exists(state + "/native-gui.lock")) return 74;
+                    QStringList restartArguments = rawArguments;
+                    if (!restartArguments.contains("--page")) restartArguments << "--page" << page;
+                    return QProcess::startDetached(QCoreApplication::applicationFilePath(), restartArguments) ? 0 : 74;
                 }
             }
         }
+        if (replaceRunning) return 74;
         // A stale lock/socket falls through to the usual cold-start recovery.
     }
     QApplication application(argc, argv);
@@ -102,6 +123,7 @@ int main(int argc, char** argv) {
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/native/AppIcon.png")));
 #endif
     QStringList arguments = application.arguments(); arguments.removeFirst();
+    arguments.removeAll("--replace-running");
     QString page = "settings";
     const auto pageIndex = arguments.indexOf("--page");
     if (pageIndex >= 0) {
@@ -138,6 +160,12 @@ int main(int argc, char** argv) {
         arguments << "--cli" << LLAVON_BUILD_CLI;
     llavon::lora::Backend backend(backendPath, arguments);
     llavon::lora::Manager window(&backend, {}, page);
+    auto replacementArguments = rawArguments;
+    replacementArguments << "--replace-running";
+    QObject::connect(&window, &llavon::lora::Manager::deferredUpdateReady, &window,
+                     [replacementArguments] {
+        (void)QProcess::startDetached(QCoreApplication::applicationFilePath(), replacementArguments);
+    });
     trace("pages-built");
     window.showPage(page);
     QObject::connect(&server, &QLocalServer::newConnection, &window, [&server, &window] {
@@ -145,7 +173,22 @@ int main(int argc, char** argv) {
             auto activate = [socket, &window] {
                 if (socket->bytesAvailable() > 128) { socket->abort(); return; }
                 if (!socket->canReadLine()) return;
-                window.showPage(QString::fromUtf8(socket->readLine()).trimmed());
+                const auto request = socket->readLine().trimmed();
+                if (request == "@replace") {
+                    const QPointer<QLocalSocket> guarded(socket);
+                    window.prepareForUpdate([guarded](llavon::lora::UpdatePreparation preparation) {
+                        if (!guarded) return;
+                        const bool ready = preparation == llavon::lora::UpdatePreparation::Ready;
+                        const char* response = ready ? "ready\n" :
+                            preparation == llavon::lora::UpdatePreparation::Deferred ? "deferred\n" : "busy\n";
+                        guarded->write(response);
+                        guarded->flush();
+                        guarded->disconnectFromServer();
+                        if (ready) QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+                    });
+                    return;
+                }
+                window.showPage(QString::fromUtf8(request));
                 window.showNormal();
 #ifdef Q_OS_MACOS
                 llavon::lora::activateMacApplication();

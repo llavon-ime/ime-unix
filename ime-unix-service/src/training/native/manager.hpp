@@ -25,6 +25,12 @@ class SettingsPage;
 class LinuxUpdatesPage;
 class GuidePage;
 
+enum class UpdatePreparation {
+    Ready,
+    Deferred,
+    Blocked,
+};
+
 class Backend final : public QObject {
     Q_OBJECT
 public:
@@ -32,6 +38,7 @@ public:
     explicit Backend(QString program, QStringList arguments, QObject* parent = nullptr);
     ~Backend() override;
     void start();
+    bool isRunning() const;
     QString phraseTablePath() const;
     void request(const QString& path, QJsonObject body = {}, Reply reply = {}, bool post = false);
 signals:
@@ -52,8 +59,10 @@ public:
     explicit Manager(Backend* backend, const QString& hostHelper = {}, const QString& initialPage = "records");
     void refresh();
     void showPage(const QString& page);
+    void prepareForUpdate(std::function<void(UpdatePreparation)> reply);
 signals:
     void refreshed();
+    void deferredUpdateReady();
 protected:
     void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -104,6 +113,7 @@ private:
     bool running_ = false;
     bool actionPending_ = false;
     bool personalizationReady_ = false;
+    bool updatePending_ = false;
 #ifdef Q_OS_LINUX
     LinuxUpdatesPage* updates_ = nullptr;
 #endif

@@ -40,6 +40,9 @@ BopomofoKeyboardLayout bopomofo_keyboard_layout(std::string_view name);
 std::string_view bopomofo_keyboard_layout_name(BopomofoKeyboardLayout layout);
 bool is_compact_bopomofo_layout(BopomofoKeyboardLayout layout);
 bool is_bopomofo_tone_key(char32_t key, BopomofoKeyboardLayout layout);
+// True when a tone key supplies strong language-boundary evidence rather than
+// also looking like an ordinary English letter or separator.
+bool is_strong_bopomofo_tone_key(char32_t key, BopomofoKeyboardLayout layout);
 // Strict, bounded single-syllable interpretations. Compact layouts retain the
 // ordinary reading and may fill a vacant initial after a medial/final; no
 // existing component is replaced to manufacture a reading.

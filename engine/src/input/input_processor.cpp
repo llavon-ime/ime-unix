@@ -41,12 +41,12 @@ CandidateKeyOutcome handle_candidate_key(const InputKey& key, const CandidateKey
                     0};
         case keysym::Left:
             if (!view.page_by(-1, true, config.page_size, candidate_count)) {
-                return {CandidateKeyAction::PassThrough, 0};
+                return {CandidateKeyAction::Redraw, 0};
             }
             return {CandidateKeyAction::Redraw, 0};
         case keysym::Right:
             if (!view.page_by(1, true, config.page_size, candidate_count)) {
-                return {CandidateKeyAction::PassThrough, 0};
+                return {CandidateKeyAction::Redraw, 0};
             }
             return {CandidateKeyAction::Redraw, 0};
         case keysym::Home:
@@ -203,6 +203,20 @@ std::u16string composition_with_pending(const CompositionBuffer& buffer, std::u1
     return text;
 }
 
+bool composition_contains_chinese(const InputSession& session) {
+    if (std::ranges::any_of(session.buffer.segments(), [](const Segment& segment) {
+            return segment.literal == 0;
+        })) {
+        return true;
+    }
+    const auto& decision = session.mixed_decision;
+    if (!decision.active() || decision.preview_path >= decision.result.paths.size()) return false;
+    return std::ranges::any_of(decision.result.paths[decision.preview_path].segments,
+                               [](const MixedSegment& segment) {
+                                   return segment.kind == MixedSegmentKind::Bopomofo;
+                               });
+}
+
 }
 
 void InputProcessor::mark_prediction_dirty() {
@@ -257,8 +271,7 @@ InputEffect InputProcessor::reset(InputSession& session, const Config& config, I
     }
 
     session.buffer.clear();
-    session.pending_token.clear();
-    session.mixed_decision.clear();
+    session.clear_pending_input();
     session.symbol_menu.close();
     if (clear_context) session.context_text.clear();
     (void)transition_to(InputStateKind::Empty);
@@ -274,8 +287,7 @@ void InputProcessor::prepare_for_config_change(InputSession& session) {
     for (const char16_t ch : session.pending_token.raw) {
         (void)session.buffer.add_literal(static_cast<char32_t>(ch));
     }
-    session.pending_token.clear();
-    session.mixed_decision.clear();
+    session.clear_pending_input();
     session.prediction.invalidate();
 }
 
@@ -294,6 +306,7 @@ void InputProcessor::process_impl(const InputKey& key) {
             } else {
                 session_->buffer.clear();
                 session_->mixed_decision.clear();
+                session_->pending_provenance.clear();
                 session_->symbol_menu.close();
                 (void)transition_to(InputStateKind::Empty);
                 session_->prediction.clear_pending();
@@ -394,8 +407,6 @@ void InputProcessor::process_impl(const InputKey& key) {
                                  candidate_count(), session_->mixed_decision.active(),
                                  chewing_punctuation.has_value());
         switch (outcome.action) {
-            case CandidateKeyAction::PassThrough:
-                return;
             case CandidateKeyAction::Handled:
                 consume();
                 return;
@@ -443,8 +454,7 @@ void InputProcessor::process_impl(const InputKey& key) {
                     session_->mixed_decision.preview_path = 0;
                     session_->mixed_decision.preview_character = 0;
                 } else {
-                    session_->pending_token.clear();
-                    session_->mixed_decision.clear();
+                    session_->clear_pending_input();
                 }
                 (void)transition_to(composition_empty(*session_) ? InputStateKind::Empty : InputStateKind::Inputting);
                 redraw();
@@ -645,16 +655,24 @@ void InputProcessor::process_impl(const InputKey& key) {
     }
 
     if (key.sym == keysym::Left && !session_->buffer.empty()) {
-        if (!session_->buffer.move_cursor_left()) return;
-        (void)transition_to(InputStateKind::Inputting);
+        if (session_->buffer.move_cursor_left()) {
+            (void)transition_to(InputStateKind::Inputting);
+        }
+        // Keep a plain arrow inside the active composition even when the
+        // caret is already at its edge. Redrawing reasserts the marked range
+        // for native frontends; passing it to the host moves the document
+        // caret and can make them discard marked text.
         redraw();
         consume();
         return;
     }
 
     if (key.sym == keysym::Right && !session_->buffer.empty()) {
-        if (!session_->buffer.move_cursor_right()) return;
-        (void)transition_to(InputStateKind::Inputting);
+        if (session_->buffer.move_cursor_right()) {
+            (void)transition_to(InputStateKind::Inputting);
+        }
+        // See the Left-key case above: reaching the opposite edge is still a
+        // handled composition-navigation event, not document navigation.
         redraw();
         consume();
         return;
@@ -775,8 +793,7 @@ void InputProcessor::commit_current() {
     auto text = current_preedit(*session_);
     effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
-    session_->pending_token.clear();
-    session_->mixed_decision.clear();
+    session_->clear_pending_input();
     session_->symbol_menu.close();
     (void)transition_to(InputStateKind::Empty);
     session_->prediction.clear_pending();
@@ -789,8 +806,7 @@ void InputProcessor::commit_composition_with(char32_t extra) {
     if (extra != 0) text += utf8_to_u16(char32_to_utf8(extra));
     effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
-    session_->pending_token.clear();
-    session_->mixed_decision.clear();
+    session_->clear_pending_input();
     session_->symbol_menu.close();
     (void)transition_to(InputStateKind::Empty);
     session_->prediction.clear_pending();
@@ -850,8 +866,7 @@ bool InputProcessor::commit_mixed_candidate_impl(int index) {
 
     auto text = composition_with_pending(session_->buffer, entries[static_cast<size_t>(index)].text);
     session_->buffer.clear();
-    session_->pending_token.clear();
-    session_->mixed_decision.clear();
+    session_->clear_pending_input();
     session_->symbol_menu.close();
     (void)transition_to(InputStateKind::Empty);
     session_->prediction.clear_pending();
@@ -925,8 +940,7 @@ bool InputProcessor::apply_mixed_path(const MixedPath& path, std::size_t char_in
         }
     }
     session_->buffer = std::move(next);
-    session_->pending_token.clear();
-    session_->mixed_decision.clear();
+    session_->clear_pending_input();
     (void)transition_to(InputStateKind::Inputting);
     mark_prediction_dirty();
     request_prediction();
@@ -948,8 +962,11 @@ bool InputProcessor::handle_english_letter(char32_t letter, bool caps_on) {
     // DirectlyOutputUppercase: an empty composition passes the key through,
     // a non-empty composition commits together with the uppercase letter.
     if (composition_empty(*session_)) return false;
+    const bool follows_chinese = session_->pending_provenance.follows_chinese() ||
+        composition_contains_chinese(*session_);
     const char32_t upper = letter >= U'a' && letter <= U'z' ? letter + (U'A' - U'a') : letter;
     commit_composition_with(upper);
+    if (follows_chinese) session_->pending_provenance.establish_after_chinese();
     return true;
 }
 
@@ -968,6 +985,7 @@ void InputProcessor::handle_escape() {
     switch (action) {
         case EscapeAction::ClearBuffer:
             session_->buffer.clear();
+            session_->pending_provenance.clear();
             (void)transition_to(InputStateKind::Empty);
             session_->prediction.clear_pending();
             redraw();
@@ -1036,11 +1054,19 @@ bool InputProcessor::is_smart_start_char(char32_t key, BopomofoKeyboardLayout la
 // preedit preview; it is not written into the composition until confirmation.
 void InputProcessor::rerun_pending_decision() {
     if (session_->pending_token.empty()) return;
-    auto context = session_->context_text;
-    context += session_->buffer.rendered_prefix_before_caret();
+    const MixedPath* previous_preview = nullptr;
+    const auto& decision = session_->mixed_decision;
+    if (decision.active() && decision.preview_path < decision.result.paths.size() &&
+        session_->pending_token.raw.starts_with(decision.result.raw)) {
+        previous_preview = &decision.result.paths[decision.preview_path];
+    }
+    auto preceding_text = session_->context_text;
+    preceding_text += session_->buffer.rendered_prefix_before_caret();
+    const MixedDecodeContext context{preceding_text, session_->pending_provenance.origin,
+                                     previous_preview};
     auto result = decoder_.decode(session_->pending_token.raw, session_->pending_token.layout,
                                   false, context);
-    const size_t preview = result.best_path;
+    const auto preview = result.best_path;
     set_mixed_preview(std::move(result), preview);
 }
 
@@ -1087,7 +1113,11 @@ void InputProcessor::backspace_pending(bool undo_raw_key) {
     if (!survivor) pending.pop(); // unfinished reading or explicit raw-key undo
     session_->mixed_decision.clear();
     (void)transition_to(composition_empty(*session_) ? InputStateKind::Empty : InputStateKind::Inputting);
-    if (pending.empty()) { redraw(); return; }
+    if (pending.empty()) {
+        session_->pending_provenance.clear();
+        redraw();
+        return;
+    }
     rerun_pending_decision();
     if (survivor && !survivor->segments.empty()) {
         auto& result = session_->mixed_decision.result;
@@ -1127,8 +1157,7 @@ void InputProcessor::append_pending_char(char32_t key, BopomofoKeyboardLayout la
 
 void InputProcessor::settle_pending_as_literals() {
     for (const char16_t ch : session_->pending_token.raw) (void)session_->buffer.add_literal(static_cast<char32_t>(ch));
-    session_->pending_token.clear();
-    session_->mixed_decision.clear();
+    session_->clear_pending_input();
     (void)transition_to(session_->buffer.empty() ? InputStateKind::Empty : InputStateKind::Inputting);
 }
 

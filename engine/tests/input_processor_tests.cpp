@@ -63,11 +63,12 @@ int run_input_processor_tests() {
                    CandidateKeyAction::Handled &&
          view.cursor == 0;
 
-    // Left/Right page while possible and otherwise leave the key to the app.
+    // Left/Right page while possible and remain consumed at either edge so a
+    // native host cannot move its document caret out of the active preedit.
     view.reset();
     view.cursor = 13;
     ok = ok && handle_candidate_key(key(kLeft), defaults, view, 25, false, false).action ==
-                   CandidateKeyAction::PassThrough;
+                   CandidateKeyAction::Redraw;
     ok = ok && handle_candidate_key(key(kRight), defaults, view, 25, false, false).action ==
                    CandidateKeyAction::Redraw &&
          view.page == 1 && view.cursor == 13;
@@ -75,10 +76,10 @@ int run_input_processor_tests() {
                    CandidateKeyAction::Redraw &&
          view.page == 2;
     ok = ok && handle_candidate_key(key(kRight), defaults, view, 25, false, false).action ==
-                   CandidateKeyAction::PassThrough;
+                   CandidateKeyAction::Redraw;
     CandidateView single_page;
     ok = ok && handle_candidate_key(key(kRight), defaults, single_page, 5, false, false).action ==
-                   CandidateKeyAction::PassThrough;
+                   CandidateKeyAction::Redraw;
 
     // Home/End clamp to the list ends and consume without redraw once there.
     view.reset();

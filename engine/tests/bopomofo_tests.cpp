@@ -47,6 +47,10 @@ int run_bopomofo_tests() {
     ok = ok && !llavon::ime::lookup_bopomofo_key(U'Q', false).has_value();
     ok = ok && llavon::ime::lookup_bopomofo_key(U' ') == U' ';
     ok = ok && !llavon::ime::lookup_bopomofo_key(U'@').has_value();
+    ok = ok && llavon::ime::is_strong_bopomofo_tone_key(U'3', BopomofoKeyboardLayout::Standard);
+    ok = ok && !llavon::ime::is_strong_bopomofo_tone_key(U' ', BopomofoKeyboardLayout::Standard);
+    ok = ok && !llavon::ime::is_strong_bopomofo_tone_key(U'j', BopomofoKeyboardLayout::Hsu);
+    ok = ok && !llavon::ime::is_strong_bopomofo_tone_key(U'm', BopomofoKeyboardLayout::Ibm);
     const std::vector<std::pair<char32_t, char32_t>> chewing_punctuation{
         {U'[', U'「'}, {U']', U'」'}, {U'{', U'『'}, {U'}', U'』'}, {U'\'', U'、'}, {U'<', U'，'},
         {U':', U'：'}, {U'"', U'；'}, {U'>', U'。'}, {U'~', U'～'}, {U'!', U'！'}, {U'@', U'＠'},
