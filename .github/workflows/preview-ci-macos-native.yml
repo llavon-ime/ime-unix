@@ -22,6 +22,11 @@ jobs:
   build-and-install:
     name: Build and install the native input method
     runs-on: macos-26
+    env:
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
 
     steps:
       - name: Checkout ime-unix
@@ -37,8 +42,26 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 
+      - name: Cache compiler outputs
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-native-v1-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-ccache-native-v1-
+
       - name: Install build prerequisites
-        run: brew install autoconf autoconf-archive automake libtool cmake ninja pkg-config qtbase
+        run: brew install autoconf autoconf-archive automake libtool ccache cmake ninja pkg-config qtbase
+
+      - name: Configure compiler cache
+        run: |
+          set -euo pipefail
+          launcher="$(command -v ccache)"
+          mkdir -p "${CCACHE_DIR}"
+          for language in C CXX OBJC OBJCXX; do
+            echo "CMAKE_${language}_COMPILER_LAUNCHER=${launcher}" >> "${GITHUB_ENV}"
+          done
+          ccache --zero-stats
 
       - name: Run the engine and raw-key test suites
         run: scripts/verify-engine-tests.sh
@@ -106,3 +129,10 @@ jobs:
         with:
           name: LlavonIME-app
           path: dist/macos/LlavonIME.app
+
+      - name: Show compiler cache statistics
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats
+          fi
