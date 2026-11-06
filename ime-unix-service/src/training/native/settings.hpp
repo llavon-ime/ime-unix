@@ -8,6 +8,8 @@
 class QLabel;
 class QVBoxLayout;
 
+class QPushButton;
+
 namespace llavon::lora {
 
 class PhraseList;
@@ -37,7 +39,10 @@ public:
     bool isDirty() const { return dirty_; }
     bool reload();
     void revealField(const QString& key);
+signals:
+    void dirtyChanged(bool dirty);
 private:
+    void setDirty(bool dirty);
     void fill(const QJsonObject& values);
     void buildGroup(const QString& group);
     QJsonObject values() const;
@@ -54,6 +59,8 @@ private:
     PhraseList* phraseList_ = nullptr;
     QLabel* checkStatus_ = nullptr;
     QLabel* status_;
+    QPushButton* saveButton_ = nullptr;
+    QString loadedPhrases_;
     QJsonObject original_;
 };
 

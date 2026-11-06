@@ -83,6 +83,7 @@ private:
     QString selectedRecord() const;
     QString selectedRun() const;
     void updateRecordActions();
+    void markUnsaved(int page, bool unsaved);
 
     Backend* backend_;
     QTimer* timer_;
@@ -92,6 +93,16 @@ private:
     GuidePage* guide_ = nullptr;
     QWidget* quickStart_;
     QPushButton* guideButton_;
+    QPushButton* refreshButton_;
+    QTimer* noticeTimer_;
+    QWidget* recordsBody_ = nullptr;
+    QLabel* startHint_ = nullptr;
+    QLabel* credentialError_ = nullptr;
+    QString lastError_, trainError_;
+    int actionSerial_ = 0;
+    bool busyCursor_ = false;
+    QJsonObject lastHistory_;
+    QString lastHistoryActive_;
     bool quickStartDismissed_ = false;
     QLabel *heading_, *message_, *collection_, *counts_, *pageInfo_, *model_, *trainer_, *device_, *job_, *historyDetail_, *emptyRecords_;
     QLineEdit *password_, *confirmation_, *trainPassword_;

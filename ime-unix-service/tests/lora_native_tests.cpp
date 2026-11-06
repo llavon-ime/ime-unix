@@ -163,8 +163,13 @@ void NativeTests::encryptedReviewAndActions() {
     widget<QLineEdit>(window, "reviewPassword")->setText("wrong-password"); click(window, "unlock");
     QTRY_COMPARE(errors.count(), 2);
     QVERIFY(table->item(0, 1)->text().contains(QStringLiteral("加密")));
+    // The failure is reported beside the password field, which gets focus back.
+    auto* credentialError = widget<QLabel>(window, "credentialError");
+    QTRY_VERIFY(credentialError->isVisible()); QVERIFY(!credentialError->text().isEmpty());
+    QVERIFY(widget<QLineEdit>(window, "reviewPassword")->hasFocus());
     widget<QLineEdit>(window, "reviewPassword")->setText("test-password"); click(window, "unlock");
     QTRY_VERIFY_WITH_TIMEOUT(!table->item(0, 1)->text().contains(QStringLiteral("加密")), 10000);
+    QVERIFY(!credentialError->isVisible());
     capture(window, "03-records");
     click(window, "next"); QTRY_COMPARE(table->rowCount(), 4);
     click(window, "previous"); QTRY_COMPARE(table->rowCount(), 20);
@@ -875,8 +880,8 @@ void NativeTests::featureGuide() {
         QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
         capture(*guide, "31-feature-mixed-input");
         click(window, "guideMixedFeature");
-        auto* smart = widget<QComboBox>(window, "setting_smart_english");
-        QCOMPARE(smart->currentData().toBool(), saved.value("smart_english").toBool());
+        auto* smart = widget<QCheckBox>(window, "setting_smart_english");
+        QCOMPARE(smart->isChecked(), saved.value("smart_english").toBool());
         QTRY_VERIFY(smart->isVisible());
         click(window, "openGuide"); QCOMPARE(steps->currentIndex(), 0);
         advance(); QCOMPARE(steps->currentIndex(), 1);
@@ -1097,7 +1102,16 @@ void NativeTests::quietInterface() {
     QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("輸入法設定"));
     capture(window, "60-quiet-settings");
     auto* context = widget<QSpinBox>(window, "setting_context_length");
+    auto* saveSettings = widget<QPushButton>(window, "saveSettings");
+    QVERIFY(!saveSettings->isEnabled());
     const auto original = context->value(); context->setValue(original == 256 ? 128 : 256);
+    QVERIFY(saveSettings->isEnabled());
+    QVERIFY(widget<QListWidget>(window, "navigation")->currentItem()->text().endsWith(QStringLiteral("●")));
+    // Undoing the edit is not an unsaved change.
+    context->setValue(original);
+    QVERIFY(!saveSettings->isEnabled()); QVERIFY(!widget<QLabel>(window, "settingsStatus")->isVisible());
+    QVERIFY(!widget<QListWidget>(window, "navigation")->currentItem()->text().endsWith(QStringLiteral("●")));
+    context->setValue(original == 256 ? 128 : 256);
     QVERIFY(widget<QLabel>(window, "settingsStatus")->isVisible());
     QCOMPARE(widget<QLabel>(window, "settingsStatus")->text(), QStringLiteral("尚未儲存"));
     click(window, "saveSettings");

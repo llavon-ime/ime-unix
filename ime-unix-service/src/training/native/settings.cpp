@@ -21,6 +21,7 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QStyle>
 #include <QTabWidget>
@@ -54,6 +55,21 @@ void writeFile(const QString& path, const QByteArray& data, const QByteArray& sn
 }
 QJsonObject qtJson(const nlohmann::json& value) {
     return QJsonDocument::fromJson(QByteArray::fromStdString(value.dump())).object();
+}
+QString settingHelp(const QString& key) {
+    static const QMap<QString, QString> help{
+        {"model_path", QStringLiteral("留空時使用隨輸入法安裝的模型。")},
+        {"inference_provider", QStringLiteral("執行預測模型的方式；一般維持自動即可。")},
+        {"context_length", QStringLiteral("預測時參考的前文長度；越長越耗資源。")},
+        {"thread_count", QStringLiteral("預測使用的 CPU 執行緒數。")},
+        {"gpu_layers", QStringLiteral("交給顯示卡運算的模型層數；0 表示只用 CPU。")},
+        {"idle_timeout_seconds", QStringLiteral("預測服務閒置超過這個秒數後釋放資源。")},
+        {"selection_key_count", QStringLiteral("選字鍵中實際使用的按鍵數。")},
+        {"candidate_page_size", QStringLiteral("候選窗每頁顯示的候選字數量。")},
+        {"move_cursor_after_selection", QStringLiteral("選字後，游標移到選定的字之後。")},
+        {"smart_english", QStringLiteral("不必切換模式即可混打中英文，輸入法會隨按鍵判斷。")},
+    };
+    return help.value(key);
 }
 }
 
@@ -182,9 +198,12 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
             if (!groups.contains(group)) {
                 auto* content = new QWidget; content->setObjectName("settingsForm"); content->setAttribute(Qt::WA_StyledBackground, true);
                 auto* form = new QVBoxLayout(content);
-                form->setContentsMargins(0, 0, 8, 12); form->setSpacing(8); form->addStretch();
+                form->setContentsMargins(0, 0, 14, 12); form->setSpacing(0);
+                auto* card = new QFrame; card->setObjectName("settingsCard");
+                auto* rows = new QVBoxLayout(card); rows->setContentsMargins(0, 0, 0, 0); rows->setSpacing(0);
+                form->addWidget(card); form->addStretch();
                 auto* area = new QScrollArea; area->setFrameShape(QFrame::NoFrame); area->setWidgetResizable(true); area->setWidget(content);
-                tabs->addTab(area, group); groups.insert(group, form);
+                tabs->addTab(area, group); groups.insert(group, rows);
             }
             groupFields_[group].append(field);
         }
@@ -196,6 +215,9 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
     status_ = new QLabel; status_->setWordWrap(true); status_->setProperty("role", "muted"); status_->setObjectName(phrases ? "phraseStatus" : "settingsStatus"); layout->addWidget(status_);
     auto* actions = new QHBoxLayout;
     auto* saveButton = new QPushButton(QStringLiteral("儲存並套用")); saveButton->setProperty("primary", true);
+    saveButton_ = saveButton; saveButton->setEnabled(false);
+    auto* saveShortcut = new QShortcut(QKeySequence::Save, this); saveShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(saveShortcut, &QShortcut::activated, this, [this] { if (dirty_) save(); });
     saveButton->setObjectName(phrases ? "savePhrases" : "saveSettings"); saveButton->setMinimumHeight(36);
     saveButton->setToolTip(phrases ? SettingsStore::phrasesPath() : SettingsStore::configPath());
     auto* reloadButton = new QPushButton(QStringLiteral("重新載入")); reloadButton->setObjectName(phrases ? "reloadPhrases" : "reloadSettings");
@@ -221,10 +243,12 @@ void SettingsPage::buildGroup(const QString& group) {
         const auto field = item.toObject();
         const auto key = field.value("key").toString(), kind = field.value("kind").toString();
         QWidget* input = nullptr;
-        if (kind == "boolean" || kind == "choice") {
+        if (kind == "boolean") {
+            auto* toggle = new NativeSwitch;
+            connect(toggle, &QCheckBox::toggled, this, &SettingsPage::changed); input = toggle;
+        } else if (kind == "choice") {
             auto* combo = new NativeComboBox;
-            if (kind == "boolean") { combo->addItem(QStringLiteral("啟用"), true); combo->addItem(QStringLiteral("關閉"), false); }
-            else for (const auto option : field.value("choices").toArray()) {
+            for (const auto option : field.value("choices").toArray()) {
                 const auto choice = option.toObject(); combo->addItem(choice.value("label").toString(), choice.value("value").toString());
             }
             connect(combo, &QComboBox::currentIndexChanged, this, &SettingsPage::changed); input = combo;
@@ -235,11 +259,17 @@ void SettingsPage::buildGroup(const QString& group) {
             auto* line = new QLineEdit; line->setPlaceholderText(QStringLiteral("留空使用預設模型"));
             connect(line, &QLineEdit::textChanged, this, &SettingsPage::changed); input = line;
         }
-        input->setObjectName("setting_" + key); input->setMinimumHeight(34);
+        input->setObjectName("setting_" + key);
+        if (kind != "boolean") input->setMinimumHeight(34);
         input->setAccessibleName(field.value("label").toString()); fields_.insert(key, input);
         auto* settingRow = new QFrame; settingRow->setObjectName("settingRow");
-        auto* rowLayout = new QVBoxLayout(settingRow); rowLayout->setContentsMargins(16, 10, 16, 10);
+        auto* rowLayout = new QVBoxLayout(settingRow); rowLayout->setContentsMargins(16, 9, 16, 9); rowLayout->setSpacing(6);
         auto* title = new QLabel(field.value("label").toString()); title->setWordWrap(true); title->setBuddy(input);
+        auto* heading = new QVBoxLayout; heading->setSpacing(2); heading->addWidget(title);
+        if (const auto help = settingHelp(key); !help.isEmpty()) {
+            auto* detail = new QLabel(help); detail->setProperty("role", "help"); detail->setWordWrap(true); detail->setTextFormat(Qt::PlainText);
+            heading->addWidget(detail); input->setAccessibleDescription(help);
+        }
         if (key == "model_path") {
             auto* row = new QWidget; auto* horizontal = new QHBoxLayout(row); horizontal->setContentsMargins(0, 0, 0, 0);
             auto* browse = new QPushButton(QStringLiteral("選擇檔案…")); browse->setMinimumHeight(34);
@@ -261,15 +291,19 @@ void SettingsPage::buildGroup(const QString& group) {
                 showStatus(QStringLiteral("將改用安裝的預設模型；請按「儲存並套用」完成。"));
             });
             updateDefaultButton();
-            rowLayout->addWidget(title); rowLayout->addWidget(row);
+            rowLayout->addLayout(heading); rowLayout->addWidget(row);
         } else {
             auto* horizontal = new QHBoxLayout; horizontal->setSpacing(16);
-            input->setFixedWidth(200);
-            horizontal->addWidget(title, 1); horizontal->addWidget(input);
+            if (kind != "boolean") input->setFixedWidth(200);
+            horizontal->addLayout(heading, 1); horizontal->addWidget(input);
             rowLayout->addLayout(horizontal);
         }
         auto* form = groupLayouts_.value(group);
-        form->insertWidget(form->count() - 1, settingRow);
+        if (form->count() > 0) {
+            auto* divider = new QFrame; divider->setObjectName("rowDivider"); divider->setFixedHeight(1);
+            form->addWidget(divider);
+        }
+        form->addWidget(settingRow);
     }
     // Initialize newly built fields without replacing edits in earlier groups.
     for (const auto item : items) {
@@ -277,6 +311,7 @@ void SettingsPage::buildGroup(const QString& group) {
         auto* input = fields_.value(field.value("key").toString());
         const auto value = original_.value(field.value("key").toString());
         if (auto* spin = qobject_cast<QSpinBox*>(input)) spin->setValue(value.toInt());
+        else if (auto* toggle = qobject_cast<QCheckBox*>(input)) toggle->setChecked(value.toBool());
         else if (auto* combo = qobject_cast<QComboBox*>(input)) combo->setCurrentIndex(combo->findData(value.toVariant()));
         else if (auto* line = qobject_cast<QLineEdit*>(input)) line->setText(value.toString());
     }
@@ -313,11 +348,21 @@ bool SettingsPage::checkPhrases(bool explicitCheck) {
 }
 
 void SettingsPage::showStatus(const QString& message) { status_->setText(message); status_->setVisible(!message.isEmpty()); }
-void SettingsPage::changed() { if (!loading_) { dirty_ = true; showStatus(QStringLiteral("尚未儲存")); } }
+void SettingsPage::setDirty(bool dirty) {
+    saveButton_->setEnabled(dirty);
+    if (dirty != dirty_) { dirty_ = dirty; emit dirtyChanged(dirty); }
+}
+void SettingsPage::changed() {
+    if (loading_) return;
+    // Undoing an edit returns to the saved state instead of staying "unsaved".
+    setDirty(phrases_ ? phraseList_->text() != loadedPhrases_ : values() != original_);
+    showStatus(dirty_ ? QStringLiteral("尚未儲存") : QString());
+}
 void SettingsPage::fill(const QJsonObject& values) {
     for (auto it = fields_.cbegin(); it != fields_.cend(); ++it) {
         const auto value = values.value(it.key());
         if (auto* spin = qobject_cast<QSpinBox*>(it.value())) spin->setValue(value.toInt());
+        else if (auto* toggle = qobject_cast<QCheckBox*>(it.value())) toggle->setChecked(value.toBool());
         else if (auto* combo = qobject_cast<QComboBox*>(it.value())) combo->setCurrentIndex(combo->findData(value.toVariant()));
         else qobject_cast<QLineEdit*>(it.value())->setText(value.toString());
     }
@@ -326,6 +371,7 @@ QJsonObject SettingsPage::values() const {
     QJsonObject result = original_;
     for (auto it = fields_.cbegin(); it != fields_.cend(); ++it) {
         if (auto* spin = qobject_cast<QSpinBox*>(it.value())) result[it.key()] = spin->value();
+        else if (auto* toggle = qobject_cast<QCheckBox*>(it.value())) result[it.key()] = toggle->isChecked();
         else if (auto* combo = qobject_cast<QComboBox*>(it.value())) result[it.key()] = QJsonValue::fromVariant(combo->currentData());
         else result[it.key()] = qobject_cast<QLineEdit*>(it.value())->text();
     }
@@ -335,9 +381,9 @@ bool SettingsPage::reload() {
     loading_ = true;
     bool loaded = true;
     try {
-        if (phrases_) phraseList_->loadText(store_.loadPhrases());
+        if (phrases_) { phraseList_->loadText(store_.loadPhrases()); loadedPhrases_ = phraseList_->text(); }
         else { original_ = store_.load(); fill(original_); }
-        dirty_ = false; showStatus({});
+        setDirty(false); showStatus({});
     } catch (const std::exception& error) { loaded = false; showStatus(QString::fromUtf8(error.what())); }
     loading_ = false;
     if (phrases_) checkPhrases();
@@ -348,7 +394,7 @@ void SettingsPage::save() {
         bool runtime = false;
         if (phrases_) {
             if (!checkPhrases()) { showStatus(QStringLiteral("尚未儲存，請先修正上方查表問題。")); return; }
-            store_.savePhrases(phraseList_->text());
+            store_.savePhrases(phraseList_->text()); loadedPhrases_ = phraseList_->text();
         }
         else {
             const auto updated = values();
@@ -356,7 +402,7 @@ void SettingsPage::save() {
                 runtime = runtime || updated.value(key) != original_.value(key);
             store_.save(updated); original_ = updated;
         }
-        dirty_ = false; notifyHost(runtime);
+        setDirty(false); notifyHost(runtime);
     } catch (const std::exception& error) { showStatus(QString::fromUtf8(error.what())); }
 }
 

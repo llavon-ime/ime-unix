@@ -17,6 +17,18 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 };
 
+// An on/off setting that applies to its whole row; still a QCheckBox for
+// keyboard and accessibility behavior.
+class NativeSwitch final : public QCheckBox {
+public:
+    explicit NativeSwitch(QWidget* parent = nullptr);
+    QSize sizeHint() const override { return {40, 24}; }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    bool hitButton(const QPoint& position) const override { return rect().contains(position); }
+};
+
 class NativeCheckBox final : public QCheckBox {
 public:
     explicit NativeCheckBox(const QString& text, QWidget* parent = nullptr);

@@ -126,6 +126,24 @@ void NativeComboBox::wheelEvent(QWheelEvent* event) {
     else event->ignore();
 }
 
+NativeSwitch::NativeSwitch(QWidget* parent) : QCheckBox(parent) {
+    setFocusPolicy(Qt::StrongFocus); setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+}
+void NativeSwitch::paintEvent(QPaintEvent*) {
+    QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
+    const auto c = appearance();
+    const QRectF track = QRectF(rect()).adjusted(1, 1, -1, -1);
+    if (hasFocus()) { painter.setPen(QPen(c.background.lightness() < 128 ? c.accentText : c.accent, 2)); painter.setBrush(Qt::NoBrush); painter.drawRoundedRect(QRectF(rect()).adjusted(.5, .5, -.5, -.5), 12, 12); }
+    painter.setPen(Qt::NoPen);
+    // The off track outlines the control, so it needs the 3:1 boundary colour.
+    painter.setBrush(!isEnabled() ? c.border : isChecked() ? c.accent : c.control);
+    const auto pill = track.adjusted(1, 1, -1, -1);
+    painter.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2);
+    const qreal diameter = pill.height() - 4;
+    const qreal x = isChecked() ? pill.right() - 2 - diameter : pill.left() + 2;
+    painter.setBrush(Qt::white); painter.drawEllipse(QRectF(x, pill.top() + 2, diameter, diameter));
+}
+
 NativeCheckBox::NativeCheckBox(const QString& text, QWidget* parent) : QCheckBox(text, parent) {
     setMinimumHeight(30); setFocusPolicy(Qt::StrongFocus);
 }
