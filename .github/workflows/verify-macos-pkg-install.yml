@@ -125,6 +125,7 @@ jobs:
           pkgutil --expand "${RUNNER_TEMP}/llavon-ime-install-check.pkg" "${expanded}"
           grep -q '<conclusion file="Conclusion.html"' "${expanded}/Distribution"
           grep -q '登出並重新登入，或重新啟動 Mac' "${expanded}/Resources/Conclusion.html"
+          grep -q '更新：</strong>不需要登出' "${expanded}/Resources/Conclusion.html"
 
       - name: Check the runner session
         run: |
@@ -181,6 +182,17 @@ jobs:
       - name: Verify an upgrade keeps working without a log out
         run: |
           set -euo pipefail
+          tis="/Library/Application Support/llavon-ime/tools/llavon-ime-tis"
+          # When the input method is the selected source, preinstall switches to
+          # the ASCII layout while the bundle is replaced and postinstall
+          # selects it again. A runner where it cannot be selected yet (macOS 26
+          # before System Settings adds it) skips that check.
+          selected_before=""
+          if "${tis}" select com.llavon.inputmethod.LlavonIME.Default 2>/dev/null &&
+             [ "$("${tis}" current)" = com.llavon.inputmethod.LlavonIME.Default ]; then
+            selected_before=com.llavon.inputmethod.LlavonIME.Default
+          fi
+          echo "selected before upgrade: ${selected_before:-none}"
           before="$(pgrep -x LlavonIME | head -1)"
 
           sudo installer -pkg "${RUNNER_TEMP}/llavon-ime-install-check.pkg" -target /
@@ -198,7 +210,6 @@ jobs:
 
           # The replaced bundle is still registered with the text input system,
           # without registering another copy during the upgrade or app launch.
-          tis="/Library/Application Support/llavon-ime/tools/llavon-ime-tis"
           registered=0
           # TIS can take a moment to refresh the existing registration after
           # the bundle is replaced; polling must not register it again.
@@ -225,7 +236,8 @@ jobs:
           # retry loop. It must unload itself after checking the final TIS state.
           registration_label="com.llavon.inputmethod.LlavonIME.register-after-upgrade"
           registration_job_removed=0
-          for _ in {1..5}; do
+          # The job waits for the transaction to settle before its checks.
+          for _ in {1..30}; do
             if ! launchctl print "gui/$(id -u)/${registration_label}" >/dev/null 2>&1; then
               registration_job_removed=1
               break
@@ -233,6 +245,15 @@ jobs:
             sleep 1
           done
           test "${registration_job_removed}" -eq 1
+          "${tis}" list com.llavon.inputmethod.LlavonIME | sort > "${RUNNER_TEMP}/input-sources-after-job"
+          if ! cmp -s "${RUNNER_TEMP}/input-sources-before-upgrade" "${RUNNER_TEMP}/input-sources-after-job"; then
+            echo "the post-upgrade registration check changed the input-source list" >&2
+            diff -u "${RUNNER_TEMP}/input-sources-before-upgrade" "${RUNNER_TEMP}/input-sources-after-job" || true
+            exit 1
+          fi
+          if [ -n "${selected_before}" ]; then
+            test "$("${tis}" current)" = "${selected_before}"
+          fi
 
           # On macOS 15 and earlier the enabled input source survives the
           # upgrade in the HIToolbox list; macOS 26 keeps it in a protected

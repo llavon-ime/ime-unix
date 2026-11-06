@@ -5,9 +5,11 @@ APP="/Library/Input Methods/LlavonIME.app"
 PAYLOAD="/Library/Application Support/llavon-ime"
 TIS_TOOL="${PAYLOAD}/tools/llavon-ime-tis"
 INSTALL_STATE="${PAYLOAD}/.package-install-state"
+RESTORE_STATE="${PAYLOAD}/.package-restore-source"
 
 install_kind="$(cat "${INSTALL_STATE}" 2>/dev/null || true)"
-/bin/rm -f "${INSTALL_STATE}"
+restore_source="$(cat "${RESTORE_STATE}" 2>/dev/null || true)"
+/bin/rm -f "${INSTALL_STATE}" "${RESTORE_STATE}"
 case "${install_kind}" in
     fresh|upgrade) ;;
     *)
@@ -52,6 +54,17 @@ if [ -n "${console_user}" ] && id "${console_user}" >/dev/null 2>&1; then
         sleep 1
     done
 
+    # The prediction service is a detached process that keeps running its old,
+    # now replaced binary and model: killing the input method skips the clean
+    # shutdown that a normal quit performs, and the new input method would
+    # simply connect to the old service again. Stop it; the engine starts the
+    # new one on the next prediction and replaces the stale socket.
+    /usr/bin/pkill -x -u "${uid}" llavon-ime-unix-service >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5; do
+        /usr/bin/pgrep -x -u "${uid}" llavon-ime-unix-service >/dev/null 2>&1 || break
+        sleep 1
+    done
+
     # Launch the new executable so an upgrade becomes usable without logging
     # out. The app intentionally does not register itself: repeated launches
     # must not create duplicate entries on macOS 15.
@@ -80,7 +93,10 @@ if [ -n "${console_user}" ] && id "${console_user}" >/dev/null 2>&1; then
     if [ -x "${TIS_TOOL}" ] && [ "${install_kind}" = "fresh" ]; then
         # Registration is not idempotent on macOS 15. Call it at most once,
         # then poll status while LaunchServices finishes discovering the bundle.
-        as_user "${TIS_TOOL}" register "${APP}" || true
+        # A reinstall without logging out, or a removed copy from
+        # ~/Library/Input Methods, can leave the bundle known already; do not
+        # register a second record then.
+        as_user "${TIS_TOOL}" register-if-missing "${APP}" "${bundle_id}" >/dev/null || true
         registered=0
         for _ in 1 2 3 4 5 6 7 8 9 10; do
             if as_user "${TIS_TOOL}" status "${bundle_id}" >/dev/null 2>&1; then
@@ -118,10 +134,31 @@ if [ -n "${console_user}" ] && id "${console_user}" >/dev/null 2>&1; then
         # submitted job removes itself after running because launchctl treats
         # submitted jobs as keepalive by default.
         as_user /bin/launchctl remove "${registration_label}" >/dev/null 2>&1 || true
+        # The record can vanish briefly while TIS refreshes it, or only after
+        # PackageKit finishes. Register only when it is still missing on three
+        # consecutive checks after the transaction has settled, so a record
+        # that is merely being refreshed is never registered a second time.
         if ! as_user /bin/launchctl submit -l "${registration_label}" -- \
-                /bin/sh -c 'sleep 5; "$1" register-if-missing "$2" "$3"; /bin/launchctl remove "$4"' \
+                /bin/sh -c 'sleep 15; missing=0; for _ in 1 2 3; do if "$1" status "$3" >/dev/null 2>&1; then missing=0; break; fi; missing=$((missing + 1)); sleep 1; done; if [ "${missing}" -eq 3 ]; then "$1" register "$2"; fi; /bin/launchctl remove "$4"' \
                 sh "${TIS_TOOL}" "${APP}" "${bundle_id}" "${registration_label}"; then
             echo "llavon-ime: could not schedule the one-time input-source registration check; log out and back in once." >&2
+        fi
+    fi
+
+    # Select the input method again if preinstall switched away from it.
+    # TIS may still be refreshing the replaced bundle, so retry briefly.
+    if [ -n "${restore_source}" ] && [ -x "${TIS_TOOL}" ]; then
+        restored=0
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if as_user "${TIS_TOOL}" select "${restore_source}" >/dev/null 2>&1 &&
+               [ "$(as_user "${TIS_TOOL}" current 2>/dev/null || true)" = "${restore_source}" ]; then
+                restored=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "${restored}" = "0" ]; then
+            echo "llavon-ime: could not select 「拉風輸入法」 again; choose it from the input menu." >&2
         fi
     fi
 
