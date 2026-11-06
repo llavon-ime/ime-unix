@@ -212,8 +212,10 @@ jobs:
           # without registering another copy during the upgrade or app launch.
           registered=0
           # TIS can take a moment to refresh the existing registration after
-          # the bundle is replaced; polling must not register it again.
-          for _ in {1..15}; do
+          # the bundle is replaced. The postinstall repair job waits 15 seconds
+          # before its checks, so poll well past that before failing; polling
+          # must not register the bundle again.
+          for _ in {1..45}; do
             if "${tis}" status com.llavon.inputmethod.LlavonIME; then
               registered=1
               break
