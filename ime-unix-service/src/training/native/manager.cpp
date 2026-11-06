@@ -10,6 +10,7 @@
 #endif
 
 #include <QCheckBox>
+#include <QAccessible>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -26,6 +27,7 @@
 #include <QPlainTextEdit>
 #include <QPainter>
 #include <QProgressBar>
+#include <QRegularExpressionValidator>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -60,7 +62,7 @@ public:
         painter->setClipRect(option.rect);
         auto font = option.font; font.setPixelSize(16); font.setWeight(QFont::Medium);
         painter->setFont(font); painter->setPen(appearance().text);
-        const auto rect = option.rect.adjusted(8, 0, -8, 0);
+        const auto rect = option.rect.adjusted(11, 0, -8, 0);
         painter->drawText(rect.left(), rect.top() + 26,
             QFontMetrics(font).elidedText(lines.value(0), Qt::ElideRight, rect.width()));
         if (lines.size() > 1) {
@@ -124,20 +126,24 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     sidebar->setObjectName("sidebar");
     sidebar->setFixedWidth(204);
     auto* side = new QVBoxLayout(sidebar);
-    side->setContentsMargins(12, 26, 12, 18);
+    side->setContentsMargins(12, 24, 12, 16);
     side->addWidget(label(QStringLiteral("拉風"), "brand"));
     side->addSpacing(24);
     auto* navigation = new QListWidget;
     navigation->setObjectName("navigation");
     const QStringList sections{QStringLiteral("訓練資料"), QStringLiteral("模型與訓練"), QStringLiteral("訓練歷程"), QStringLiteral("輸入法設定"), QStringLiteral("替代詞彙"), QStringLiteral("軟體更新"), QStringLiteral("版本與狀態")};
-    for (const auto index : {3, 4, 0, 1, 2}) {
+    const auto addHeader = [navigation](const QString& title) {
+        // Not selectable, and the -1 page keeps it out of showPage's lookup.
+        auto* item = new QListWidgetItem(title, navigation); item->setData(Qt::UserRole, -1); item->setFlags(Qt::NoItemFlags);
+    };
+    const auto addPage = [navigation, &sections](int index) {
         auto* item = new QListWidgetItem(sections[index], navigation); item->setData(Qt::UserRole, index);
         item->setIcon(navigationIcon(index));
-    }
-    auto* updateItem = new QListWidgetItem(sections[5], navigation); updateItem->setData(Qt::UserRole, 5);
-    updateItem->setIcon(navigationIcon(5));
-    auto* aboutItem = new QListWidgetItem(sections[6], navigation); aboutItem->setData(Qt::UserRole, 6); aboutItem->setIcon(navigationIcon(6));
-    navigation->setIconSize(QSize(26, 26));
+    };
+    addPage(3); addPage(4);
+    addHeader(QStringLiteral("個人化")); addPage(0); addPage(1); addPage(2);
+    addHeader(QStringLiteral("系統")); addPage(5); addPage(6);
+    navigation->setIconSize(QSize(22, 22));
     navigation->setSpacing(2);
     navigation->setMinimumHeight(300);
     side->addWidget(navigation, 1);
@@ -145,21 +151,28 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     guideButton_->setProperty("quiet", true);
     side->addWidget(guideButton_);
     connect(guideButton_, &QPushButton::clicked, this, [this] { showPage("guide"); });
-    message_ = label({});
-    message_->setObjectName("notice");
-    side->addWidget(message_); message_->hide();
     horizontal->addWidget(sidebar);
     auto* content = new QWidget;
     auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(28, 26, 28, 20);
-    layout->setSpacing(22);
+    layout->setContentsMargins(28, 24, 28, 24);
+    layout->setSpacing(24);
     auto* titleRow = new QHBoxLayout;
     heading_ = label({}, "title");
     heading_->setObjectName("pageHeading");
-    titleRow->addWidget(heading_, 1);
-    auto* refreshButton = button(QStringLiteral("重新整理"), "refresh");
-    refreshButton->setProperty("quiet", true);
-    titleRow->addWidget(refreshButton);
+    heading_->setWordWrap(false);
+    titleRow->addWidget(heading_);
+    // In the title row a message appears beside the page it concerns without
+    // shifting the content below, such as the history graph's viewport.
+    message_ = label({});
+    message_->setObjectName("notice");
+    message_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    titleRow->addWidget(message_, 1, Qt::AlignRight | Qt::AlignVCenter); message_->hide();
+    titleRow->addStretch();
+    noticeTimer_ = new QTimer(this); noticeTimer_->setSingleShot(true); noticeTimer_->setInterval(5000);
+    connect(noticeTimer_, &QTimer::timeout, this, [this] { notice({}); });
+    refreshButton_ = button(QStringLiteral("重新整理"), "refresh");
+    refreshButton_->setProperty("quiet", true);
+    titleRow->addWidget(refreshButton_);
     layout->addLayout(titleRow);
     quickStartDismissed_ = QuickStartPreferences::dismissed();
     quickStart_ = new QFrame; quickStart_->setObjectName("quickStart");
@@ -192,12 +205,15 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
         if (row < 0) return;
         const int index = navigation->item(row)->data(Qt::UserRole).toInt();
         quickStart_->setVisible(index == 3 && !quickStartDismissed_);
+        // Settings and phrases have their own reload; status pages poll.
+        refreshButton_->setVisible(index < 3);
         if (index < 3) ensurePersonalizationPages();
         const bool firstPhraseVisit = index == 4 && !phrases_;
         if (firstPhraseVisit) {
             // Reading tables and building every phrase row are unrelated to
             // opening Settings. Keep that work on the first visit to Phrases.
             phrases_ = new SettingsPage(true, nullptr, backend_->phraseTablePath());
+            connect(phrases_, &SettingsPage::dirtyChanged, this, [this](bool dirty) { markUnsaved(4, dirty); });
             auto* placeholder = pages_->widget(4); pages_->removeWidget(placeholder);
             pages_->insertWidget(4, phrases_); delete placeholder;
         }
@@ -208,17 +224,33 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
         if (index == 4 && !firstPhraseVisit && !phrases_->isDirty()) phrases_->reload();
         if (auto* host = qobject_cast<HostSettingsPage*>(pages_->currentWidget())) host->refresh();
     });
-    connect(refreshButton, &QPushButton::clicked, this, &Manager::refresh);
+    connect(refreshButton_, &QPushButton::clicked, this, &Manager::refresh);
+    connect(settings_, &SettingsPage::dirtyChanged, this, [this](bool dirty) { markUnsaved(3, dirty); });
     connect(backend_, &Backend::ready, this, &Manager::refresh);
-    connect(backend_, &Backend::error, this, [this](const QString& error) { notice(error, true); });
+    connect(backend_, &Backend::error, this, [this](const QString& error) { lastError_ = error; notice(error, true); });
     auto* shortcut = new QShortcut(QKeySequence::Refresh, this);
-    connect(shortcut, &QShortcut::activated, this, &Manager::refresh);
+    connect(shortcut, &QShortcut::activated, this, [this] {
+        // The poll timer also calls refresh(), so reload edited pages only here.
+        auto* page = qobject_cast<SettingsPage*>(pages_->currentWidget());
+        if (page && !page->isDirty()) page->reload();
+        else if (!page) refresh();
+    });
     timer_ = new QTimer(this);
     timer_->setInterval(3000);
     connect(timer_, &QTimer::timeout, this, &Manager::refresh);
     applyAppearance(this);
     qApp->installEventFilter(this);
     showPage(initialPage);
+}
+
+void Manager::markUnsaved(int page, bool unsaved) {
+    const QStringList titles{QStringLiteral("輸入法設定"), QStringLiteral("替代詞彙")};
+    auto* navigation = findChild<QListWidget*>("navigation");
+    for (int row = 0; row < navigation->count(); ++row) {
+        auto* item = navigation->item(row);
+        if (item->data(Qt::UserRole).toInt() == page)
+            item->setText(titles[page - 3] + (unsaved ? QStringLiteral("  ●") : QString()));
+    }
 }
 
 void Manager::ensurePersonalizationPages() {
@@ -236,6 +268,9 @@ void Manager::ensurePersonalizationPages() {
 }
 
 bool Manager::eventFilter(QObject* watched, QEvent* event) {
+    // A clicked button must not keep a focus ring that reads as "selected".
+    if (event->type() == QEvent::Polish)
+        if (auto* pushButton = qobject_cast<QPushButton*>(watched)) pushButton->setFocusPolicy(Qt::TabFocus);
     if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
         applyAppearance(this);
         if (guide_) applyAppearance(guide_);
@@ -295,6 +330,15 @@ QWidget* Manager::recordsPage() {
     lock_ = secrets->findChild<QPushButton*>("lock");
     recording_ = secrets->findChild<QPushButton*>("recording");
     layout->addWidget(secrets);
+    // Password errors belong beside the fields, not only in the title row.
+    credentialError_ = label({}); credentialError_->setObjectName("credentialError");
+    credentialError_->setProperty("validation", "invalid"); credentialError_->hide();
+    layout->addWidget(credentialError_);
+    for (auto* field : {password_, confirmation_})
+        connect(field, &QLineEdit::textEdited, credentialError_, &QWidget::hide);
+    // Until a password exists there is nothing to filter or page through.
+    recordsBody_ = new QWidget; recordsBody_->hide();
+    auto* bodyRows = new QVBoxLayout(recordsBody_); bodyRows->setContentsMargins(0, 0, 0, 0); bodyRows->setSpacing(12);
     auto* controls = new QHBoxLayout;
     filter_ = new NativeComboBox;
     filter_->setObjectName("recordFilter");
@@ -311,16 +355,15 @@ QWidget* Manager::recordsPage() {
     counts_ = label({}, "muted");
     counts_->setWordWrap(false);
     controls->addWidget(counts_);
-    layout->addLayout(controls);
+    bodyRows->addLayout(controls);
     emptyRecords_ = label(QStringLiteral("尚無輸入紀錄"), "muted");
-    layout->addWidget(emptyRecords_);
+    bodyRows->addWidget(emptyRecords_);
     records_ = new QTableWidget(0, 4);
     records_->setObjectName("records");
     records_->setHorizontalHeaderLabels({QStringLiteral("時間"), QStringLiteral("輸入內容 / 前文"), QStringLiteral("注音"), QStringLiteral("選字")});
     records_->setSelectionBehavior(QAbstractItemView::SelectRows);
     records_->setSelectionMode(QAbstractItemView::SingleSelection);
     records_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    records_->setAlternatingRowColors(true);
     records_->setItemDelegateForColumn(1, new SentenceDelegate(records_));
     records_->setShowGrid(false);
     records_->verticalHeader()->hide();
@@ -329,7 +372,8 @@ QWidget* Manager::recordsPage() {
     records_->setColumnWidth(0, 105);
     records_->setColumnWidth(2, 160);
     records_->setColumnWidth(3, 85);
-    layout->addWidget(records_, 1);
+    bodyRows->addWidget(records_, 1);
+    bodyRows->addStretch();
     auto* footer = new QHBoxLayout;
     exclude_ = button(QStringLiteral("排除"), "exclude");
     delete_ = button(QStringLiteral("刪除…"), "delete");
@@ -343,14 +387,16 @@ QWidget* Manager::recordsPage() {
     footer->addWidget(pageInfo_);
     footer->addWidget(previous_);
     footer->addWidget(next_);
-    layout->addLayout(footer);
+    bodyRows->addLayout(footer);
     forget_ = button(QStringLiteral("忘記密碼，清除所有對話資料…"), "forget");
     forget_->setFlat(true);
     forget_->setProperty("quiet", true); forget_->setProperty("destructive", true);
     auto* bottom = new QHBoxLayout;
     bottom->addWidget(forget_);
     bottom->addStretch();
-    layout->addLayout(bottom);
+    bodyRows->addLayout(bottom);
+    layout->addWidget(recordsBody_, 1);
+    layout->addStretch();
     connect(filter_, &QComboBox::currentIndexChanged, this, [this] { offset_ = 0; refresh(); });
     connect(manualView_, &QCheckBox::toggled, this, [this] { offset_ = 0; refresh(); });
     connect(previous_, &QPushButton::clicked, this, [this] { offset_ = qMax(0, offset_ - 20); refresh(); });
@@ -391,10 +437,12 @@ QWidget* Manager::trainingPage() {
     page->setObjectName("trainingContent");
     page->setAttribute(Qt::WA_StyledBackground, true);
     auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(0, 0, 14, 0);
     layout->setSpacing(16);
     layout->addWidget(label(QStringLiteral("準備環境"), "section"));
-    const auto resource = [this, layout](const QString& title, QLabel*& description,
+    auto* resources = new QFrame; resources->setObjectName("settingsCard");
+    auto* resourceRows = new QVBoxLayout(resources); resourceRows->setContentsMargins(0, 0, 0, 0); resourceRows->setSpacing(0);
+    const auto resource = [this, resourceRows](const QString& title, QLabel*& description,
                                        const QString& action, const char* name, const QString& path,
                                        const QString& checkPath) {
         auto* surface = new QFrame; surface->setObjectName("resourceRow");
@@ -410,14 +458,21 @@ QWidget* Manager::trainingPage() {
         jobButtons_ << check << download;
         connect(check, &QPushButton::clicked, this, [this, checkPath] { act(checkPath); });
         connect(download, &QPushButton::clicked, this, [this, path] { act(path); });
-        layout->addWidget(surface);
+        if (resourceRows->count() > 0) {
+            auto* divider = new QFrame; divider->setObjectName("rowDivider"); divider->setFixedHeight(1);
+            resourceRows->addWidget(divider);
+        }
+        resourceRows->addWidget(surface);
     };
     resource(QStringLiteral("基礎模型"), model_, QStringLiteral("下載 / 更新"), "fetch", "/api/fetch", "/api/check");
     resource(QStringLiteral("LoRA 訓練器"), trainer_, QStringLiteral("安裝 / 更新"), "installTrainer", "/api/install-trainer", "/api/check-trainer");
+    layout->addWidget(resources);
     device_ = label({}, "muted");
     layout->addWidget(device_);
     layout->addSpacing(4);
     layout->addWidget(label(QStringLiteral("這次如何學習"), "section"));
+    auto* learning = new QFrame; learning->setObjectName("settingsCard");
+    auto* learningRows = new QVBoxLayout(learning); learningRows->setContentsMargins(16, 14, 16, 12); learningRows->setSpacing(6);
     auto* form = new QFormLayout;
     form->setVerticalSpacing(12); form->setHorizontalSpacing(20);
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -439,13 +494,14 @@ QWidget* Manager::trainingPage() {
     trainPassword_->setMaximumWidth(400);
     trainPasswordLabel_ = label(QStringLiteral("資料密碼")); trainPasswordLabel_->setObjectName("trainPasswordLabel");
     trainPasswordLabel_->setBuddy(trainPassword_); form->addRow(trainPasswordLabel_, trainPassword_);
-    layout->addLayout(form);
+    learningRows->addLayout(form); learningRows->addSpacing(4);
     manualTrain_ = new NativeCheckBox(QStringLiteral("只訓練曾手動選字的句子"));
     manualTrain_->setObjectName("manualTrain"); manualTrain_->setChecked(true);
     stabilize_ = new NativeCheckBox(QStringLiteral("降低模型遺忘（實驗性）"));
     stabilize_->setObjectName("stabilize"); stabilize_->setChecked(true);
-    layout->addWidget(manualTrain_);
-    layout->addWidget(stabilize_);
+    learningRows->addWidget(manualTrain_);
+    learningRows->addWidget(stabilize_);
+    layout->addWidget(learning);
     auto* advanced = new QGroupBox(QStringLiteral("進階參數"));
     advanced->setObjectName("advanced");
     auto* advancedForm = new QFormLayout(advanced);
@@ -464,6 +520,11 @@ QWidget* Manager::trainingPage() {
         input->setMaxLength(100); options_.insert(field[0], input);
         advancedForm->addRow(field[1], input);
     }
+    // Free-text for the backend, so stop typos here rather than mid-training.
+    const auto restrict = [this](const char* field, const char* pattern) {
+        options_[field]->setValidator(new QRegularExpressionValidator(QRegularExpression(pattern), options_[field]));
+    };
+    restrict("device", "auto|cpu|cuda|mps"); restrict("dtype", "float32|bfloat16"); restrict("shuffle", "[01]");
     advanced->hide();
     layout->addWidget(advanced);
     connect(strength_, &QComboBox::currentIndexChanged, this, [this, advanced] {
@@ -471,8 +532,14 @@ QWidget* Manager::trainingPage() {
     });
     auto* actions = new QHBoxLayout;
     start_ = button(QStringLiteral("開始訓練"), "startTraining", true);
-    cancel_ = button(QStringLiteral("取消工作"), "cancelJob"); cancel_->setEnabled(false);
-    actions->addWidget(start_); actions->addWidget(cancel_); actions->addStretch();
+    cancel_ = button(QStringLiteral("取消工作"), "cancelJob"); cancel_->setEnabled(false); cancel_->hide();
+    startHint_ = label({}, "help"); startHint_->setObjectName("startHint");
+    connect(trainPassword_, &QLineEdit::textEdited, this, [this] {
+        trainError_.clear(); startHint_->setProperty("validation", QVariant());
+        startHint_->style()->unpolish(startHint_); startHint_->style()->polish(startHint_);
+        if (!state_.isEmpty()) renderState(state_);
+    });
+    actions->addWidget(start_); actions->addWidget(cancel_); actions->addWidget(startHint_, 1);
     layout->addLayout(actions);
     job_ = label(QStringLiteral("尚無執行中的工作"), "muted");
     progress_ = new QProgressBar; progress_->setTextVisible(false);
@@ -566,7 +633,13 @@ void Manager::notice(const QString& message, bool error) {
     message_->setText(message);
     message_->setVisible(!message.isEmpty());
     message_->setToolTip(message);
-    message_->setStyleSheet(error ? QString("color:%1;").arg(appearance().error.name()) : QString());
+    message_->setProperty("tone", error ? "error" : "info");
+    message_->style()->unpolish(message_); message_->style()->polish(message_);
+    // Errors stay until replaced; confirmations should not linger as stale state.
+    noticeTimer_->stop();
+    if (!error && !message.isEmpty() && message != QStringLiteral("正在連接…") && message != QStringLiteral("處理中…"))
+        noticeTimer_->start();
+    if (error && !message.isEmpty()) { QAccessibleEvent alert(message_, QAccessible::Alert); QAccessible::updateAccessibility(&alert); }
 }
 
 void Manager::refresh() {
@@ -644,10 +717,30 @@ void Manager::act(const QString& path, const QJsonObject& body, Backend::Reply r
     }
 #endif
     if (actionPending_) return;
-    actionPending_ = true; updateRecordActions();
-    backend_->request(path, body, [this, onSuccess = std::move(reply)](const QJsonValue& value) {
+    actionPending_ = true; updateRecordActions(); lastError_.clear();
+    const int serial = ++actionSerial_;
+    // Unlocking derives a key and downloads take a while: past 300 ms, say so.
+    QTimer::singleShot(300, this, [this, serial] {
+        if (!actionPending_ || serial != actionSerial_ || busyCursor_) return;
+        busyCursor_ = true; QApplication::setOverrideCursor(Qt::BusyCursor); notice(QStringLiteral("處理中…"));
+    });
+    const bool credentials = path == "/api/unlock" || (path == "/api/protection" && body.value("action") == "set-password");
+    backend_->request(path, body, [this, credentials, path, onSuccess = std::move(reply)](const QJsonValue& value) {
         actionPending_ = false;
-        if (!value.isUndefined() && !value.isNull()) {
+        if (busyCursor_) { busyCursor_ = false; QApplication::restoreOverrideCursor(); }
+        const bool failed = value.isUndefined() || value.isNull();
+        if (credentials) {
+            credentialError_->setText(failed ? lastError_ : QString());
+            credentialError_->setVisible(failed && !lastError_.isEmpty());
+            if (failed) password_->setFocus(Qt::OtherFocusReason);
+        }
+        if (path == "/api/count-trainable" && failed && !lastError_.isEmpty()) {
+            trainError_ = lastError_; startHint_->setProperty("validation", "invalid");
+            startHint_->style()->unpolish(startHint_); startHint_->style()->polish(startHint_);
+            startHint_->setText(trainError_); trainPassword_->setFocus(Qt::OtherFocusReason);
+        }
+        if (!failed) {
+            if (path == "/api/count-trainable") { trainError_.clear(); startHint_->setProperty("validation", QVariant()); }
             notice(QStringLiteral("已更新"));
             if (onSuccess) onSuccess(value);
         }
@@ -660,7 +753,7 @@ void Manager::act(const QString& path, const QJsonObject& body, Backend::Reply r
 void Manager::renderProtection(const QJsonObject& protection) {
     protection_ = protection;
     const bool configured = protection.value("configured").toBool(), unlocked = protection.value("unlocked").toBool();
-    collection_->setText(!configured ? QStringLiteral("收集尚未啟用。請妥善保存資料密碼。") :
+    collection_->setText(!configured ? QStringLiteral("設定資料密碼後才會開始加密收集。請妥善保存密碼；忘記時只能清除已收集的資料。") :
         QStringLiteral("%1 · %2").arg(protection.value("enabled").toBool() ? QStringLiteral("正在加密收集") : QStringLiteral("已暫停收集"),
                                    unlocked ? QStringLiteral("已解鎖檢視") : QStringLiteral("文字已鎖定")));
     password_->setVisible(!unlocked); confirmation_->setVisible(!configured); setup_->setVisible(!configured);
@@ -669,6 +762,7 @@ void Manager::renderProtection(const QJsonObject& protection) {
     recording_->setText(protection.value("enabled").toBool() ? QStringLiteral("暫停收集") : QStringLiteral("恢復收集"));
     trainPassword_->setVisible(configured);
     trainPasswordLabel_->setVisible(configured);
+    recordsBody_->setVisible(configured);
 }
 
 QString Manager::selectedRecord() const {
@@ -707,6 +801,7 @@ void Manager::renderRecords(const QJsonObject& recordPage) {
     }
     const int total = recordPage.value("total").toInt();
     emptyRecords_->setVisible(rows.isEmpty());
+    records_->setVisible(!rows.isEmpty());
     emptyRecords_->setText(protection_.value("configured").toBool() ? QStringLiteral("尚無符合篩選的紀錄") : QStringLiteral("尚無輸入紀錄"));
     pageInfo_->setText(total ? QStringLiteral("%1–%2 / %3 筆").arg(offset_ + 1).arg(offset_ + rows.size()).arg(total) : QString());
     pageInfo_->setVisible(total > 0);
@@ -739,7 +834,7 @@ void Manager::renderState(const QJsonObject& state) {
     progress_->setValue(job.value("state") == "completed" ? 100 : job.value("percent").toInt());
     const auto log = job.value("log").toString();
     const bool idle = job.value("state") == "idle";
-    job_->setVisible(!idle); progress_->setVisible(!idle);
+    job_->setVisible(!idle); progress_->setVisible(running_);
     log_->setVisible(running_ || !log.isEmpty());
     const auto previousLog = log_->toPlainText();
     if (previousLog != log) {
@@ -766,8 +861,12 @@ void Manager::renderState(const QJsonObject& state) {
             scroll->setValue(scroll->maximum());
         } else scroll->setValue(position);
     }
-    cancel_->setEnabled(running_ && !actionPending_);
+    cancel_->setEnabled(running_ && !actionPending_); cancel_->setVisible(running_);
     start_->setEnabled(!running_ && !actionPending_ && !updateBusy && state.value("trainer_ready").toBool() && state.value("model_ready").toBool());
+    startHint_->setText(running_ ? QString() : updateBusy ? QStringLiteral("請等軟體更新完成。") :
+        !state.value("model_ready").toBool() ? QStringLiteral("請先下載基礎模型。") :
+        !state.value("trainer_ready").toBool() ? QStringLiteral("請先安裝 LoRA 訓練器。") : QString());
+    if (!trainError_.isEmpty()) startHint_->setText(trainError_);
     for (auto* widget : jobButtons_) widget->setEnabled(!running_ && !actionPending_ && !updateBusy);
     findChild<QPushButton*>("applyModel")->setEnabled(!running_ && !actionPending_ && !history_->selectedId().isEmpty());
     updateRecordActions();
@@ -783,6 +882,11 @@ QString Manager::selectedRun() const {
     return history_->selectedId();
 }
 void Manager::renderHistory(const QJsonObject& history) {
+    // Rebuilding the base list on every poll would reset an open popup's
+    // highlighted row, so only rebuild when something actually changed.
+    const auto active = state_.value("active_model_path").toString();
+    if (!lastHistory_.isEmpty() && history == lastHistory_ && active == lastHistoryActive_) return;
+    lastHistory_ = history; lastHistoryActive_ = active;
     const auto oldBase = base_->currentData().toString();
     const bool first = base_->count() == 1 && base_->currentData(Qt::UserRole + 1).isNull();
     const QSignalBlocker blocker(base_);
@@ -806,10 +910,9 @@ void Manager::renderHistory(const QJsonObject& history) {
         base_->addItem(title, id); base_->setItemData(base_->count() - 1, run, Qt::UserRole + 1);
         historyRuns_.insert(id, run);
     }
-    history_->setRuns(runs, bases, state_.value("active_model_path").toString());
+    history_->setRuns(runs, bases, active);
     int index = base_->findData(oldBase);
     if (first) {
-        const auto active = state_.value("active_model_path").toString();
         if (!active.isEmpty()) {
             for (int candidate = 0; candidate < base_->count(); ++candidate)
                 if (base_->itemData(candidate, Qt::UserRole + 1).toJsonObject().value("model_path").toString() == active) {

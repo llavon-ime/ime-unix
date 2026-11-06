@@ -11,9 +11,11 @@ namespace llavon::lora {
 Appearance appearance() {
     if (QApplication::palette().color(QPalette::Window).lightness() < 128)
         return {QColor("#202124"), QColor("#292a2e"), QColor("#303136"), QColor("#f5f5f7"),
-                QColor("#b0b1b8"), QColor("#46474e"), QColor("#409cff"), QColor("#263e5a"), QColor("#68ce91"), QColor("#ff827b")};
+                QColor("#b0b1b8"), QColor("#46474e"), QColor("#0a6fd6"), QColor("#263e5a"), QColor("#68ce91"), QColor("#ff827b"),
+                QColor("#6cb4ff"), QColor("#85868e")};
     return {QColor("#f5f5f7"), QColor("#ececef"), QColor("#ffffff"), QColor("#1d1d1f"),
-            QColor("#6e6e73"), QColor("#dcdce0"), QColor("#007aff"), QColor("#e8f2ff"), QColor("#287a48"), QColor("#c9342c")};
+            QColor("#6e6e73"), QColor("#dcdce0"), QColor("#0066d6"), QColor("#e8f2ff"), QColor("#287a48"), QColor("#c9342c"),
+            QColor("#0062cc"), QColor("#8e8e93")};
 }
 
 void applyAppearance(QWidget* window) {
@@ -37,9 +39,9 @@ void applyAppearance(QWidget* window) {
         QMainWindow, QScrollArea, QStackedWidget, QWidget#settingsForm, QWidget#trainingContent { background: $background; }
         QDialog#usageGuide { background: $background; }
         QWidget#sidebar { background: $sidebar; border-right: 1px solid $border; }
-        QLabel[role="brand"] { font-size: 20px; font-weight: 600; }
+        QLabel[role="brand"] { font-size: 20px; font-weight: 600; padding-left: 8px; }
         QLabel[role="title"] { font-size: 24px; font-weight: 600; }
-        QLabel[role="guideAnnotation"] { color: $accent; font-size: 13px; font-weight: 500; }
+        QLabel[role="guideAnnotation"] { color: $accentText; font-size: 13px; font-weight: 500; }
         QLabel[role="guideExample"] { font-size: 19px; font-weight: 500; }
         QLabel[role="guideTopicTitle"] { font-size: 20px; font-weight: 600; }
         QLabel[role="guideKey"] { background: $surface; border: 1px solid $border; border-bottom-width: 2px; border-radius: 6px; padding: 6px 10px; font-weight: 500; }
@@ -47,11 +49,14 @@ void applyAppearance(QWidget* window) {
         QLabel[role="section"] { font-size: 14px; font-weight: 600; }
         QLabel[role="muted"], QLabel[role="eyebrow"] { color: $secondary; }
         QLabel[role="eyebrow"] { font-size: 11px; }
-        QLabel#notice { color: $secondary; font-size: 11px; }
+        QLabel#notice { color: $secondary; font-size: 12px; padding: 4px 10px; }
+        QLabel#notice[tone="error"] { color: $error; background: $dangerSurface; border-radius: 7px; }
+        QPushButton#openGuide { text-align: left; padding-left: 10px; }
         QListWidget#navigation { background: transparent; border: none; outline: none; }
         QListWidget#navigation::item { padding: 8px; border-radius: 7px; }
         QListWidget#navigation::item:hover { background: $surface; }
         QListWidget#navigation::item:selected { background: $accent; color: white; font-weight: 500; }
+        QListWidget#navigation::item:disabled, QListWidget#navigation::item:disabled:hover { background: transparent; color: $secondary; padding: 14px 8px 2px 8px; }
         QPushButton { padding: 4px 14px; min-height: 24px; border: 1px solid $border; border-radius: 7px; background: $surface; }
         QPushButton:hover { background: $hover; border-color: $secondary; }
         QPushButton:pressed { background: $selection; border-color: $accent; }
@@ -59,20 +64,20 @@ void applyAppearance(QWidget* window) {
         QPushButton[primary="true"]:hover { background: $accentHover; border-color: $accentHover; }
         QPushButton[primary="true"]:pressed { background: $accentPressed; border-color: $accentPressed; }
         QPushButton[quiet="true"] { background: transparent; border-color: transparent; color: $secondary; }
-        QPushButton[quiet="true"]:hover { color: $accent; background: $selection; }
+        QPushButton[quiet="true"]:hover { color: $accentText; background: $selection; }
         QPushButton[destructive="true"]:hover, QPushButton[destructive="true"]:pressed { color: $error; background: $dangerSurface; border-color: $error; }
-        QPushButton:focus { border: 2px solid $accent; padding: 3px 13px; }
+        QPushButton:focus { border: 2px solid $focusRing; padding: 3px 13px; }
         QPushButton[primary="true"]:focus { border: 2px solid $focusBorder; }
-        QPushButton[quiet="true"]:focus { color: $accent; border: 2px solid $accent; background: $selection; }
+        QPushButton[quiet="true"]:focus { color: $accentText; border: 2px solid $focusRing; background: $selection; }
         QPushButton:disabled, QPushButton[primary="true"]:disabled, QPushButton[quiet="true"]:disabled, QPushButton[destructive="true"]:disabled { color: $disabledText; background: $sidebar; border: 1px solid $border; padding: 4px 14px; }
         QPushButton[quiet="true"]:disabled { background: transparent; border-color: transparent; }
         QPushButton[compact="true"] { padding: 4px 0px; }
         QPushButton[compact="true"]:focus { padding: 3px 0px; }
-        QLineEdit, QComboBox, QSpinBox { padding: 4px 10px; min-height: 24px; border: 1px solid $border; border-radius: 7px; background: $surface; color: $text; selection-background-color: $accent; selection-color: white; }
+        QLineEdit, QComboBox, QSpinBox { padding: 4px 10px; min-height: 24px; border: 1px solid $control; border-radius: 7px; background: $surface; color: $text; selection-background-color: $accent; selection-color: white; }
         QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: $secondary; }
         QComboBox { padding-right: 32px; }
         QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; border: none; width: 28px; }
-        QComboBox:on { border-color: $accent; background: $selection; }
+        QComboBox:on { border-color: $focusRing; background: $selection; }
         QComboBox::down-arrow, QSpinBox::down-arrow { image: url(:/native/chevron-$variant.xpm); width: 9px; height: 5px; }
         QComboBox QAbstractItemView { background: $surface; color: $text; border: 1px solid $border; border-radius: 7px; padding: 4px; outline: none; selection-background-color: $selection; selection-color: $text; }
         QComboBox QAbstractItemView::item { padding: 4px 10px; border: none; border-radius: 4px; }
@@ -84,7 +89,7 @@ void applyAppearance(QWidget* window) {
         QSpinBox::down-button { subcontrol-origin: border; subcontrol-position: bottom right; width: 26px; border: none; border-bottom-right-radius: 7px; }
         QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: $selection; }
         QSpinBox::up-button:pressed, QSpinBox::down-button:pressed { background: $border; }
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 2px solid $accent; padding: 3px 9px; }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 2px solid $focusRing; padding: 3px 9px; }
         QComboBox:focus { padding-right: 31px; }
         QSpinBox:focus { padding-right: 29px; }
         QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled { background: $sidebar; color: $disabledText; border-color: $border; }
@@ -99,16 +104,22 @@ void applyAppearance(QWidget* window) {
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical, QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+        QAbstractScrollArea::corner { background: transparent; border: none; }
         QTabWidget::pane { background: $background; border: none; }
+        QTabWidget::tab-bar { alignment: left; }
         QTabBar::tab { background: $sidebar; padding: 8px 16px; margin: 4px 2px 14px 0; border: 1px solid transparent; border-radius: 6px; color: $secondary; }
         QTabBar::tab:selected { background: $surface; border-color: $border; color: $text; font-weight: 500; }
-        QTabBar::tab:hover { color: $accent; }
-        QFrame#settingRow, QFrame#phraseRow, QFrame#resourceRow, QFrame#quickStart { background: $surface; border: 1px solid $border; border-radius: 9px; }
+        QTabBar::tab:hover { color: $accentText; }
+        QFrame#settingsCard, QFrame#phraseRow, QFrame#quickStart { background: $surface; border: 1px solid $border; border-radius: 9px; }
+        QFrame#settingRow, QFrame#resourceRow { background: transparent; border: none; }
+        QFrame#rowDivider { background: $border; border: none; }
+        QLabel[role="help"] { color: $secondary; font-size: 12px; background: transparent; }
         QLabel#phraseNumber { color: $secondary; font-size: 11px; }
         QLabel[validation="valid"] { color: $success; font-size: 12px; }
         QLabel[validation="invalid"] { color: $error; font-size: 12px; }
-        QTableWidget { background: $surface; alternate-background-color: $background; border: 1px solid $border; border-radius: 8px; selection-background-color: $selection; selection-color: $text; }
-        QHeaderView::section { background: $background; border: none; border-bottom: 1px solid $border; padding: 10px; color: $secondary; font-size: 11px; }
+        QTableWidget { background: $surface; border: 1px solid $border; border-radius: 8px; selection-background-color: $selection; selection-color: $text; }
+        QTableWidget::item { padding-left: 8px; border-bottom: 1px solid $border; }
+        QHeaderView::section { background: $background; border: none; border-bottom: 1px solid $border; padding: 10px 11px; color: $secondary; font-size: 11px; }
         QGroupBox { border: 1px solid $border; border-radius: 9px; margin-top: 12px; padding: 16px 12px 12px; background: $surface; }
         QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 4px; }
         QPlainTextEdit { border: 1px solid $border; border-radius: 8px; background: $surface; padding: 10px; font-size: 12px; }
@@ -120,7 +131,9 @@ void applyAppearance(QWidget* window) {
     const QList<QPair<QString, QColor>> tokens{{"background", c.background}, {"sidebar", c.sidebar}, {"surface", c.surface},
         {"text", c.text}, {"secondary", c.secondary}, {"border", c.border}, {"accent", c.accent},
         {"selection", c.selection}, {"success", c.success}, {"error", c.error},
-        {"accentHover", c.accent.lighter(110)}, {"accentPressed", c.accent.darker(115)},
+        {"accentHover", c.accent.darker(110)}, {"accentPressed", c.accent.darker(125)},
+        {"accentText", c.accentText}, {"control", c.control},
+        {"focusRing", c.background.lightness() < 128 ? c.accentText : c.accent},
         {"hover", c.background}, {"disabledText", c.secondary},
         {"focusBorder", c.background.lightness() < 128 ? QColor("#b5d7ff") : c.accent.darker(145)},
         {"scrollThumb", c.background.lightness() < 128 ? c.secondary.darker(130) : c.border.darker(115)},
@@ -161,7 +174,9 @@ QIcon navigationIcon(int page) {
         } else {
             p.drawArc(QRectF(5, 5, 16, 16), 45 * 16, 285 * 16); p.drawLine(20, 5, 20, 10); p.drawLine(20, 10, 15, 10);
         }
-        p.end(); icon.addPixmap(pixmap);
+        // Selected mode keeps the tile's colour; Qt would otherwise tint it with
+        // the selection colour and leave a muddy icon on the accent background.
+        p.end(); icon.addPixmap(pixmap); icon.addPixmap(pixmap, QIcon::Selected);
     }
     return icon;
 }

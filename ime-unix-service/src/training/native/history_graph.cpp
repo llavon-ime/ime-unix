@@ -51,7 +51,7 @@ public:
         const bool base = data(0).toString() == "base" || data(0).toString().startsWith("base:");
         painter->drawText(16, 25, base ? QStringLiteral("原始版本") : "LoRA · " + data(0).toString());
         if (active_ || latest_) {
-            painter->setPen(active_ ? c.accent : c.secondary);
+            painter->setPen(active_ ? c.accentText : c.secondary);
             painter->drawText(QRectF(115, 10, 98, 22), Qt::AlignRight | Qt::AlignVCenter,
                               active_ ? QStringLiteral("● 目前套用") : QStringLiteral("最新訓練"));
         }
@@ -62,9 +62,6 @@ public:
         painter->drawText(16, 79, QFontMetrics(font).elidedText(subtitle_, Qt::ElideRight, 196));
         painter->setPen(c.border); painter->drawLine(16, 94, 212, 94);
         painter->setPen(c.secondary); painter->drawText(16, 119, metrics_);
-        painter->setPen(Qt::NoPen); painter->setBrush(c.accent);
-        painter->drawEllipse(QPointF(nodeWidth / 2, 0), 3, 3);
-        painter->drawEllipse(QPointF(nodeWidth / 2, nodeHeight), 3, 3);
     }
 protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant& value) override {

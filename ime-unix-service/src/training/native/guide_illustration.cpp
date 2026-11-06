@@ -4,6 +4,7 @@
 #include "phrase_list.hpp"
 #include "settings.hpp"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QEvent>
 #include <QFrame>
@@ -42,8 +43,8 @@ GuideIllustration::GuideIllustration(Kind kind, QWidget* parent) : QWidget(paren
     if (kind == Kind::MixedInput) {
         auto page = std::make_unique<SettingsPage>(false);
         page->revealField("smart_english");
-        auto* field = page->findChild<QComboBox*>("setting_smart_english");
-        field->setCurrentIndex(field->findData(true));
+        auto* field = page->findChild<QCheckBox*>("setting_smart_english");
+        field->setChecked(true);
         excerpt_ = field->parentWidget();
         secondary_ = page->findChild<QPushButton*>("saveSettings");
         marked_ = {field, secondary_};
