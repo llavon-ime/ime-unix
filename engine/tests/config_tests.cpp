@@ -107,6 +107,13 @@ static bool test_config_schema() {
     ok = ok && provider_alias.inference_provider == "llama_cpp";
     const auto invalid_provider = config_from_json({{"inference_provider", "metal"}});
     ok = ok && invalid_provider.inference_provider == "auto";
+    // The automatic choice was once labelled with its fallback rule; INI files
+    // written then store that label and must still select the same value.
+    for (const auto& field : config_fields()) {
+        if (field.key != "inference_provider") continue;
+        ok = ok && choice_label(field, "auto") == "自動";
+        ok = ok && canonical_choice(field, "自動（MLX 失敗時改用 llama.cpp）") == std::optional<std::string>("auto");
+    }
     ok = ok && std::ranges::none_of(fields, [](const auto& field) {
         return field.key == "smart_model_preview" || field.ini_key == "SmartModelPreview";
     });

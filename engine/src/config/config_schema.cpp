@@ -79,7 +79,7 @@ const std::vector<ConfigField>& config_fields() {
         text_field("model_path", "ModelPath", "模型路徑", "模型與執行", &Config::model_path),
         choice_field("inference_provider", "InferenceProvider", "推論後端", "模型與執行",
                      &Config::inference_provider,
-                     {{"auto", "自動（MLX 失敗時改用 llama.cpp）", {}},
+                     {{"auto", "自動", {"自動（MLX 失敗時改用 llama.cpp）"}},
                       {"mlx", "MLX", {}},
                       {"llama_cpp", "llama.cpp", {"llama.cpp"}}}),
         integer_field("context_length", "ContextLength", "上下文長度", "模型與執行", &Config::context_length, 1,
