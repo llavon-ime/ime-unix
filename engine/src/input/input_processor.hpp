@@ -27,6 +27,8 @@ struct CandidateKeyConfig {
     int selection_key_count = 10;
     bool caps_lock_inputs_bopomofo = true;
     std::string_view selection_keys;
+    // When true, Tab moves the candidate cursor instead of expanding the page.
+    bool tab_moves_cursor = false;
 };
 
 // What the caller must do after a key was routed while the candidate list is
@@ -192,6 +194,7 @@ private:
     bool show_mixed_candidates();
     bool apply_mixed_path(const MixedPath& path, std::size_t char_index, bool manual = true);
     bool handle_english_letter(char32_t letter, bool caps_on);
+    bool overwrite_previous_tone(const InputKey& key, BopomofoKeyboardLayout layout);
     void handle_escape();
     void open_symbol_menu();
     void close_symbol_menu();

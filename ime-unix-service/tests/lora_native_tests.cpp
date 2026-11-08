@@ -74,6 +74,7 @@ private slots:
     void deferredPhrasePage();
     void settingsWithoutTrainingBackend();
     void deferredSettingGroups();
+    void settingsPresets();
     void featureGuide();
     void guideIllustrations();
     void guideDetailTopics();
@@ -843,6 +844,50 @@ void NativeTests::deferredSettingGroups() {
     saved = store.load(); QCOMPARE(saved.value("candidate_page_size").toInt(), 7);
     QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
     QVERIFY(!page.isDirty());
+}
+
+void NativeTests::settingsPresets() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    llavon::lora::SettingsStore store;
+    auto values = store.load(); values["keyboard_layout"] = "ibm"; values["context_length"] = 256;
+    values["selection_keys"] = "asdfghjkl"; store.save(values);
+    llavon::lora::SettingsPage page(false); page.show();
+    auto* preset = page.findChild<QComboBox*>("settingsPreset"); QVERIFY(preset);
+    QVERIFY(preset->count() >= 4);
+    QVERIFY(!page.findChild<QLabel*>("settingsPresetDescription")->text().isEmpty());
+
+    // Applying fills unopened tabs too, but only saving writes the file.
+    preset->setCurrentIndex(preset->findData(QStringLiteral("apple")));
+    QTest::mouseClick(page.findChild<QPushButton*>("applyPreset"), Qt::LeftButton);
+    QVERIFY(page.isDirty());
+    auto* tone = page.findChild<QCheckBox*>("setting_tone_key_overwrites_previous"); QVERIFY(tone);
+    QVERIFY(tone->isChecked());
+    QCOMPARE(store.load().value("tone_key_overwrites_previous").toBool(), false);
+    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    auto saved = store.load();
+    QVERIFY(saved.value("tone_key_overwrites_previous").toBool());
+    QVERIFY(saved.value("keep_invalid_reading").toBool());
+    QVERIFY(saved.value("shift_backspace_removes_tone").toBool());
+    QCOMPARE(saved.value("candidate_layout").toString(), QStringLiteral("vertical"));
+    QCOMPARE(saved.value("selection_keys").toString(), QStringLiteral("1234567890"));
+    // Keyboard layout and runtime settings are outside every preset.
+    QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
+    QCOMPARE(saved.value("context_length").toInt(), 256);
+
+    // Re-applying the saved preset changes nothing.
+    QTest::mouseClick(page.findChild<QPushButton*>("applyPreset"), Qt::LeftButton);
+    QVERIFY(!page.isDirty());
+
+    preset->setCurrentIndex(preset->findData(QStringLiteral("microsoft")));
+    QTest::mouseClick(page.findChild<QPushButton*>("applyPreset"), Qt::LeftButton);
+    QVERIFY(page.isDirty()); QVERIFY(!tone->isChecked());
+    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    saved = store.load();
+    QCOMPARE(saved.value("select_phrase").toString(), QStringLiteral("after_cursor"));
+    QVERIFY(saved.value("esc_commits_composition").toBool());
+    QVERIFY(saved.value("caps_lock_inputs_bopomofo").toBool());
+    QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
 }
 
 void NativeTests::featureGuide() {

@@ -259,7 +259,7 @@ void GuidePage::buildTopic(int index) {
         shortcut(layout, {"Enter"}, QStringLiteral("提交組字"), QStringLiteral("選字窗開啟時，先確認候選"));
         shortcut(layout, {QStringLiteral("← / →")}, QStringLiteral("移動組字游標"));
         shortcut(layout, {QStringLiteral("↓")}, QStringLiteral("開啟候選字"));
-        shortcut(layout, {"Tab"}, QStringLiteral("開啟候選；切換選字窗展開"));
+        shortcut(layout, {"Tab"}, QStringLiteral("開啟候選；依設定切換候選或展開選字窗"));
         shortcut(layout, {"PgUp / PgDn"}, QStringLiteral("候選翻頁"));
         shortcut(layout, {"Backspace"}, QStringLiteral("刪除游標前內容"));
         shortcut(layout, {"Esc"}, QStringLiteral("關閉選字窗"), QStringLiteral("其餘清除行為依設定"));

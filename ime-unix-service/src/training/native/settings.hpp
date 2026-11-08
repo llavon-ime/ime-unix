@@ -45,6 +45,7 @@ private:
     void setDirty(bool dirty);
     void fill(const QJsonObject& values);
     void buildGroup(const QString& group);
+    void applyPreset(const QString& key);
     QJsonObject values() const;
     void save();
     void changed();

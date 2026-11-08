@@ -471,11 +471,11 @@ struct CoreTests {
         queue.pumpUntilIdle()
         precondition(host.commits.last == "另外現在app沒有圖標欸")
         type(core, context, "o4]")
-        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "欸]")
+        precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "欸」")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",
                          modifiers: KeyModifiers(), capsLock: false, isRelease: false)
         queue.pumpUntilIdle()
-        precondition(host.commits.last == "欸]")
+        precondition(host.commits.last == "欸」")
         type(core, context, "j g n0 ")
         precondition(core.snapshot(context)?.preedit.map(\.text).joined() == "巫師三")
         _ = core.sendKey(context, keyCode: 0x24, charactersIgnoringModifiers: "\r",

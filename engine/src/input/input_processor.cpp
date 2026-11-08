@@ -39,6 +39,15 @@ CandidateKeyOutcome handle_candidate_key(const InputKey& key, const CandidateKey
             return {view.move_cursor(1, config.page_size, candidate_count) ? CandidateKeyAction::Redraw
                                                                            : CandidateKeyAction::Handled,
                     0};
+        case keysym::Tab:
+            if (config.tab_moves_cursor) {
+                const int count = static_cast<int>(candidate_count);
+                const int next = (view.cursor + 1) % count;
+                return {view.set_cursor(next, config.page_size, candidate_count) ? CandidateKeyAction::Redraw
+                                                                                 : CandidateKeyAction::Handled,
+                        0};
+            }
+            break;
         case keysym::Left:
             if (!view.page_by(-1, true, config.page_size, candidate_count)) {
                 return {CandidateKeyAction::Redraw, 0};
@@ -595,6 +604,11 @@ void InputProcessor::process_impl(const InputKey& key) {
         }
     }
 
+    if (overwrite_previous_tone(key, layout)) {
+        consume();
+        return;
+    }
+
     // Match Chewing: digits commit directly from an empty state, join completed
     // composition as literals, and bell while a syllable is unfinished, when
     // this layout does not assign the digit to a phonetic symbol or tone.
@@ -654,7 +668,8 @@ void InputProcessor::process_impl(const InputKey& key) {
     }
 
     if (key.sym == keysym::BackSpace && !session_->buffer.empty()) {
-        session_->buffer.backspace();
+        const bool remove_tone = config_->shift_backspace_removes_tone && key.raw_has(InputKeyState::Shift);
+        if (!remove_tone || !session_->buffer.remove_tone_before_caret()) session_->buffer.backspace();
         (void)transition_to(session_->buffer.empty() ? InputStateKind::Empty : InputStateKind::Inputting);
         mark_prediction_dirty();
         redraw();
@@ -740,7 +755,11 @@ void InputProcessor::process_impl(const InputKey& key) {
                 apply_fallback_candidates(*session_, *segment);
                 const auto* candidates = session_->buffer.segment_candidates(*segment);
                 if (candidates == nullptr || candidates->empty()) {
-                    (void)session_->buffer.remove_segment(*segment);
+                    if (config_->keep_invalid_reading) {
+                        (void)session_->buffer.reopen_reading(*segment);
+                    } else {
+                        (void)session_->buffer.remove_segment(*segment);
+                    }
                     redraw();
                     consume();
                     return;
@@ -801,9 +820,14 @@ bool InputProcessor::set_candidate_cursor(int index) {
 }
 
 CandidateKeyConfig InputProcessor::candidate_key_config() const {
-    return CandidateKeyConfig{config_->candidate_page_size,  config_->space_selects_candidate,
-                              config_->selection_key_count,  config_->caps_lock_inputs_bopomofo,
-                              config_->selection_keys};
+    return CandidateKeyConfig{
+        .page_size = config_->candidate_page_size,
+        .space_selects_candidate = config_->space_selects_candidate,
+        .selection_key_count = config_->selection_key_count,
+        .caps_lock_inputs_bopomofo = config_->caps_lock_inputs_bopomofo,
+        .selection_keys = config_->selection_keys,
+        .tab_moves_cursor = config_->candidate_tab_action == "next_candidate",
+    };
 }
 
 void InputProcessor::commit_current() {
@@ -989,11 +1013,53 @@ bool InputProcessor::handle_english_letter(char32_t letter, bool caps_on) {
     return true;
 }
 
+// macOS Zhuyin rewrites the tone of the character behind the caret when a tone
+// key arrives with no reading in progress. Only layouts whose tone keys type
+// nothing but tones qualify: on compact layouts the same letter also starts
+// the next syllable. Smart English keeps its reversible raw-key handling.
+bool InputProcessor::overwrite_previous_tone(const InputKey& key, BopomofoKeyboardLayout layout) {
+    if (!config_->tone_key_overwrites_previous || config_->smart_english) return false;
+    if (key.has_blocking_modifier() || key.has(InputKeyState::Ctrl)) return false;
+    if (is_compact_bopomofo_layout(layout) || !is_bopomofo_tone_key(key.sym, layout)) return false;
+    if (!session_->pending_token.empty() || session_->buffer.has_unfinished_reading_before_caret()) return false;
+
+    const auto& buffer = session_->buffer;
+    const auto caret = buffer.caret();
+    if (caret == 0 || caret > buffer.segments().size()) return false;
+    const auto& previous = buffer.segments()[caret - 1];
+    if (previous.literal != 0 || !previous.complete()) return false;
+
+    const auto tone = lookup_bopomofo_key(key.sym, layout, config_->caps_lock_inputs_bopomofo);
+    if (!tone) return false;
+    Syllable updated = previous.syllable;
+    if (!updated.overwrite(*tone) || !updated.complete()) return false;
+    // An impossible reading keeps the ordinary behavior for the key.
+    auto candidates = fallback_.lookup(updated.text());
+    if (candidates.empty()) return false;
+    if (!session_->buffer.overwrite_tone_before_caret(*tone, std::move(candidates))) return false;
+
+    (void)transition_to(InputStateKind::Inputting);
+    mark_prediction_dirty();
+    request_prediction();
+    redraw();
+    return true;
+}
+
 void InputProcessor::handle_escape() {
     // Marking only changes the selection, so Escape drops it first without
     // touching the composition itself.
     if (session_->buffer.clear_selection()) {
         redraw();
+        consume();
+        return;
+    }
+    if (config_->esc_commits_composition) {
+        if (session_->choosing_candidate() && !available_candidates(*session_, *config_).empty()) {
+            (void)transition_to(InputStateKind::Inputting);
+            redraw();
+        } else {
+            commit_current();
+        }
         consume();
         return;
     }

@@ -191,8 +191,83 @@ static bool test_config_schema() {
     return ok;
 }
 
+// Presets reset every managed input-behavior field and leave model, runtime,
+// keyboard layout and smart English alone, whatever the starting config.
+static bool test_config_presets() {
+    using namespace llavon::ime;
+    bool ok = true;
+    const auto& presets = config_presets();
+    const auto& managed = config_preset_field_keys();
+    const auto& fields = config_fields();
+    ok = ok && presets.size() >= 4;
+
+    for (const auto& key : managed) {
+        ok = ok && std::ranges::any_of(fields, [&](const auto& field) { return field.key == key; });
+    }
+
+    std::vector<std::string> preset_keys;
+    for (const auto& preset : presets) {
+        ok = ok && !preset.key.empty() && !preset.label.empty() && !preset.description.empty();
+        ok = ok && std::ranges::find(preset_keys, preset.key) == preset_keys.end();
+        preset_keys.push_back(preset.key);
+        const auto values = config_preset_values(preset.key);
+        ok = ok && values && values->size() == managed.size();
+
+        auto config = default_config();
+        config.model_path = "/tmp/preset.gguf";
+        config.thread_count = 3;
+        config.keyboard_layout = "hsu";
+        config.smart_english = true;
+        config.selection_keys = "asdfghjkl";
+        config.move_cursor_after_selection = true;
+        ok = ok && apply_config_preset(config, preset.key);
+        ok = ok && config.model_path == "/tmp/preset.gguf" && config.thread_count == 3;
+        ok = ok && config.keyboard_layout == "hsu" && config.smart_english;
+        // Managed fields the preset leaves at their defaults are reset.
+        ok = ok && config.selection_keys == "1234567890" && !config.move_cursor_after_selection;
+        // Applying from defaults gives the same managed values.
+        auto fresh = default_config();
+        ok = ok && apply_config_preset(fresh, preset.key);
+        for (const auto& field : fields) {
+            if (std::ranges::find(managed, field.key) == managed.end()) continue;
+            ok = ok && config_field_value(config, field) == config_field_value(fresh, field);
+        }
+    }
+
+    auto config = default_config();
+    ok = ok && !apply_config_preset(config, "unknown");
+    ok = ok && apply_config_preset(config, "microsoft");
+    ok = ok && config.select_phrase == "after_cursor" && config.candidate_layout == "vertical";
+    ok = ok && config.esc_commits_composition && !config.esc_clears_entire_buffer;
+    ok = ok && !config.space_selects_candidate && config.caps_lock_inputs_bopomofo;
+    ok = ok && config.shift_letter_keys == "directly_output_uppercase";
+    ok = ok && apply_config_preset(config, "apple");
+    ok = ok && config.tone_key_overwrites_previous && config.keep_invalid_reading;
+    ok = ok && config.shift_backspace_removes_tone;
+    ok = ok && config.esc_commits_composition && !config.esc_clears_entire_buffer;
+    ok = ok && config.candidate_layout == "vertical" && config.caps_lock_inputs_bopomofo;
+    ok = ok && config.shift_letter_keys == "directly_output_uppercase";
+    ok = ok && apply_config_preset(config, "mcbopomofo");
+    ok = ok && !config.tone_key_overwrites_previous && !config.keep_invalid_reading;
+    ok = ok && !config.esc_commits_composition && !config.caps_lock_inputs_bopomofo;
+    ok = ok && !config.shift_backspace_removes_tone;
+    ok = ok && config.space_selects_candidate && config.select_phrase == "before_cursor";
+    ok = ok && apply_config_preset(config, "llavon");
+    ok = ok && to_json(config) == to_json(default_config());
+
+    const auto schema = config_schema_json();
+    ok = ok && schema.contains("presets") && schema["presets"].size() == presets.size();
+    for (size_t i = 0; i < presets.size() && i < schema["presets"].size(); ++i) {
+        const auto& entry = schema["presets"].at(i);
+        ok = ok && entry["key"] == presets[i].key && entry["label"] == presets[i].label;
+        ok = ok && entry["values"].size() == managed.size();
+    }
+    return ok;
+}
+
 int run_config_tests() {
     bool ok = test_config_schema();
+    ok = ok && test_config_presets();
     auto cfg = llavon::ime::default_config();
     ok = ok && cfg.context_length == 512;
     const auto expected_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency() / 2));
@@ -208,10 +283,15 @@ int run_config_tests() {
     ok = ok && cfg.selection_key_count == 10;
     ok = ok && cfg.candidate_page_size == 10;
     ok = ok && cfg.candidate_layout == "not_set";
+    ok = ok && cfg.candidate_tab_action == "expand";
     ok = ok && cfg.space_selects_candidate;
     ok = ok && cfg.select_phrase == "before_cursor";
     ok = ok && !cfg.move_cursor_after_selection;
     ok = ok && !cfg.esc_clears_entire_buffer;
+    ok = ok && !cfg.tone_key_overwrites_previous;
+    ok = ok && !cfg.esc_commits_composition;
+    ok = ok && !cfg.shift_backspace_removes_tone;
+    ok = ok && !cfg.keep_invalid_reading;
     ok = ok && cfg.caps_lock_inputs_bopomofo;
     ok = ok && cfg.shift_letter_keys == "directly_output_uppercase";
 
@@ -222,6 +302,9 @@ int run_config_tests() {
     ok = ok && roundtrip.gpu_layers == cfg.gpu_layers;
     ok = ok && roundtrip.idle_timeout_seconds == cfg.idle_timeout_seconds;
     ok = ok && roundtrip.selection_keys == cfg.selection_keys;
+    ok = ok && roundtrip.candidate_tab_action == cfg.candidate_tab_action;
+    ok = ok && roundtrip.tone_key_overwrites_previous == cfg.tone_key_overwrites_previous;
+    ok = ok && roundtrip.keep_invalid_reading == cfg.keep_invalid_reading;
     ok = ok && roundtrip.select_phrase == cfg.select_phrase;
     ok = ok && roundtrip.caps_lock_inputs_bopomofo == cfg.caps_lock_inputs_bopomofo;
     ok = ok && roundtrip.shift_letter_keys == cfg.shift_letter_keys;
@@ -282,10 +365,15 @@ int run_config_tests() {
                << "SelectionKeysCount=6\n"
                << "CandidatePageSize=5\n"
                << "CandidateLayout=Horizontal\n"
+               << "CandidateTabAction=next_candidate\n"
                << "ChooseCandidateUsingSpace=False\n"
                << "SelectPhrase=after_cursor\n"
                << "MoveCursorAfterSelection=True\n"
                << "EscKeyClearsEntireComposingBuffer=True\n"
+               << "ToneKeyOverwritesPrevious=True\n"
+               << "KeepInvalidReading=True\n"
+               << "EscKeyCommitsComposingBuffer=True\n"
+               << "ShiftBackSpaceRemovesTone=True\n"
                << "CapsLockInputsBopomofo=False\n"
                << "SmartModelPreview=False\n"
                << "ShiftLetterKeys=直接放入組字區\n";
@@ -302,10 +390,15 @@ int run_config_tests() {
     ok = ok && loaded.selection_key_count == 6;
     ok = ok && loaded.candidate_page_size == 5;
     ok = ok && loaded.candidate_layout == "horizontal";
+    ok = ok && loaded.candidate_tab_action == "next_candidate";
     ok = ok && !loaded.space_selects_candidate;
     ok = ok && loaded.select_phrase == "after_cursor";
     ok = ok && loaded.move_cursor_after_selection;
     ok = ok && loaded.esc_clears_entire_buffer;
+    ok = ok && loaded.tone_key_overwrites_previous;
+    ok = ok && loaded.keep_invalid_reading;
+    ok = ok && loaded.esc_commits_composition;
+    ok = ok && loaded.shift_backspace_removes_tone;
     ok = ok && !loaded.caps_lock_inputs_bopomofo;
     ok = ok && loaded.shift_letter_keys == "directly_put_to_buffer";
 
@@ -329,6 +422,7 @@ int run_config_tests() {
         output << "BopomofoKeyboardLayout=標準\n"
                << "SelectionKeys=左手鍵\n"
                << "CandidateLayout=垂直\n"
+               << "CandidateTabAction=切換下一個候選\n"
                << "SelectPhrase=游標後\n"
                << "CapsLockInputsBopomofo=True\n";
     }
@@ -336,6 +430,7 @@ int run_config_tests() {
     ok = ok && chinese_loaded.keyboard_layout == "standard";
     ok = ok && chinese_loaded.selection_keys == "asdfzxcvb";
     ok = ok && chinese_loaded.candidate_layout == "vertical";
+    ok = ok && chinese_loaded.candidate_tab_action == "next_candidate";
     ok = ok && chinese_loaded.select_phrase == "after_cursor";
     ok = ok && chinese_loaded.caps_lock_inputs_bopomofo;
 
@@ -383,13 +478,14 @@ int run_config_tests() {
     }
 
     const auto invalid = llavon::ime::config_from_json(nlohmann::json::parse(
-        R"({"model_path":"/tmp/valid.gguf","keyboard_layout":"diagonal","selection_keys":"bad","selection_key_count":99,"candidate_page_size":0,"candidate_layout":"diagonal","space_selects_candidate":"yes","select_phrase":"near_cursor","move_cursor_after_selection":true,"shift_letter_keys":"diagonal"})"));
+        R"({"model_path":"/tmp/valid.gguf","keyboard_layout":"diagonal","selection_keys":"bad","selection_key_count":99,"candidate_page_size":0,"candidate_layout":"diagonal","candidate_tab_action":"diagonal","space_selects_candidate":"yes","select_phrase":"near_cursor","move_cursor_after_selection":true,"shift_letter_keys":"diagonal"})"));
     ok = ok && invalid.model_path == "/tmp/valid.gguf";
     ok = ok && invalid.keyboard_layout == llavon::ime::default_config().keyboard_layout;
     ok = ok && invalid.selection_keys == llavon::ime::default_config().selection_keys;
     ok = ok && invalid.selection_key_count == llavon::ime::default_config().selection_key_count;
     ok = ok && invalid.candidate_page_size == llavon::ime::default_config().candidate_page_size;
     ok = ok && invalid.candidate_layout == llavon::ime::default_config().candidate_layout;
+    ok = ok && invalid.candidate_tab_action == llavon::ime::default_config().candidate_tab_action;
     ok = ok && invalid.space_selects_candidate == llavon::ime::default_config().space_selects_candidate;
     ok = ok && invalid.select_phrase == llavon::ime::default_config().select_phrase;
     ok = ok && invalid.move_cursor_after_selection;

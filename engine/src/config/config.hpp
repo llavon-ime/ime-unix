@@ -18,10 +18,25 @@ struct Config {
     int selection_key_count = 10;
     int candidate_page_size = 10;
     std::string candidate_layout = "not_set";
+    // Tab in the candidate list: expand the whole page (default) or move to
+    // the next candidate.
+    std::string candidate_tab_action = "expand";
     bool space_selects_candidate = true;
     std::string select_phrase = "before_cursor";
     bool move_cursor_after_selection = false;
     bool esc_clears_entire_buffer = false;
+    // macOS Zhuyin style: Escape commits the composition as shown. Takes
+    // precedence over esc_clears_entire_buffer; an open list closes first.
+    bool esc_commits_composition = false;
+    // macOS Zhuyin style: a tone key typed right after a completed character
+    // rewrites that character's tone instead of starting a new reading.
+    bool tone_key_overwrites_previous = false;
+    // macOS Zhuyin style: a completed reading without characters stays in the
+    // composition (tone included) for editing instead of being discarded.
+    bool keep_invalid_reading = false;
+    // macOS Zhuyin style: Shift+BackSpace removes only the tone of the
+    // character before the caret, turning it back into an editable reading.
+    bool shift_backspace_removes_tone = false;
     // CapsLock on still inputs bopomofo (MS IME style).
     bool caps_lock_inputs_bopomofo = true;
     std::string shift_letter_keys = "directly_output_uppercase";

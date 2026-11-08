@@ -116,6 +116,29 @@ RAWKEY_SUITE("candidate navigation tests", engine_test_candidate_navigation_test
         RAWKEY_ASSERT(tab.candidate_count() == collapsed);
         tab.expect_commit(tab.candidate(0));
 
+        // CandidateTabAction=next_candidate keeps the first Tab for opening
+        // the list, then moves the cursor and follows it across pages.
+        Harness tab_next;
+        tab_next.set_config("CandidatePageSize", "3");
+        tab_next.set_config("CandidateTabAction", "next_candidate");
+        tab_next.type("su3");
+        tab_next.key(Key("Tab"));
+        RAWKEY_ASSERT(tab_next.has_candidates());
+        RAWKEY_ASSERT(tab_next.cursor_index() == 0);
+        const std::string first_tab_candidate = tab_next.candidate(0);
+
+        tab_next.key(Key("Tab"));
+        RAWKEY_ASSERT(tab_next.cursor_index() == 1);
+        RAWKEY_ASSERT(tab_next.candidate(1) != first_tab_candidate);
+
+        tab_next.key(Key("Tab"));
+        RAWKEY_ASSERT(tab_next.cursor_index() == 2);
+
+        tab_next.key(Key("Tab"));
+        RAWKEY_ASSERT(tab_next.render_page() == 1);
+        RAWKEY_ASSERT(tab_next.cursor_index() == 0);
+        tab_next.expect_commit(tab_next.candidate(0));
+
         // A digit selects the candidate at that index.
         Harness digit;
         digit.type("su3");

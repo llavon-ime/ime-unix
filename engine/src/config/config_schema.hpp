@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -59,7 +60,26 @@ std::string choice_label(const ConfigField& field, std::string_view value);
 // decimal digits for integers, label or canonical value for choices).
 std::optional<ConfigValue> config_value_from_ini(const ConfigField& field, const std::string& value);
 
-// Schema for host UIs: key, label, group, kind, bounds, default and choices.
+// A named starting point that mirrors another input method's typing habits.
+// Applying a preset first resets every preset-managed field to its default and
+// then applies `values`, so the result does not depend on earlier settings.
+// Model, runtime, keyboard layout and smart English are never touched.
+struct ConfigPreset {
+    std::string key;    // stable identifier, e.g. "microsoft"
+    std::string label;  // UI label
+    std::string description;
+    std::vector<std::pair<std::string, ConfigValue>> values;  // field key -> value
+};
+
+const std::vector<ConfigPreset>& config_presets();
+// Field keys a preset may change, in schema order.
+const std::vector<std::string>& config_preset_field_keys();
+// Values a preset produces for every managed field, starting from defaults.
+std::optional<std::vector<std::pair<std::string, ConfigValue>>> config_preset_values(std::string_view key);
+bool apply_config_preset(Config& config, std::string_view key);
+
+// Schema for host UIs: key, label, group, kind, bounds, default and choices,
+// plus the presets with their complete managed values.
 // Field order matches config_fields().
 nlohmann::json config_schema_json();
 

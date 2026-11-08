@@ -401,6 +401,8 @@ void Harness::set_config(std::string_view path, std::string_view value) {
         updated.space_selects_candidate = on;
     } else if (path == "CandidatePageSize") {
         updated.candidate_page_size = std::stoi(std::string(value));
+    } else if (path == "CandidateTabAction") {
+        updated.candidate_tab_action = value == "next_candidate" || value == "next" ? "next_candidate" : "expand";
     } else if (path == "SelectPhrase") {
         updated.select_phrase = std::string(value);
     } else if (path == "SelectionKeys") {
@@ -409,6 +411,14 @@ void Harness::set_config(std::string_view path, std::string_view value) {
         updated.selection_key_count = std::stoi(std::string(value));
     } else if (path == "EscKeyClearsEntireComposingBuffer") {
         updated.esc_clears_entire_buffer = on;
+    } else if (path == "ToneKeyOverwritesPrevious") {
+        updated.tone_key_overwrites_previous = on;
+    } else if (path == "EscKeyCommitsComposingBuffer") {
+        updated.esc_commits_composition = on;
+    } else if (path == "ShiftBackSpaceRemovesTone") {
+        updated.shift_backspace_removes_tone = on;
+    } else if (path == "KeepInvalidReading") {
+        updated.keep_invalid_reading = on;
     } else {
         fail((std::string("unmapped config path: ") + std::string(path)).c_str(), __FILE__, __LINE__);
     }

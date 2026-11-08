@@ -96,6 +96,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/structured_boundary_tests.cpp
     rawkey/smart_work_tests.cpp
     rawkey/symbol_menu_tests.cpp
+    rawkey/macos_zhuyin_tests.cpp
     rawkey/training_commit_tests.cpp
 )
 

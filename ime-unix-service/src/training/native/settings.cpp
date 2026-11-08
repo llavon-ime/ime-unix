@@ -67,6 +67,7 @@ QString settingHelp(const QString& key) {
         {"selection_key_count", QStringLiteral("選字鍵中實際使用的按鍵數。")},
         {"candidate_page_size", QStringLiteral("候選窗每頁顯示的候選字數量。")},
         {"move_cursor_after_selection", QStringLiteral("選字後，游標移到選定的字之後。")},
+        {"esc_commits_composition", QStringLiteral("按 Esc 直接送出組字區內容；候選窗開啟時先關閉候選窗。開啟時優先於「Esc 鍵清除整個組字區」。")},
         {"smart_english", QStringLiteral("不必切換模式即可混打中英文，輸入法會隨按鍵判斷。")},
     };
     return help.value(key);
@@ -191,6 +192,38 @@ SettingsPage::SettingsPage(bool phrases, QWidget* parent, const QString& tablePa
         phraseList_->setToolTip(phraseList_->tablePath());
         phraseList_->setAccessibleDescription(add->toolTip());
     } else {
+        // Presets only fill the form; nothing is written until the user saves.
+        const auto presets = SettingsStore::schema().value("presets").toArray();
+        if (!presets.isEmpty()) {
+            auto* presetRow = new QHBoxLayout; presetRow->setSpacing(12);
+            auto* presetText = new QVBoxLayout; presetText->setSpacing(2);
+            auto* presetTitle = new QLabel(QStringLiteral("預設組合")); presetTitle->setProperty("role", "section");
+            auto* presetHelp = new QLabel; presetHelp->setProperty("role", "help"); presetHelp->setWordWrap(true);
+            presetHelp->setTextFormat(Qt::PlainText); presetHelp->setObjectName("settingsPresetDescription");
+            presetText->addWidget(presetTitle); presetText->addWidget(presetHelp);
+            auto* presetCombo = new NativeComboBox; presetCombo->setObjectName("settingsPreset");
+            presetCombo->setAccessibleName(presetTitle->text()); presetCombo->setMinimumHeight(34);
+            presetCombo->setFixedWidth(160); presetTitle->setBuddy(presetCombo);
+            for (const auto item : presets) {
+                const auto preset = item.toObject();
+                presetCombo->addItem(preset.value("label").toString(), preset.value("key").toString());
+                presetCombo->setItemData(presetCombo->count() - 1, preset.value("description").toString(), Qt::ToolTipRole);
+            }
+            auto* applyPresetButton = new QPushButton(QStringLiteral("套用")); applyPresetButton->setObjectName("applyPreset");
+            applyPresetButton->setMinimumHeight(34);
+            applyPresetButton->setToolTip(QStringLiteral("將輸入行為設定改成所選組合；模型、注音鍵盤配置與智慧型中英文不變。按「儲存並套用」後生效。"));
+            const auto describe = [presetCombo, presetHelp] {
+                presetHelp->setText(presetCombo->currentData(Qt::ToolTipRole).toString());
+                presetCombo->setAccessibleDescription(presetHelp->text());
+            };
+            connect(presetCombo, &QComboBox::currentIndexChanged, presetHelp, describe);
+            describe();
+            connect(applyPresetButton, &QPushButton::clicked, this, [this, presetCombo] {
+                applyPreset(presetCombo->currentData().toString());
+            });
+            presetRow->addLayout(presetText, 1); presetRow->addWidget(presetCombo); presetRow->addWidget(applyPresetButton);
+            layout->addLayout(presetRow);
+        }
         auto* tabs = new QTabWidget; tabs->setObjectName("settingsGroups"); layout->addWidget(tabs, 1);
         auto& groups = groupLayouts_;
         for (const auto item : SettingsStore::schema().value("fields").toArray()) {
@@ -333,6 +366,34 @@ void SettingsPage::revealField(const QString& key) {
             }
             return;
         }
+    }
+}
+
+void SettingsPage::applyPreset(const QString& key) {
+    QJsonObject preset;
+    for (const auto item : SettingsStore::schema().value("presets").toArray()) {
+        if (item.toObject().value("key").toString() == key) { preset = item.toObject(); break; }
+    }
+    if (preset.isEmpty()) return;
+    // Every managed field needs a widget, including tabs not opened yet.
+    if (auto* tabs = findChild<QTabWidget*>("settingsGroups")) {
+        for (int index = 0; index < tabs->count(); ++index) buildGroup(tabs->tabText(index));
+    }
+    const auto values = preset.value("values").toObject();
+    loading_ = true;
+    for (auto it = values.constBegin(); it != values.constEnd(); ++it) {
+        auto* input = fields_.value(it.key());
+        if (auto* spin = qobject_cast<QSpinBox*>(input)) spin->setValue(it.value().toInt());
+        else if (auto* toggle = qobject_cast<QCheckBox*>(input)) toggle->setChecked(it.value().toBool());
+        else if (auto* combo = qobject_cast<QComboBox*>(input)) combo->setCurrentIndex(combo->findData(it.value().toVariant()));
+        else if (auto* line = qobject_cast<QLineEdit*>(input)) line->setText(it.value().toString());
+    }
+    loading_ = false;
+    changed();
+    if (dirty_) {
+        showStatus(QStringLiteral("已套用「%1」；請按「儲存並套用」完成。").arg(preset.value("label").toString()));
+    } else {
+        showStatus(QStringLiteral("目前設定已與「%1」相同。").arg(preset.value("label").toString()));
     }
 }
 

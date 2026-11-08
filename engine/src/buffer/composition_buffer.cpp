@@ -562,6 +562,57 @@ bool CompositionBuffer::cancel_candidate_selection(size_t segment_index) {
     return true;
 }
 
+std::optional<size_t> CompositionBuffer::overwrite_tone_before_caret(char32_t tone,
+                                                                   std::vector<char32_t> candidates) {
+    if (caret_ == 0 || caret_ > segments_.size() || candidates.empty()) return std::nullopt;
+    if (!is_bopomofo_tone(tone) || tone == U' ') return std::nullopt;
+
+    const size_t index = caret_ - 1;
+    auto& segment = segments_[index];
+    if (segment.literal != 0 || !segment.complete()) return std::nullopt;
+
+    Syllable updated = segment.syllable;
+    if (!updated.overwrite(tone) || !updated.complete()) return std::nullopt;
+
+    selection_anchor_.reset();
+    segment.syllable = updated;
+    segment.candidates = std::move(candidates);
+    segment.selected_index = 0;
+    segment.manually_chosen = false;
+    segment.phrase_override_chosen = false;
+    segment.reading_finalized = true;
+    segment.alternative_readings.clear();
+    last_edited_segment_ = index;
+    touch();
+    return index;
+}
+
+bool CompositionBuffer::reopen_reading(size_t index) {
+    if (index >= segments_.size()) return false;
+    auto& segment = segments_[index];
+    if (segment.literal != 0 || segment.empty()) return false;
+
+    selection_anchor_.reset();
+    segment.candidates.clear();
+    segment.selected_index = 0;
+    segment.manually_chosen = false;
+    segment.phrase_override_chosen = false;
+    segment.reading_finalized = false;
+    segment.alternative_readings.clear();
+    last_edited_segment_ = index;
+    touch();
+    return true;
+}
+
+bool CompositionBuffer::remove_tone_before_caret() {
+    if (caret_ == 0 || caret_ > segments_.size()) return false;
+    const size_t index = caret_ - 1;
+    auto& segment = segments_[index];
+    if (segment.literal != 0 || !segment.complete()) return false;
+    if (!segment.syllable.remove_tone() || segment.empty()) return false;
+    return reopen_reading(index);
+}
+
 bool CompositionBuffer::remove_segment(size_t index) {
     selection_anchor_.reset();
     if (index >= segments_.size()) return false;

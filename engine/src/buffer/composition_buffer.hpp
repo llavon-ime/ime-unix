@@ -107,6 +107,16 @@ public:
     bool clear_phrase_override_choices(size_t offset, size_t count);
     bool select_candidate(size_t segment_index, size_t candidate_index, bool move_cursor_after_selection);
     bool cancel_candidate_selection(size_t segment_index);
+    // Rewrites the tone of the completed reading just before the caret and
+    // installs the candidates for the new reading. Any earlier choice for the
+    // character is dropped because it belonged to the old reading.
+    std::optional<size_t> overwrite_tone_before_caret(char32_t tone, std::vector<char32_t> candidates);
+    // Keeps a reading that produced no characters editable: the symbols and
+    // tone stay, but the segment counts as unfinished again.
+    bool reopen_reading(size_t index);
+    // Strips the tone of the completed character before the caret and leaves
+    // the rest of its reading unfinished, ready for another tone.
+    bool remove_tone_before_caret();
     bool remove_segment(size_t index);
 
 private:

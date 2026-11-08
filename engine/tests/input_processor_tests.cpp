@@ -63,6 +63,30 @@ int run_input_processor_tests() {
                    CandidateKeyAction::Handled &&
          view.cursor == 0;
 
+    // Tab is left to the rest of the input rules by default, where it opens
+    // or expands the list. CandidateTabAction=next_candidate moves the cursor
+    // instead and follows it across page boundaries.
+    CandidateView tab_view;
+    ok = ok && handle_candidate_key(key(llavon::ime::keysym::Tab), defaults, tab_view, 25, false, false).action ==
+                   CandidateKeyAction::Unhandled;
+    CandidateKeyConfig tab_next;
+    tab_next.tab_moves_cursor = true;
+    ok = ok && handle_candidate_key(key(llavon::ime::keysym::Tab), tab_next, tab_view, 25, false, false).action ==
+                   CandidateKeyAction::Redraw &&
+         tab_view.cursor == 1;
+    tab_view.cursor = 9;
+    ok = ok && handle_candidate_key(key(llavon::ime::keysym::Tab), tab_next, tab_view, 25, false, false).action ==
+                   CandidateKeyAction::Redraw &&
+         tab_view.cursor == 10 && tab_view.page == 1;
+    tab_view.cursor = 24;
+    ok = ok && handle_candidate_key(key(llavon::ime::keysym::Tab), tab_next, tab_view, 25, false, false).action ==
+                   CandidateKeyAction::Redraw &&
+         tab_view.cursor == 0 && tab_view.page == 0;
+    CandidateView single_tab;
+    ok = ok && handle_candidate_key(key(llavon::ime::keysym::Tab), tab_next, single_tab, 1, false, false).action ==
+                   CandidateKeyAction::Handled &&
+         single_tab.cursor == 0;
+
     // Left/Right page while possible and remain consumed at either edge so a
     // native host cannot move its document caret out of the active preedit.
     view.reset();

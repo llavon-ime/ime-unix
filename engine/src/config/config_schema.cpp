@@ -117,12 +117,24 @@ const std::vector<ConfigField>& config_fields() {
         // Input behavior.
         boolean_field("space_selects_candidate", "ChooseCandidateUsingSpace", "空白鍵選取候選字", "輸入行為",
                       &Config::space_selects_candidate),
+        choice_field("candidate_tab_action", "CandidateTabAction", "候選字窗 Tab 鍵", "輸入行為",
+                     &Config::candidate_tab_action,
+                     {{"expand", "展開候選頁", {}},
+                      {"next_candidate", "切換下一個候選", {"next", "cycle"}}}),
         boolean_field("move_cursor_after_selection", "MoveCursorAfterSelection", "選字後移動游標", "輸入行為",
                       &Config::move_cursor_after_selection),
         boolean_field("caps_lock_inputs_bopomofo", "CapsLockInputsBopomofo", "大寫鎖定時仍輸入注音", "輸入行為",
                       &Config::caps_lock_inputs_bopomofo),
         boolean_field("esc_clears_entire_buffer", "EscKeyClearsEntireComposingBuffer", "Esc 鍵清除整個組字區",
                       "輸入行為", &Config::esc_clears_entire_buffer),
+        boolean_field("esc_commits_composition", "EscKeyCommitsComposingBuffer", "Esc 鍵送出組字區", "輸入行為",
+                      &Config::esc_commits_composition),
+        boolean_field("tone_key_overwrites_previous", "ToneKeyOverwritesPrevious", "聲調鍵修改前一字聲調",
+                      "輸入行為", &Config::tone_key_overwrites_previous),
+        boolean_field("keep_invalid_reading", "KeepInvalidReading", "注音組不出字時保留注音", "輸入行為",
+                      &Config::keep_invalid_reading),
+        boolean_field("shift_backspace_removes_tone", "ShiftBackSpaceRemovesTone", "Shift+退格鍵移除前一字的聲調",
+                      "輸入行為", &Config::shift_backspace_removes_tone),
         boolean_field("smart_english", "SmartEnglish", "智慧型中英文", "輸入行為", &Config::smart_english),
         // The memory probe helper is Linux-only (process_vm_readv), so the
         // option is only offered where it can actually work.
@@ -225,6 +237,124 @@ std::optional<ConfigValue> config_value_from_ini(const ConfigField& field, const
     return std::nullopt;
 }
 
+namespace {
+
+const ConfigField* find_config_field(std::string_view key) {
+    const auto& fields = config_fields();
+    const auto it = std::ranges::find(fields, key, &ConfigField::key);
+    return it == fields.end() ? nullptr : &*it;
+}
+
+nlohmann::json config_value_json(const ConfigValue& value) {
+    return std::visit([](const auto& item) { return nlohmann::json(item); }, value);
+}
+
+}  // namespace
+
+const std::vector<ConfigPreset>& config_presets() {
+    using namespace std::string_literals;
+    // Values follow each input method's documented or shipped defaults:
+    // Microsoft's support article for Microsoft Bopomofo, McBopomofo's
+    // Preferences.swift, and macOS Zhuyin as documented by Apple, McBopomofo
+    // (issue 753) and vChewing, plus behavior verified on a Mac.
+    static const std::vector<ConfigPreset> presets = {
+        {"llavon", "Llavon 預設", "還原輸入行為的預設值。", {}},
+        {"microsoft", "微軟注音", "接近 Windows 微軟注音：直式候選窗、選游標後的字、大寫鎖定時仍輸入注音。",
+         {
+             {"selection_key_count", 9},
+             {"candidate_page_size", 9},
+             {"candidate_layout", "vertical"s},
+             {"space_selects_candidate", false},
+             {"select_phrase", "after_cursor"s},
+             {"esc_commits_composition", true},
+             {"caps_lock_inputs_bopomofo", true},
+             {"shift_letter_keys", "directly_output_uppercase"s},
+         }},
+        {"apple", "蘋果注音", "接近 macOS 內建注音：直式候選窗、聲調鍵修改前一字、保留組不出字的注音、Esc 送出。",
+         {
+             {"selection_key_count", 9},
+             {"candidate_page_size", 9},
+             {"candidate_layout", "vertical"s},
+             {"space_selects_candidate", false},
+             {"select_phrase", "before_cursor"s},
+             {"esc_commits_composition", true},
+             {"tone_key_overwrites_previous", true},
+             {"keep_invalid_reading", true},
+             {"shift_backspace_removes_tone", true},
+             {"caps_lock_inputs_bopomofo", true},
+             {"shift_letter_keys", "directly_output_uppercase"s},
+         }},
+        {"mcbopomofo", "小麥注音", "接近小麥注音的預設：直式候選窗、空白鍵選字、大寫鎖定時輸入英文。",
+         {
+             {"selection_key_count", 9},
+             {"candidate_page_size", 9},
+             {"candidate_layout", "vertical"s},
+             {"space_selects_candidate", true},
+             {"select_phrase", "before_cursor"s},
+             {"esc_clears_entire_buffer", false},
+             {"caps_lock_inputs_bopomofo", false},
+             {"shift_letter_keys", "directly_output_uppercase"s},
+         }},
+    };
+    return presets;
+}
+
+const std::vector<std::string>& config_preset_field_keys() {
+    static const std::vector<std::string> keys = {
+        "selection_keys",
+        "selection_key_count",
+        "candidate_page_size",
+        "candidate_layout",
+        "select_phrase",
+        "shift_letter_keys",
+        "space_selects_candidate",
+        "move_cursor_after_selection",
+        "caps_lock_inputs_bopomofo",
+        "esc_clears_entire_buffer",
+        "esc_commits_composition",
+        "tone_key_overwrites_previous",
+        "keep_invalid_reading",
+        "shift_backspace_removes_tone",
+    };
+    return keys;
+}
+
+std::optional<std::vector<std::pair<std::string, ConfigValue>>> config_preset_values(std::string_view key) {
+    const auto& presets = config_presets();
+    const auto preset = std::ranges::find(presets, key, &ConfigPreset::key);
+    if (preset == presets.end()) return std::nullopt;
+
+    Config config = default_config();
+    for (const auto& [field_key, value] : preset->values) {
+        const auto* field = find_config_field(field_key);
+        if (field == nullptr || std::ranges::find(config_preset_field_keys(), field_key) ==
+                                    config_preset_field_keys().end() ||
+            !set_config_field_value(config, *field, value)) {
+            return std::nullopt;
+        }
+    }
+
+    std::vector<std::pair<std::string, ConfigValue>> values;
+    for (const auto& field_key : config_preset_field_keys()) {
+        const auto* field = find_config_field(field_key);
+        if (field == nullptr) return std::nullopt;
+        values.emplace_back(field_key, config_field_value(config, *field));
+    }
+    return values;
+}
+
+bool apply_config_preset(Config& config, std::string_view key) {
+    const auto values = config_preset_values(key);
+    if (!values) return false;
+    Config updated = config;
+    for (const auto& [field_key, value] : *values) {
+        const auto* field = find_config_field(field_key);
+        if (field == nullptr || !set_config_field_value(updated, *field, value)) return false;
+    }
+    config = std::move(updated);
+    return true;
+}
+
 nlohmann::json config_schema_json() {
     nlohmann::json fields = nlohmann::json::array();
     for (const auto& field : config_fields()) {
@@ -263,7 +393,19 @@ nlohmann::json config_schema_json() {
         }
         fields.push_back(std::move(entry));
     }
-    return nlohmann::json{{"fields", std::move(fields)}};
+
+    nlohmann::json presets = nlohmann::json::array();
+    for (const auto& preset : config_presets()) {
+        const auto values = config_preset_values(preset.key);
+        if (!values) continue;
+        nlohmann::json object = nlohmann::json::object();
+        for (const auto& [key, value] : *values) object[key] = config_value_json(value);
+        presets.push_back({{"key", preset.key},
+                           {"label", preset.label},
+                           {"description", preset.description},
+                           {"values", std::move(object)}});
+    }
+    return nlohmann::json{{"fields", std::move(fields)}, {"presets", std::move(presets)}};
 }
 
 }  // namespace llavon::ime
