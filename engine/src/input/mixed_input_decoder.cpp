@@ -50,6 +50,24 @@ double first_tone_symbol_evidence(std::u16string_view body) {
         (body.size() >= 2 && symbols != 0 ? kFragmentPenalty : 0.0);
 }
 
+// Whether the text immediately before the pending input ends in Chinese: a
+// Han character or full-width/CJK punctuation. Whitespace, ASCII and an empty
+// context say nothing, so the pending input keeps its standalone ranking.
+bool ends_with_chinese_text(std::u16string_view text) {
+    if (text.empty()) return false;
+    const char16_t last = text.back();
+    if (last >= 0xDC00 && last <= 0xDFFF) {
+        // Supplementary Han planes (U+20000..U+3FFFF) have these high surrogates.
+        if (text.size() < 2) return false;
+        const char16_t high = text[text.size() - 2];
+        return high >= 0xD840 && high <= 0xD8BF;
+    }
+    const auto in = [last](char16_t low, char16_t high) { return last >= low && last <= high; };
+    return in(0x3400, 0x4DBF) || in(0x4E00, 0x9FFF) || in(0xF900, 0xFAFF) ||
+           in(0x3001, 0x303F) ||
+           in(0xFF01, 0xFF0F) || in(0xFF1A, 0xFF20) || in(0xFF3B, 0xFF40) || in(0xFF5B, 0xFF65);
+}
+
 bool is_explicit_tone_key(char32_t key, BopomofoKeyboardLayout layout) {
     return is_bopomofo_tone_key(key, layout);
 }
@@ -99,7 +117,18 @@ std::u16string render_segment(const MixedSegment& segment) {
         append_codepoint(text, segment.candidates.front());
         return text;
     }
-    return segment.raw;
+    return segment.text.empty() ? segment.raw : segment.text;
+}
+
+// Full-width sentence punctuation for a Shift punctuation key typed right
+// after Chinese. Keys that are phonetic keys on this layout never convert,
+// and symbols that commonly belong to ASCII syntax (@ # $ _ = + ~ ...) stay.
+std::optional<char16_t> sentence_punctuation(char16_t key, BopomofoKeyboardLayout layout) {
+    if (std::u16string_view(u"<>':\"!?[]{}()").find(key) == std::u16string_view::npos) return std::nullopt;
+    if (lookup_bopomofo_key(key, layout, false)) return std::nullopt;
+    const auto mapped = lookup_chewing_punctuation_key(key);
+    if (!mapped || *mapped > 0xFFFF) return std::nullopt;
+    return static_cast<char16_t>(*mapped);
 }
 
 }  // namespace
@@ -123,6 +152,16 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
     const auto established_boundaries = context.previous_preview
         ? closed_ascii_boundaries(*context.previous_preview, layout)
         : std::vector<std::size_t>{};
+    // Context alone is not evidence against a literal start: require an
+    // explicit tone key somewhere in the pending input (u r, ha ha stay).
+    // Like the other strong-tone policies this is enabled for Standard only:
+    // other layouts put tones on letters or digits that short English uses.
+    const bool preceded_by_chinese = layout == BopomofoKeyboardLayout::Standard &&
+        ends_with_chinese_text(context.preceding_text) &&
+        std::ranges::any_of(raw, [&](char16_t key) { return key != u' ' && is_explicit_tone_key(key, layout); });
+    const bool alphanumeric_input = std::ranges::all_of(raw, [](char16_t key) {
+        return (key >= u'a' && key <= u'z') || (key >= u'A' && key <= u'Z') || (key >= u'0' && key <= u'9');
+    });
 
     struct Edge {
         size_t end;
@@ -207,9 +246,70 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         edges[begin].push_back({end, std::move(segment), lexical_word});
     };
 
+    // Ends of runs of completed readings, each closed by a non-letter tone,
+    // optionally with dictionary words between them; at least one reading.
+    const auto toned_prefix_ends = [&](size_t begin, size_t limit) {
+        std::vector<bool> reach(limit + 1, false);
+        std::vector<bool> toned(limit + 1, false);
+        std::vector<size_t> ends;
+        reach[begin] = true;
+        for (size_t p = begin; p < limit; ++p) {
+            if (!reach[p]) continue;
+            for (size_t len = 2; len <= kMaxSyllableKeys && p + len <= limit; ++len) {
+                const char16_t tone = raw[p + len - 1];
+                if (!is_explicit_tone_key(tone, layout) || (tone >= u'a' && tone <= u'z')) continue;
+                bool any = false;
+                for (const auto& syllable : replay_bopomofo_keys(raw.substr(p, len - 1), tone, layout)) {
+                    if (!lookup_(syllable.text()).empty()) { any = true; break; }
+                }
+                if (any) reach[p + len] = toned[p + len] = true;
+            }
+            // A dictionary word may sit between toned readings (email + 是).
+            for (size_t end = p + 2; end <= limit && end <= p + 24; ++end) {
+                const char16_t ch = raw[end - 1];
+                if (!((ch >= u'a' && ch <= u'z') || (ch >= u'A' && ch <= u'Z'))) break;
+                if (frequency_ && frequency_(raw.substr(p, end - p)) > 0) {
+                    reach[end] = true;
+                    if (toned[p]) toned[end] = true;
+                }
+            }
+        }
+        for (size_t end = begin + 1; end <= limit; ++end) {
+            if (reach[end] && toned[end]) ends.push_back(end);
+        }
+        return ends;
+    };
+    // An opaque token (email, identifier, URL...) whose prefix is such a run,
+    // followed by the same kind of token starting with a letter, is that
+    // Chinese followed by the shorter name: 寄到dev@x, 號是report_2026.
+    // The longer spelling is dropped; the exact raw path remains selectable.
+    const auto splittable_opaque = [&](const AsciiToken& token) {
+        if (token.kind == AsciiTokenKind::LatinWord || token.kind == AsciiTokenKind::Number ||
+            token.kind == AsciiTokenKind::OperatorOrSymbol) return false;
+        for (const auto j : toned_prefix_ends(token.begin, token.end)) {
+            if (j >= token.end || !((raw[j] >= u'a' && raw[j] <= u'z') || (raw[j] >= u'A' && raw[j] <= u'Z'))) continue;
+            for (const auto& rest : tokenize_ascii(raw, j)) {
+                if (rest.end == token.end && rest.kind != AsciiTokenKind::LatinWord) return true;
+            }
+        }
+        return false;
+    };
     // ASCII edges (generic grammar, no hardcoded websites or words).
     for (size_t i = 0; i < n; ++i) {
+        // Opaque names begin at a word boundary: the input start, a non-word
+        // key, or the explicit tone key that closed a reading. Starting in the
+        // middle of an alphanumeric run would swallow the readings before it.
+        // Like the other strong-tone policies, this is enabled for Standard
+        // only; letter-tone layouts keep their structured boundary repairs.
+        const bool word_start = layout != BopomofoKeyboardLayout::Standard || i == 0 ||
+            !((raw[i - 1] >= u'a' && raw[i - 1] <= u'z') || (raw[i - 1] >= u'A' && raw[i - 1] <= u'Z') ||
+              (raw[i - 1] >= u'0' && raw[i - 1] <= u'9') || raw[i - 1] == u'_') ||
+            is_strong_bopomofo_tone_key(raw[i - 1], layout);
         for (const auto& token : tokenize_ascii(raw, i)) {
+            if (splittable_opaque(token)) continue;
+            if (!word_start && (token.kind == AsciiTokenKind::Identifier || token.kind == AsciiTokenKind::Email ||
+                                token.kind == AsciiTokenKind::Domain || token.kind == AsciiTokenKind::URL ||
+                                token.kind == AsciiTokenKind::Alphanumeric)) continue;
             MixedSegment segment;
             switch (token.kind) {
                 case AsciiTokenKind::LatinWord:
@@ -322,12 +422,17 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             // Complete valid readings are not error states, even when their
             // lexical prior is weak (e.g. a vowel-only interjection).
             if (!replay(keys.substr(0, keys.size() - 1), tone).empty()) return;
-            // A real English word followed by a valid reading is a normal
-            // mixed boundary, not one malformed syllable. Use the existing
-            // lexicon, without special-casing any abbreviation or character.
+            // A real English word or a number followed by a valid reading is a
+            // normal mixed boundary, not one malformed syllable (on layouts
+            // whose digit keys are also phonetic keys, e.g. 100 + ㄩㄢˊ). Use
+            // the existing lexicon, without special-casing any abbreviation.
             if (frequency_) {
                 for (size_t split = 1; split + 1 < keys.size(); ++split) {
-                    if (frequency_(keys.substr(0, split)) > 0 &&
+                    const auto head = keys.substr(0, split);
+                    const bool number = std::ranges::all_of(head, [](char16_t key) {
+                        return key >= u'0' && key <= u'9';
+                    });
+                    if ((number || frequency_(head) > 0) &&
                         !replay(keys.substr(split, keys.size() - split - 1), tone).empty()) return;
                 }
             }
@@ -452,7 +557,11 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                     break;
                 }
             }
-            if (valid && !scratch.segments().empty() && !scratch.segments().front().syllable.empty()) {
+            // A tone with no completed syllable means a tone key was read as
+            // the start of the next reading (e.g. the 6 of a finished t/6
+            // followed by an initial). That is not a syllable being typed.
+            if (valid && !scratch.segments().empty() && !scratch.segments().front().syllable.empty() &&
+                !scratch.segments().front().syllable.has_tone()) {
                 MixedSegment segment;
                 segment.kind = MixedSegmentKind::BopomofoIncomplete;
                 segment.reading = scratch.segments().front().syllable.text();
@@ -664,9 +773,20 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         }
     };
 
+    // A Space kept as a separator after a reading, and what may follow it:
+    // ASCII words, numbers and symbols that stay ASCII (not 你 ?, which is 你？).
+    const auto kept_separator = [](const PathLinkPtr& link) {
+        return link && link->prev && link->segment.raw == u" " && !link->segment.consumed_boundary &&
+            link->prev->segment.kind == MixedSegmentKind::Bopomofo;
+    };
+    const auto ascii_after_separator = [&](const MixedSegment& next) {
+        return next.kind == MixedSegmentKind::Latin || next.kind == MixedSegmentKind::Number ||
+            (next.kind == MixedSegmentKind::Symbol && next.raw.size() == 1 && next.raw != u" " &&
+             !sentence_punctuation(next.raw.front(), layout));
+    };
     const auto extend = [&](const Entry& entry, MixedSegment segment, size_t candidate,
                             bool lexical_word, bool ordinal_prior, bool recovery_piece = false,
-                            bool phrase_onset = false) {
+                            bool phrase_onset = false, bool keep_space = false) {
         double score = entry.score + segment.score;
         // Six-key pieces bound parsing work, not the number of independent
         // errors. A contiguous unresolved run pays its cost once; repeatedly
@@ -674,10 +794,14 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         // Legal completed readings remain separate edges and end the run.
         if (segment.kind == MixedSegmentKind::BopomofoUnresolved && entry.path &&
             entry.path->recovery_piece) score -= segment.score;
-        if (segment.raw == u" " && entry.path && entry.path->segment.kind == MixedSegmentKind::Bopomofo) {
+        // A Space after a reading normally only closes it. Before ASCII content
+        // the user's Space is a word separator instead (網址是 https://...):
+        // the search also offers it kept, preferred only in that position.
+        if (segment.raw == u" " && entry.path && entry.path->segment.kind == MixedSegmentKind::Bopomofo && !keep_space) {
             segment.consumed_boundary = true;
             score += 0.01;
         }
+        if (kept_separator(entry.path) && ascii_after_separator(segment)) score += 0.02;
         if (segment.kind == MixedSegmentKind::Bopomofo) {
             const auto preceding = context.preceding_text;
             std::u16string history(preceding.substr(preceding.size() > 3 ? preceding.size() - 3 : 0));
@@ -735,7 +859,11 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
         }
         const bool resume_after_established_ascii = ascii_island_after_chinese &&
             segment.kind == MixedSegmentKind::Bopomofo &&
-            is_strong_bopomofo_tone_key(segment.tone_key, layout);
+            (is_strong_bopomofo_tone_key(segment.tone_key, layout) ||
+             // A number may be followed by a first-tone reading (20分), but a
+             // single key after it is a unit suffix (1080p, 5g, 4k, 3d).
+             (segment.tone_key == U' ' && segment.body_keys.size() >= 2 &&
+              entry.path->segment.kind == MixedSegmentKind::Number));
         if (entry.path && entry.path->segment.kind != segment.kind &&
             entry.path->segment.kind != MixedSegmentKind::Symbol && segment.kind != MixedSegmentKind::Symbol &&
             !(entry.path->segment.kind == MixedSegmentKind::Bopomofo &&
@@ -746,9 +874,45 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             if ((entry.path->segment.kind == MixedSegmentKind::Latin && entry.path->segment.raw.size() == 1) ||
                 (segment.kind == MixedSegmentKind::Latin && segment.raw.size() == 1)) score -= 1.0;
         }
+        // A Space after one literal letter is exactly a single-key first-tone
+        // reading's shape. It must not make the switch from that letter to a
+        // following explicitly toned reading free: charge the same cost as
+        // without the Space. A following Space-closed reading is no stronger
+        // evidence than the letter itself, so that ambiguity is left as is.
+        // A word and a Space before Chinese remain a natural free boundary.
+        if (segment.kind == MixedSegmentKind::Bopomofo && segment.tone_key != U' ' &&
+            entry.path && entry.path->prev &&
+            entry.path->segment.kind == MixedSegmentKind::Symbol && entry.path->segment.raw == u" " &&
+            entry.path->prev->segment.kind == MixedSegmentKind::Latin &&
+            entry.path->prev->segment.raw.size() == 1 && !entry.path->prev->lexical_island) {
+            score -= kSwitchPenalty + 1.0;
+        }
+        // Pending input that begins right after Chinese text makes the same
+        // language transition as a Chinese segment followed by this one inside
+        // a single pending token. Charge that same switch cost; otherwise the
+        // first segment is the only place where a literal switch is free.
+        // Until a Space or symbol ends it, an all-alphanumeric input is a word
+        // still being typed (its prefix is scored as such), not yet a switch.
+        if (!entry.path && preceded_by_chinese && !alphanumeric_input &&
+            (segment.kind == MixedSegmentKind::Latin || segment.kind == MixedSegmentKind::Number)) {
+            score -= kSwitchPenalty;
+            if (segment.kind == MixedSegmentKind::Latin && segment.raw.size() == 1) score -= 1.0;
+        }
         // Each additional adjacent Latin segment pays fragmentation once.
         if (entry.path && entry.path->segment.kind == MixedSegmentKind::Latin &&
             segment.kind == MixedSegmentKind::Latin) score -= kFragmentPenalty;
+        // Sentence punctuation right after Chinese (also after a consumed Space
+        // or another converted mark) is Chinese punctuation, e.g. 你好，我.
+        if (segment.kind == MixedSegmentKind::Symbol && segment.raw.size() == 1 && entry.path) {
+            auto previous = entry.path;
+            while (previous && (previous->segment.consumed_boundary ||
+                                (previous->segment.kind == MixedSegmentKind::Symbol && !previous->segment.text.empty()))) {
+                previous = previous->prev;
+            }
+            if (previous && previous->segment.kind == MixedSegmentKind::Bopomofo) {
+                if (const auto mark = sentence_punctuation(segment.raw.front(), layout)) segment.text.assign(1, *mark);
+            }
+        }
         std::u16string rendered = entry.path ? entry.path->rendered : std::u16string();
         rendered += render_segment(segment);
         const size_t latin_count = prev_latin + (segment.kind == MixedSegmentKind::Latin ? 1 : 0);
@@ -774,6 +938,12 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                                         repaired_singletons.begin() + static_cast<std::ptrdiff_t>(edge.end),
                                         [](bool value) { return value; })) continue;
                 for (const auto& entry : buckets[v]) {
+                    // A kept Space after a reading only precedes ASCII content.
+                    if (kept_separator(entry.path) && !ascii_after_separator(edge.segment)) continue;
+                    if (edge.segment.raw == u" " && entry.path && entry.path->segment.kind == MixedSegmentKind::Bopomofo) {
+                        insert_entry(buckets[edge.end], extend(entry, edge.segment, 0, edge.lexical_word, true,
+                                                               edge.recovery_piece, edge.phrase_onset, true));
+                    }
                     if (edge.segment.kind == MixedSegmentKind::BopomofoUnresolved &&
                         (!entry.path || (entry.path->segment.kind != MixedSegmentKind::Bopomofo &&
                                          entry.path->segment.kind != MixedSegmentKind::BopomofoUnresolved))) continue;
@@ -788,6 +958,7 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             if (lexical_spans) {
                 for (const auto& phrase : phrases[v]) {
                     for (const auto& entry : buckets[v]) {
+                        if (kept_separator(entry.path)) continue;
                         auto next = entry;
                         for (const auto& segment : phrase.segments) next = extend(next, segment, 0, false, false);
                         insert_entry(buckets[phrase.end], std::move(next));
@@ -821,9 +992,14 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
             // Repair a complete singleton first-tone reading currently split
             // into one literal letter and a Space. Do not reinterpret words,
             // opaque tokens, malformed raw islands or unfinished readings.
-            const bool singleton = (segment.kind == MixedSegmentKind::Latin || segment.kind == MixedSegmentKind::Symbol) &&
+            // The same one-key reading already decoded as Chinese is equally
+            // weak evidence for its character: the ordinary beam expands only
+            // a few homophones, so let a dictionary phrase choose it as well.
+            const bool singleton = ((segment.kind == MixedSegmentKind::Latin || segment.kind == MixedSegmentKind::Symbol) &&
                 segment.raw.size() == 1 && segment.end < n && raw[segment.end] == u' ' &&
-                !replay(segment.raw, U' ').empty();
+                !replay(segment.raw, U' ').empty()) ||
+                (segment.kind == MixedSegmentKind::Bopomofo && segment.body_keys.size() == 1 &&
+                 segment.tone_key == U' ');
             if (singleton) singleton_literal[segment.begin] = true;
             // Letter tones can make a short dictionary abbreviation look
             // cheaper than a reading inside established Chinese. Admit its

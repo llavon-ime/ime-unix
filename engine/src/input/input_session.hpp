@@ -24,6 +24,8 @@ struct MixedDecisionState {
     size_t preview_path = 0;
     size_t preview_character = 0;
     uint64_t source_revision = 0;
+    // Escape explicitly chose the raw keys of this revision.
+    bool raw_chosen = false;
 
     bool active() const noexcept { return !result.raw.empty(); }
     void clear() {
@@ -31,6 +33,7 @@ struct MixedDecisionState {
         preview_path = 0;
         preview_character = 0;
         source_revision = 0;
+        raw_chosen = false;
     }
 };
 

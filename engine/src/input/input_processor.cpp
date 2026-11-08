@@ -453,6 +453,7 @@ void InputProcessor::process_impl(const InputKey& key) {
                 } else if (session_->mixed_decision.active() && session_->mixed_decision.preview_path != 0) {
                     session_->mixed_decision.preview_path = 0;
                     session_->mixed_decision.preview_character = 0;
+                    session_->mixed_decision.raw_chosen = true;
                 } else {
                     session_->clear_pending_input();
                 }
@@ -483,6 +484,22 @@ void InputProcessor::process_impl(const InputKey& key) {
                 return;
             }
 
+            const bool raw_kept = session_->mixed_decision.raw_chosen &&
+                session_->mixed_decision.source_revision == session_->pending_token.revision;
+            if (raw_kept && (key.sym == U' ' || (raw_symbol >= 0x21 && raw_symbol <= 0x7e &&
+                                                 !key.has_blocking_modifier() && !key.has(InputKeyState::Ctrl)))) {
+                // The chosen raw keys stay literal; the new key starts afresh.
+                settle_pending_as_literals();
+                if (key.sym == U' ') {
+                    (void)session_->buffer.add_literal(U' ');
+                    redraw();
+                } else {
+                    append_pending_char(raw_symbol, layout);
+                    rerun_pending_decision();
+                }
+                consume();
+                return;
+            }
             if (key.sym == U' ') {
                 append_pending_char(U' ', smart_layout);
                 rerun_pending_decision();
@@ -936,7 +953,9 @@ bool InputProcessor::apply_mixed_path(const MixedPath& path, std::size_t char_in
                 return false;
             }
         } else {
-            for (const char16_t ch : segment.raw) (void)next.add_literal(static_cast<char32_t>(ch));
+            for (const char16_t ch : segment.text.empty() ? segment.raw : segment.text) {
+                (void)next.add_literal(static_cast<char32_t>(ch));
+            }
         }
     }
     session_->buffer = std::move(next);

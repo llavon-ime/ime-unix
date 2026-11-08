@@ -15,7 +15,10 @@ RAWKEY_SUITE("structured tokens offer reversible Chinese prefix", structured_chi
                                  {"SelectionKeys", "數字鍵"}});
             harness.type(prefix + literal);
             const auto expected = std::string("你好") + literal;
-            RAWKEY_ASSERT(harness.preedit() == prefix + literal);
+            // Standard's digit tones close 你好 explicitly, so the opaque
+            // token starts after them; Hsu's letter tones keep the literal.
+            const bool toned_prefix = std::string_view(layout) == "標準";
+            RAWKEY_ASSERT(harness.preedit() == (toned_prefix ? expected : prefix + literal));
             RAWKEY_ASSERT(harness.commits().empty());
             // A better automatic interpretation must not remove the original
             // reversible spelling from the actual candidate window.
@@ -45,10 +48,11 @@ RAWKEY_SUITE("structured tokens offer reversible Chinese prefix", structured_chi
             // Removing '_' must not change the earlier displayed raw prefix
             // into Chinese as a side effect of deleting a character.
             for (int key = 0; key < 7; ++key) harness.key("BackSpace");
-            RAWKEY_ASSERT(harness.preedit() == prefix + "user");
+            const auto shown = std::string_view(layout) == "標準" ? std::string("你好") : prefix;
+            RAWKEY_ASSERT(harness.preedit() == shown + "user");
             harness.type("_name42");
-            RAWKEY_ASSERT(harness.preedit() == prefix + "user_name42");
-            harness.expect_focus_out_commit(prefix + "user_name42");
+            RAWKEY_ASSERT(harness.preedit() == shown + "user_name42");
+            harness.expect_focus_out_commit(shown + "user_name42");
         }
         {
             Harness harness;
@@ -56,7 +60,8 @@ RAWKEY_SUITE("structured tokens offer reversible Chinese prefix", structured_chi
             harness.type(prefix + "dev@example.con");
             harness.key("BackSpace");
             harness.type("m");
-            harness.expect_commit(prefix + "dev@example.com");
+            const auto shown = std::string_view(layout) == "標準" ? std::string("你好") : prefix;
+            harness.expect_commit(shown + "dev@example.com");
         }
     }
 }

@@ -584,8 +584,9 @@ RAWKEY_SUITE("smart valid mixed boundaries from reported sentence", smart_report
     harness.expect_commit(expected);
     harness.type("o4");
     RAWKEY_ASSERT(harness.preedit() == "欸");
+    // A Shift punctuation key right after Chinese is Chinese punctuation.
     harness.type("]");
-    harness.expect_commit("欸]");
+    harness.expect_commit("欸」");
     harness.type(raw);
     harness.key("Down");
     harness.choose_text(raw);
@@ -699,6 +700,297 @@ RAWKEY_SUITE("smart lexical spans recover stranded singleton readings across lay
         Harness harness(smart("standard"));
         harness.type(raw);
         RAWKEY_ASSERT(harness.preedit() == raw);
+        harness.expect_commit(raw);
+    }
+}
+
+RAWKEY_SUITE("smart completed leading reading survives the next reading's keys", smart_leading_tone_not_onset) {
+    // A finished syllable's tone key must not be reread as the start of an
+    // unfinished next syllable, which turned the displayed 成 back into raw.
+    for (const auto& [raw, first, expected] : std::array{
+        std::tuple{"t/6dk4", "成", "成客"}, std::tuple{"j;6vu; ", "王", "王鄉"},
+        std::tuple{"-6ji3", "兒", "兒我"}}) {
+        Harness harness(smart("standard"));
+        const std::string_view keys(raw);
+        // Every prefix from the completing tone key onward shows the reading.
+        const auto tone = keys.find_first_of("6");
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            harness.type(std::string(1, keys[i]));
+            if (i >= tone && !harness.preedit().starts_with(first)) {
+                throw Failure{std::string(raw) + ": prefix " + std::string(keys.substr(0, i + 1)) +
+                              " became " + harness.preedit()};
+            }
+            RAWKEY_ASSERT(harness.commits().empty());
+        }
+        RAWKEY_ASSERT(harness.preedit() == expected);
+        harness.expect_commit(expected);
+    }
+}
+
+RAWKEY_SUITE("smart pending after Chinese text pays the language switch", smart_leading_after_chinese) {
+    // Text before the caret is the same evidence as Chinese earlier in one
+    // pending token: once the input has an explicit tone, a separated literal
+    // start is a language switch. Context alone never rewrites short English.
+    const auto segmentation = [](Harness& harness) {
+        std::string text;
+        const auto& decision = harness.session()->mixed_decision;
+        for (const auto& segment : decision.result.paths.at(decision.preview_path).segments) {
+            if (segment.consumed_boundary) continue;
+            if (!text.empty()) text += ' ';
+            text += std::string(segment.kind == MixedSegmentKind::Bopomofo ? "B:" :
+                                segment.kind == MixedSegmentKind::Latin ? "L:" : "S:") + u16_to_utf8(segment.raw);
+        }
+        return text;
+    };
+    for (const auto& [before, cursor] : std::array{std::pair{"我想", std::size_t{2}},
+                                                   std::pair{"好了。", std::size_t{3}},
+                                                   std::pair{"𠮷", std::size_t{2}}}) {
+        for (const auto& [raw, expected] : std::array{std::pair{"up m,4", "B:up  B:m,4"},
+                                                      std::pair{"co 2ul4", "B:co  B:2ul4"}}) {
+            Harness harness(smart("standard"));
+            harness.set_surrounding(before, cursor, cursor);
+            harness.type(raw);
+            if (segmentation(harness) != expected) throw Failure{std::string(raw) + " decoded as " + segmentation(harness)};
+            RAWKEY_ASSERT(harness.commits().empty());
+            // The exact raw choice remains reachable from the candidate panel.
+            harness.key("Down");
+            harness.choose_text(raw);
+            harness.expect_commit(raw);
+        }
+        for (const auto& [raw, expected] : std::array{std::pair{"u ek4", "一個"}, std::pair{"t z04", "吃飯"}}) {
+            Harness harness(smart("standard"));
+            harness.set_surrounding(before, cursor, cursor);
+            harness.type(raw);
+            RAWKEY_ASSERT(harness.preedit() == expected);
+            harness.expect_commit(expected);
+        }
+        // Literal English, commands and numbers remain literal after Chinese.
+        for (const auto raw : {"hello world", "git status ", "a test", "2024 ", "v3.14 ", "u ", "u r", "x y z",
+                               "ha ha", "a = b + 1", "ls -la"}) {
+            Harness harness(smart("standard"));
+            harness.set_surrounding(before, cursor, cursor);
+            harness.type(raw);
+            if (harness.preedit() != raw) throw Failure{std::string(raw) + " became " + harness.preedit()};
+            harness.expect_commit(raw);
+        }
+    }
+    {
+        // A Chinese composition settled before the caret is the same evidence.
+        Harness harness(smart("standard"));
+        harness.type("su3cl3");
+        harness.key("Down");
+        harness.choose_text("你好");
+        harness.type("up m,4");
+        RAWKEY_ASSERT(segmentation(harness) == "B:up  B:m,4");
+        harness.expect_commit(harness.preedit());
+    }
+    // Without Chinese before the caret the English word start stays literal.
+    for (const auto& [before, cursor] : std::array{std::pair{"", std::size_t{0}},
+                                                   std::pair{"I use ", std::size_t{6}}}) {
+        Harness harness(smart("standard"));
+        harness.set_surrounding(before, cursor, cursor);
+        harness.type("up m,4");
+        RAWKEY_ASSERT(segmentation(harness) == "L:up S:  B:m,4");
+        harness.expect_commit(harness.preedit());
+    }
+}
+
+namespace {
+// The displayed path as kind:raw pieces, e.g. "B:g4 N:100 B:m06". Homophone
+// order is not asserted, only how the raw keys were interpreted.
+std::string displayed_segmentation(const Harness& harness) {
+    const auto& decision = harness.session()->mixed_decision;
+    if (!decision.active() || decision.preview_path >= decision.result.paths.size()) return {};
+    std::string text;
+    for (const auto& segment : decision.result.paths[decision.preview_path].segments) {
+        if (segment.consumed_boundary) continue;
+        const char* kind = segment.kind == MixedSegmentKind::Bopomofo ? "B" :
+            segment.kind == MixedSegmentKind::Number ? "N" :
+            segment.kind == MixedSegmentKind::Latin ? "L" : segment.kind == MixedSegmentKind::Symbol ? "S" : "?";
+        if (!text.empty()) text += ' ';
+        text += std::string(kind) + ":" + u16_to_utf8(segment.raw);
+    }
+    return text;
+}
+} // namespace
+
+RAWKEY_SUITE("smart numbers between Chinese readings keep their boundaries", smart_numbers_inside_chinese) {
+    // Standard digit keys are also phonetic keys. A number followed by a valid
+    // reading is a mixed boundary, not one mistyped syllable swallowing both.
+    for (const auto& [raw, expected] : std::array{
+        std::pair{"ru84ek6g4100m06", "B:ru84 B:ek6 B:g4 N:100 B:m06"},
+        std::pair{"2u41au/6", "B:2u4 N:1 B:au/6"},
+        std::pair{"2024su06", "N:2024 B:su06"}}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (displayed_segmentation(harness) != expected) {
+            throw Failure{std::string(raw) + " decoded as " + displayed_segmentation(harness)};
+        }
+        harness.expect_commit(harness.preedit());
+    }
+    // Numbers that are not followed by a reading stay exact.
+    for (const auto raw : {"100 ", "v3.14 ", "1031p3v2"}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (std::string_view(raw) == "1031p3v2") {
+            RAWKEY_ASSERT(displayed_segmentation(harness) == "B:103 B:1p3 L:v2");
+        } else {
+            RAWKEY_ASSERT(harness.preedit() == raw);
+        }
+        harness.expect_commit(harness.preedit());
+    }
+}
+
+RAWKEY_SUITE("smart one letter and Space before a toned reading is a reading", smart_singleton_before_tone) {
+    // Without this, a leading single-key reading stayed English for good when
+    // the next characters were not a dictionary phrase (t 了沒).
+    for (const auto& [raw, expected] : std::array{
+        std::pair{"t xk7ao6", "B:t  B:xk7 B:ao6"}, std::pair{"y ek4", "B:y  B:ek4"}}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (displayed_segmentation(harness) != expected) {
+            throw Failure{std::string(raw) + " decoded as " + displayed_segmentation(harness)};
+        }
+        harness.expect_commit(harness.preedit());
+    }
+    RAWKEY_ASSERT([] {
+        Harness harness(smart("standard"));
+        harness.type("t xk7ao6");
+        return harness.preedit() == "吃了沒";
+    }());
+    // Literal letters, words and Space-closed ambiguity are unchanged.
+    for (const auto raw : {"a test", "j g ", "hello j g ", "a i u "}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (harness.preedit() != raw) throw Failure{std::string(raw) + " became " + harness.preedit()};
+        harness.expect_commit(raw);
+    }
+}
+
+RAWKEY_SUITE("smart opaque tokens start after explicitly toned Chinese", smart_opaque_after_toned) {
+    // Standard digit tones close each reading. An email, identifier or URL
+    // that follows must not swallow those completed readings as its prefix.
+    for (const auto& [raw, expected] : std::array{
+        std::pair{"fu/3ru42l4dev@example.com", "B:fu/3 B:ru4 B:2l4 L:dev@example.com"},
+        std::pair{"ji32k7yj/3g4report_2026", "B:ji3 B:2k7 B:yj/3 B:g4 L:report_2026"},
+        std::pair{"su3cl3user_name42", "B:su3 B:cl3 L:user_name42"},
+        // A dictionary word between readings does not let the name start early.
+        std::pair{"ji32k7emailg4test@gmail.com", "B:ji3 B:2k7 L:email B:g4 L:test@gmail.com"}}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (displayed_segmentation(harness) != expected) {
+            throw Failure{std::string(raw) + " decoded as " + displayed_segmentation(harness)};
+        }
+        // The complete raw spelling stays one candidate away.
+        harness.key("Down");
+        const auto entries = harness.candidates();
+        RAWKEY_ASSERT(std::ranges::find(entries, std::string(raw)) != entries.end());
+        harness.key("Escape");
+        harness.expect_commit(harness.preedit());
+    }
+    // Names whose letters merely contain a toned reading stay whole.
+    for (const auto raw : {"x86_64", "mp3_file", "h264", "v4l2", "user_2026_name", "abc123_foo"}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (harness.preedit() != raw) throw Failure{std::string(raw) + " became " + harness.preedit()};
+        harness.expect_commit(raw);
+    }
+}
+
+RAWKEY_SUITE("smart Space between Chinese and ASCII is kept as a separator", smart_space_separator) {
+    for (const auto& [raw, expected] : std::array{
+        std::pair{"ji3m/4 python vu,3t/6g4", "我用 python 寫程式"},
+        std::pair{"j;353g4 https://example.com", "網址是 https://example.com"},
+        std::pair{"vu04y94 2024 su06", "現在 2024 年"},
+        std::pair{"2;304y94 ~/docs/a.txt", "檔案在 ~/docs/a.txt"}}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        // Readings are model-free here; assert the separators and the ASCII.
+        const auto shown = harness.preedit();
+        if (utf8_to_u16(shown).size() != utf8_to_u16(expected).size() ||
+            std::ranges::count(shown, ' ') != std::ranges::count(std::string_view(expected), ' ')) {
+            throw Failure{std::string(raw) + " became " + shown};
+        }
+        harness.expect_commit(shown);
+    }
+    // A Space between readings, at the end, or before sentence punctuation
+    // still closes the reading.
+    for (const auto& [raw, expected] : std::array{std::pair{"su3 cl3", "你好"}, std::pair{"su3 ", "你"},
+                                                  std::pair{"su3 ?", "你？"}}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (harness.preedit() != expected) throw Failure{std::string(raw) + " became " + harness.preedit()};
+        harness.expect_commit(expected);
+    }
+}
+
+RAWKEY_SUITE("smart Escape keeps the raw keys when typing continues", smart_escape_keeps_raw) {
+    Harness harness(smart("standard"));
+    harness.type("rup wu0 ");
+    RAWKEY_ASSERT(harness.preedit() == "今天");
+    harness.key("Escape");
+    RAWKEY_ASSERT(harness.preedit() == "rup wu0 ");
+    // The next keys must not reinterpret the keys the user chose to keep.
+    harness.type("au/6wu0 ");
+    RAWKEY_ASSERT(harness.preedit() == "rup wu0 明天");
+    // Escape still reverts and then clears only the newer pending keys.
+    harness.key("Escape");
+    RAWKEY_ASSERT(harness.preedit() == "rup wu0 au/6wu0 ");
+    harness.key("Escape");
+    RAWKEY_ASSERT(harness.preedit() == "rup wu0 ");
+    harness.expect_commit("rup wu0 ");
+    // Without Escape the same keys stay one Chinese composition.
+    Harness plain(smart("standard"));
+    plain.type("rup wu0 au/6wu0 ");
+    RAWKEY_ASSERT(plain.preedit() == "今天明天");
+    plain.expect_commit("今天明天");
+}
+
+RAWKEY_SUITE("smart number followed by a first-tone reading keeps the reading", smart_number_first_tone) {
+    Harness harness(smart("standard"));
+    harness.type("284m, 20zp 5j/ ");
+    RAWKEY_ASSERT(displayed_segmentation(harness) == "B:284 B:m,  N:20 B:zp  B:5j/ ");
+    harness.expect_commit(harness.preedit());
+    for (const auto raw : {"1080p ", "5g ", "4k ", "mp3 ", "iphone15 "}) {
+        // Also right after Chinese, where the number resumes a reading.
+        Harness after(smart("standard"));
+        after.type(std::string("u04qu04g4 ") + raw);
+        if (!after.preedit().ends_with(std::string(" ") + raw)) {
+            throw Failure{std::string(raw) + " after Chinese became " + after.preedit()};
+        }
+        Harness literal(smart("standard"));
+        literal.type(raw);
+        if (literal.preedit() != raw) throw Failure{std::string(raw) + " became " + literal.preedit()};
+        literal.expect_commit(raw);
+    }
+}
+
+RAWKEY_SUITE("smart Shift punctuation after Chinese is Chinese punctuation", smart_sentence_punctuation) {
+    for (const auto& [raw, expected] : std::array{
+        std::pair{"su3cl3<ji3g4", "你好，我是"}, std::pair{"5p 2k7a87?", "真的嗎？"},
+        std::pair{"w94cl3xk7!", "太好了！"}, std::pair{"cl3>", "好。"},
+        std::pair{"5j4u4:au/6wu0 ", "注意：明天"}, std::pair{"cl3'", "好、"}}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        const auto shown = harness.preedit();
+        // Readings are model-free here; assert the punctuation itself.
+        const auto mark = utf8_to_u16(std::string(expected)).find_first_of(u"，。！？：、");
+        if (mark == std::u16string::npos || utf8_to_u16(shown).size() != utf8_to_u16(std::string(expected)).size() ||
+            utf8_to_u16(shown)[mark] != utf8_to_u16(std::string(expected))[mark]) {
+            throw Failure{std::string(raw) + " became " + shown};
+        }
+        harness.expect_commit(shown);
+        // The exact ASCII spelling stays selectable.
+        harness.type(raw);
+        harness.key("Down");
+        harness.choose_text(raw);
+        harness.expect_commit(raw);
+    }
+    // ASCII syntax and punctuation after English or at the start stay ASCII.
+    for (const auto raw : {"a<b", "x>1", "hello!", "ok?", "https://example.com/a?b=c", "f(x)", "foo:bar"}) {
+        Harness harness(smart("standard"));
+        harness.type(raw);
+        if (harness.preedit() != raw) throw Failure{std::string(raw) + " became " + harness.preedit()};
         harness.expect_commit(raw);
     }
 }

@@ -1,33 +1,22 @@
-- Linux Fcitx5 與 macOS 原生前端共用 `engine/` 的輸入行為。新增或修改按鍵、組字、選字、提交、焦點切換或預測行為時，在 `engine/tests/rawkey/` 加入或更新 raw-key 情境；透過 `raw_key_harness.hpp` 餵入按鍵，檢查顯示狀態與提交結果。
-- 在 repo 根目錄執行 raw-key 測試：
+Linux Fcitx5 與 macOS 前端共用 `engine/` 的輸入行為；架構見 `README.md`，發布與 tag 遵循 `RELEASING.md`。
 
-  ```sh
-  cmake -S engine -B build/engine-tests -DLLAVON_IME_ENGINE_BUILD_TESTS=ON
-  cmake --build build/engine-tests --target llavon_ime_rawkey_tests --parallel
-  build/engine-tests/tests/llavon_ime_rawkey_tests
-  ```
+## 驗證
+- 全部 engine 測試：`scripts/verify-engine-tests.sh`；單一 suite：`build/engine-tests/tests/llavon_ime_rawkey_tests "名稱片段"`。其他元件的指令見 `.github/workflows/`。
+- 改按鍵、組字、選字、提交、焦點切換或預測行為，要在 `engine/tests/rawkey/` 加或改情境。
+- 這些 CI 不涵蓋，改到相關程式要在本機跑：`macos/scripts/verify-core.sh`（C ABI、`macos/Core/`，只在 release 跑）、`macos/scripts/verify-settings-*.sh`、`macos/scripts/verify-input-source-lifecycle.sh`。
+- `[skip]` 和沒跑的項目要在回報中明說。
 
-- macOS 設定 CMake 時加上 `-DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"`；先確保 `ime-core`、`vcpkg` submodule 已初始化，且 vcpkg 已 bootstrap。
-- 使用c++23
-- 編譯時把所有警告都開啟
+## 不要
+- 在 `fcitx5/`、`macos/` 寫輸入邏輯，或在主執行緒等模型、IPC。
+- 為了通過案例加字串特例、白名單或調權重，或放寬、刪除既有斷言。
+- 壓警告（新 CMake target 要設 C++23 並呼叫 `llavon_ime_enable_warnings`）；使用 GCC 13 沒有的 `<print>`、`std::ranges::to`、`<flat_map>`，或 AppleClang 沒有的 `std::views::enumerate`。
+- 讓使用者輸入、前文或訓練資料離開本機或進 release log。
+- 做任務外的重排或重構；repo 沒有 clang-format 設定，不要跑。
+- 未經同意就跑會安裝輸入法的腳本（`scripts/build-linux.sh`、`scripts/build-macos*.sh`、`macos/scripts/build-native-app.sh --install`）、新增相依、改使用者資料或 IPC 格式、改 `ime-core/` 或 submodule 指標。
 
-## Commit 與 push 規則
-
-- 只提交使用者指定範圍內的正式程式碼、建置／CI 設定、必要資源與維護中的回歸測試；不要因為檔案在工作區就一併提交。只有使用者要求時才 commit 或 push。
-- `docs/` 文件預設只留在本機，不要提交或推送；只有使用者明確指定要提交文件時才納入。
-- 臨時研究、實驗版 adapter、一次性 probe／benchmark／評分腳本、僅供實驗使用的案例資料、研究紀錄與狀態檔、測試輸出、截圖、日誌及機器本地設定，不要提交或推送。判斷依據是用途與引用關係，不是只看檔名或所在目錄。
-- 正式功能需要的資料、授權／署名資訊及可重現的資料產生工具屬於必要資源；不要把它們當成臨時檔案移除。
-- 提交前先檢查 `git status --short`、工作區 diff 與既有暫存內容，辨識其他工作／session 的修改。保留不在本次範圍內的內容，不要覆寫、刪除或混入提交；不確定用途或範圍時先確認。
-- 使用明確檔案路徑或選定的 diff 區塊暫存，不要使用 `git add .`、`git add -A` 或 `git commit -a`。同一檔案混有正式功能與實驗內容時，要拆開提交。
-- Commit 前檢查 `git diff --cached --stat`、`git diff --cached` 與 `git diff --cached --check`，確認沒有夾帶文件、臨時檔案、無關修改或未授權的 submodule 指標變動。只有使用者明確授權時才可修改 `ime-core/`；它的 submodule 指標需另行明確授權才能更新。
-- 驗證實際要提交的版本；部分暫存時，不可只測包含其他本機修改的完整工作區。移除臨時檔案時一併檢查建置、測試與連結引用；檔案若仍有本機用途，保留本機副本並加入適當忽略規則。
-- 新增相依套件或修改建置流程時，同步檢查相關 CI 的套件安裝與步驟順序。Push 後確認相關 CI 結果，未完成或失敗時不要宣稱全部通過。
-- Commit 訊息要清楚描述該批變更。未經使用者明確要求，不要 amend 已推送的提交、重寫遠端歷史或 force push。
-
-## 發布與 tag 規則
-
-- 建立版本 tag 前必須遵循根目錄的 `RELEASING.md`；未經使用者明確指定版本並授權，不得自行建立或推送 tag。
-- Release notes 與 annotated tag message 必須使用繁體中文。撰寫前必須比較上一個正式版本 tag 到預定發布 commit 的完整變更，不可只依賴近期對話、單一 commit 或記憶整理。
-- Release notes 應從使用者角度說明「新增、改善、修正、相容性或已知限制」，保持用詞、標點、分類與句型一致；不要直接貼 commit 清單，也不要把純 CI、研究、重構或內部實作細節當成主要更新內容。
-- 只能建立 annotated 或 signed tag，不得使用 lightweight tag。建立前先向使用者展示版本號、比較範圍與完整 tag message；取得確認後才能 push。
-- 不得移動、覆寫或 force-push 已發布的 tag。發布後必須確認 macOS 與 Linux release workflow、GitHub Release 資產、release notes，以及 macOS Sparkle appcast 的版本與摘要。
+## Git
+- 只有使用者要求時才 commit、push、建 tag、amend 已推送的提交或 force push；push 到 `preview`／`main` 會自動發布 AUR。
+- 只提交指定範圍內的正式程式碼、建置／CI 設定、必要資源與回歸測試。`docs/`、臨時研究、一次性腳本、實驗資料、測試輸出、截圖、日誌與本機設定不提交；依用途判斷，不看檔名。
+- 保留其他 session 的修改；用明確路徑暫存，不用 `git add .`、`-A`、`commit -a`。commit 前看 `git diff --cached` 與 `--check`。
+- 驗證實際要提交的版本；工作區有範圍外修改（含 `M ime-core`）時用乾淨 worktree。
+- 改相依或建置流程要同步 CI。push 後用 `gh run list --commit <sha>` 確認結果。

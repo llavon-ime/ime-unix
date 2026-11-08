@@ -27,6 +27,9 @@ struct MixedSegment {
     size_t begin = 0;
     size_t end = 0;
     std::u16string raw;
+    // Output text of a literal segment when it differs from its raw keys
+    // (a sentence punctuation key after Chinese); empty means `raw`.
+    std::u16string text;
     std::u16string body_keys;
     char32_t tone_key = 0;
     std::u16string reading;

@@ -48,7 +48,7 @@ std::u16string PendingModelPreview::text(const MixedSegment& segment) {
     if (segment.kind == MixedSegmentKind::Bopomofo && !segment.candidates.empty()) {
         return utf8_to_u16(char32_to_utf8(segment.candidates.front()));
     }
-    return segment.raw;
+    return segment.text.empty() ? segment.raw : segment.text;
 }
 
 void PendingModelPreview::render(MixedPath& path) {

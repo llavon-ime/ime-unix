@@ -58,7 +58,7 @@ std::optional<InputEffect::CommitSample> mixed_training_sample(const InputSessio
             sample.answer += utf8_to_u16(char32_to_utf8(segment.candidates.front()));
             trainable = true;
         } else {
-            for (const auto character : utf8_to_u32(u16_to_utf8(segment.raw))) {
+            for (const auto character : utf8_to_u32(u16_to_utf8(segment.text.empty() ? segment.raw : segment.text))) {
                 if (character == 0 || sample.entries.size() >= 1024) return std::nullopt;
                 sample.entries.push_back({std::u16string{}, character, false, true});
                 sample.answer += utf8_to_u16(char32_to_utf8(character));
@@ -88,7 +88,9 @@ std::optional<InputEffect::CommitSample> commit_training_sample(const InputSessi
                     if (!inserted || !inserted->completed || segment.candidates.empty() ||
                         !buffer.set_segment_candidates(inserted->segment_index, segment.candidates)) return std::nullopt;
                 } else {
-                    for (const char16_t ch : segment.raw) (void)buffer.add_literal(ch);
+                    for (const char16_t ch : segment.text.empty() ? segment.raw : segment.text) {
+                        (void)buffer.add_literal(ch);
+                    }
                 }
             }
         } else {

@@ -162,7 +162,8 @@ RAWKEY_SUITE("smart candidate", engine_test_smart_candidate) {
 }
 
     // 10. Letters while the candidate list is open close it and start a new
-    // pending word appended to the composition.
+    // pending word appended to the composition. The Space typed between the
+    // reading and the English word is kept as the user's word separator.
     {
         Harness harness;
         harness.set_config("SmartEnglish", "True");
@@ -172,6 +173,6 @@ RAWKEY_SUITE("smart candidate", engine_test_smart_candidate) {
         RAWKEY_ASSERT(harness.has_candidates());
         harness.type("hi");
         RAWKEY_ASSERT(!harness.has_candidates());
-        RAWKEY_ASSERT(harness.preedit() == "你hi");
+        RAWKEY_ASSERT(harness.preedit() == "你 hi");
 }
 }
