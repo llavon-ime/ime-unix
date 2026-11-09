@@ -99,7 +99,18 @@ final class LlavonInputController: IMKInputController, EngineHost {
                                    action: #selector(restartPredictionService),
                                    keyEquivalent: "")
         restart.target = self
+        // A downloaded or available update can be installed when the user
+        // chooses, without waiting for the reminder.
+        if let title = MainActor.assumeIsolated({ UpdateController.shared.menuTitle }) {
+            menu.addItem(.separator())
+            let update = menu.addItem(withTitle: title, action: #selector(openUpdate), keyEquivalent: "")
+            update.target = self
+        }
         return menu
+    }
+
+    @objc private func openUpdate() {
+        MainActor.assumeIsolated { UpdateController.shared.checkForUpdates(nil) }
     }
 
     @objc private func openSettings() {

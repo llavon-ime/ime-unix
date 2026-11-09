@@ -11,35 +11,46 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
     private var availableVersion: String?
     private var readyVersion: String?
     private var readyOnQuit = false
+    private var notifyingVersion: String?
     private(set) var preparingInstallation = false
     private(set) var status = "開發版本未啟用自動更新"
 
+    // After the user agreed in Sparkle's window, a short pause is enough to
+    // avoid quitting between two keys. A reminder waits until typing stopped.
+    private static let installQuietInterval: TimeInterval = 5
+    private static let reminderQuietInterval: TimeInterval = 60
+    nonisolated private static let reminderVersionKey = "LlavonIMEUpdateReminderVersion"
+    nonisolated private static let reminderDateKey = "LlavonIMEUpdateReminderDate"
+
     private lazy var installationGate = UpdateInstallationGate(
         hasComposition: { EngineBridge.shared.hasPendingComposition },
+        secondsSinceInput: { EngineBridge.shared.secondsSinceLastKey },
+        quietInterval: Self.installQuietInterval,
         probeBusy: Self.probeTraining,
         waiting: { [weak self] message in self?.setStatus(message) })
+
+    private lazy var notifier = UpdateNotifier(
+        onOpen: { [weak self] in self?.openDownloadedUpdate() },
+        onDelivery: { [weak self] version, success in self?.notificationDelivered(version: version, success: success) })
 
     private lazy var readyReminder = UpdateReadyReminder(
         gate: UpdateInstallationGate(
             hasComposition: { EngineBridge.shared.hasPendingComposition },
+            secondsSinceInput: { EngineBridge.shared.secondsSinceLastKey },
+            quietInterval: Self.reminderQuietInterval,
             probeBusy: Self.probeTraining,
             waiting: { [weak self] _ in
-                self?.setStatus("更新已下載；組字與訓練完成後會顯示安裝提示，也可按「安裝並重新啟動…」。")
+                self?.setStatus("更新已下載；停止輸入且組字與訓練完成後會通知你，也可按「安裝並重新啟動…」。")
             }),
-        present: { [weak self] in
-            guard let self, let updater = self.updater,
-                  updater.canCheckForUpdates, !self.preparingInstallation else { return false }
-            self.setDownloadedStatus()
-            // Resume Sparkle's downloaded update into its consent UI, not its
-            // immediate-install handler. Authorization still belongs to Sparkle.
-            updater.checkForUpdates()
-            return true
-        })
+        load: Self.loadReminder,
+        save: Self.saveReminder,
+        present: { [weak self] version in self?.presentDownloadedUpdate(version: version) ?? false })
 
     var updater: SPUUpdater? { controller?.updater }
-    var checkMenuTitle: String {
+    // Shown in the input menu only when there is something to install.
+    var menuTitle: String? {
         if let readyVersion { return "安裝 \(readyVersion) 並重新啟動…" }
-        return availableVersion.map { "更新至 \($0)…" } ?? "檢查更新…"
+        return availableVersion.map { "更新至 \($0)…" }
     }
 
     func start() {
@@ -57,6 +68,7 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         do {
             try controller.updater.start()
             self.controller = controller
+            notifier.start()
             setStatus("由拉風輸入法管理更新；安裝需要管理員授權")
         } catch {
             setStatus("無法啟動更新：\(error.localizedDescription)")
@@ -71,8 +83,57 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         guard updater.canCheckForUpdates else { return }
         if let readyVersion { readyReminder.userAcknowledged(version: readyVersion) }
         else { readyReminder.cancel() }
+        withdrawNotification()
         setStatus(readyVersion == nil ? "正在檢查更新…" : "正在開啟安裝與重新啟動提示…")
         updater.checkForUpdates()
+    }
+
+    // A notification click is user-initiated, so opening a focused window is
+    // expected. Sparkle may still be finishing a background cycle; retry briefly.
+    private func openDownloadedUpdate(attempt: Int = 0) {
+        guard let updater else { return }
+        if updater.canCheckForUpdates {
+            checkForUpdates(nil)
+            return
+        }
+        guard attempt < 30 else {
+            setStatus("更新程式仍在處理中，請稍後按「安裝並重新啟動…」。")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            MainActor.assumeIsolated { self?.openDownloadedUpdate(attempt: attempt + 1) }
+        }
+    }
+
+    private func presentDownloadedUpdate(version: String) -> Bool {
+        guard let updater, !preparingInstallation else { return false }
+        setDownloadedStatus()
+        if notifier.available {
+            notifyingVersion = version
+            notifier.post(version: version)
+            return true
+        }
+        guard updater.canCheckForUpdates else { return false }
+        // Resume Sparkle's downloaded update into its consent UI, not its
+        // immediate-install handler. Authorization still belongs to Sparkle.
+        updater.checkForUpdates()
+        return true
+    }
+
+    private func notificationDelivered(version: String, success: Bool) {
+        // The user may already have opened the update another way.
+        guard notifyingVersion == version else { return }
+        if success {
+            setStatus("\(version) 已下載；請點選通知或按「安裝並重新啟動…」。")
+        } else {
+            notifyingVersion = nil
+            readyReminder.presentationFailed(version: version)
+        }
+    }
+
+    private func withdrawNotification() {
+        notifyingVersion = nil
+        notifier.remove()
     }
 
     @objc func showSettings(_ sender: Any?) {
@@ -116,6 +177,7 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
                  untilInvokingBlock installHandler: @escaping () -> Void) -> Bool {
         preparingInstallation = true
         readyReminder.cancel()
+        withdrawNotification()
         waitUntilIdle(installHandler)
         return true
     }
@@ -153,6 +215,7 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         readyVersion = nil
         readyOnQuit = false
         readyReminder.cancel()
+        withdrawNotification()
         setStatus("目前沒有可安裝的新版")
     }
 
@@ -162,6 +225,7 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         readyOnQuit = false
         readyReminder.cancel()
         installationGate.cancel()
+        withdrawNotification()
         let code = (error as NSError).code
         if code == SUError.noUpdateError.rawValue {
             setStatus("目前沒有可安裝的新版")
@@ -172,8 +236,9 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
         }
     }
 
-    // Discovery stays quiet. Only downloaded/prepared updates automatically
-    // open the install UI, after composition and personalization work are idle.
+    // Discovery stays quiet. Only downloaded/prepared updates are announced,
+    // with a notification (or the install UI as a fallback), after typing has
+    // stopped and composition and personalization work are idle.
     nonisolated var supportsGentleScheduledUpdateReminders: Bool { true }
 
     nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(_ update: SUAppcastItem,
@@ -197,7 +262,10 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
     }
 
     nonisolated func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
-        MainActor.assumeIsolated { readyReminder.userAcknowledged(version: update.displayVersionString) }
+        MainActor.assumeIsolated {
+            readyReminder.userAcknowledged(version: update.displayVersionString)
+            withdrawNotification()
+        }
     }
 
     nonisolated func standardUserDriverWillFinishUpdateSession() {
@@ -211,6 +279,24 @@ final class UpdateController: NSObject, SPUUpdaterDelegate, SPUStandardUserDrive
 
     private func setStatus(_ message: String) {
         status = message
+    }
+
+    nonisolated private static func loadReminder() -> UpdateReadyReminder.Record? {
+        let defaults = UserDefaults.standard
+        guard let version = defaults.string(forKey: reminderVersionKey),
+              let date = defaults.object(forKey: reminderDateKey) as? Date else { return nil }
+        return UpdateReadyReminder.Record(version: version, date: date)
+    }
+
+    nonisolated private static func saveReminder(_ record: UpdateReadyReminder.Record?) {
+        let defaults = UserDefaults.standard
+        if let record {
+            defaults.set(record.version, forKey: reminderVersionKey)
+            defaults.set(record.date, forKey: reminderDateKey)
+        } else {
+            defaults.removeObject(forKey: reminderVersionKey)
+            defaults.removeObject(forKey: reminderDateKey)
+        }
     }
 
     private static func probeTraining(_ completion: @escaping (Bool) -> Void) {

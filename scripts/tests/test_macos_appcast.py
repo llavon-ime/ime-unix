@@ -38,6 +38,7 @@ class AppcastTests(unittest.TestCase):
             item.findtext("description"),
             "修正輸入來源\n\n- 改善更新流程\n\n安裝更新時需要管理員授權。",
         )
+        self.assertEqual(item.find("description").get(f"{{{APPCAST.SPARKLE}}}format"), "markdown")
         self.assertEqual(item.findtext(f"{{{APPCAST.SPARKLE}}}minimumSystemVersion"), "13.0")
         enclosure = item.find("enclosure")
         self.assertEqual(enclosure.get(f"{{{APPCAST.SPARKLE}}}installationType"), "package")

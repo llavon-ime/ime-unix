@@ -41,8 +41,11 @@ def generate(version, package, signature, repository, release_notes, previous=No
     ET.SubElement(item, f"{{{SPARKLE}}}version").text = version
     ET.SubElement(item, f"{{{SPARKLE}}}shortVersionString").text = version
     ET.SubElement(item, f"{{{SPARKLE}}}minimumSystemVersion").text = "13.0"
-    # Inline notes avoid loading remote web content in the IME process.
-    ET.SubElement(item, "description").text = (
+    # Inline notes avoid loading remote web content in the IME process. The
+    # tag message is Markdown; without a format Sparkle renders it as HTML,
+    # which drops line breaks and shows the heading marks literally. Every
+    # published client bundles Sparkle 2.10, which renders Markdown natively.
+    ET.SubElement(item, "description", {f"{{{SPARKLE}}}format": "markdown"}).text = (
         f"{release_notes}\n\n安裝更新時需要管理員授權。"
     )
     ET.SubElement(item, "enclosure", {

@@ -1282,6 +1282,7 @@ void NativeTests::hostSettingsMigration() {
     auto* instructions = page->findChild<QLabel*>("updateInstructions"); QVERIFY(instructions);
     QVERIFY(instructions->text().contains(QStringLiteral("不會自動安裝")));
     QVERIFY(instructions->toolTip().contains(QStringLiteral("顯示安裝提示")));
+    QVERIFY(instructions->toolTip().contains(QStringLiteral("系統通知")));
     QVERIFY(instructions->toolTip().contains(QStringLiteral("按鈕會改為「安裝並重新啟動…」")));
     QVERIFY(instructions->text().contains(QStringLiteral("管理員授權")));
     QTRY_VERIFY_WITH_TIMEOUT(status->text().contains(QStringLiteral("尚未連接")), 5000);

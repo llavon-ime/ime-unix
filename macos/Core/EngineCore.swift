@@ -184,6 +184,7 @@ class EngineCore {
     @discardableResult
     func sendKey(_ context: UInt64, keyCode: UInt16, charactersIgnoringModifiers: String?,
                  modifiers: KeyModifiers, capsLock: Bool, isRelease: Bool) -> Bool {
+        lastKeyUptime = ProcessInfo.processInfo.systemUptime
         guard let engine else { return false }
         // Normalize the AppKit key into the shape the engine's rules expect
         // (see KeyTranslation.normalized); raw_states keeps the event flags.
@@ -219,6 +220,13 @@ class EngineCore {
             guard host.value != nil, let state = snapshot(context) else { return false }
             return !state.compositionEmpty || !state.preedit.isEmpty
         }
+    }
+
+    // The composition is empty after every committed character, so an updater
+    // also needs to know whether the user is still typing in any client.
+    private var lastKeyUptime = -TimeInterval.infinity
+    var secondsSinceLastKey: TimeInterval {
+        ProcessInfo.processInfo.systemUptime - lastKeyUptime
     }
 
     func snapshot(_ context: UInt64) -> RenderSnapshot? {

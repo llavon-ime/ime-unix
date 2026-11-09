@@ -33,7 +33,7 @@ HostSettingsPage::HostSettingsPage(bool updates, QWidget* parent, QString helper
         checks_ = new NativeCheckBox(QStringLiteral("自動檢查更新（每日）")); checks_->setObjectName("automaticUpdates"); options->addWidget(checks_);
         downloads_ = new NativeCheckBox(QStringLiteral("背景下載更新")); downloads_->setObjectName("automaticDownloads"); options->addWidget(downloads_);
         auto* note = new QLabel(QStringLiteral("背景下載不會自動安裝；安裝需確認與管理員授權。"));
-        note->setToolTip(QStringLiteral("下載就緒後，會在組字與訓練結束時顯示安裝提示。\n按鈕會改為「安裝並重新啟動…」，可再次開啟提示。\n確認並提供管理員授權後才會安裝，並重新啟動輸入法。"));
+        note->setToolTip(QStringLiteral("下載就緒後，停止輸入一分鐘且組字與訓練結束時，會以系統通知提醒；點選通知才顯示安裝提示。\n未允許通知時，改為直接顯示安裝提示。\n按鈕會改為「安裝並重新啟動…」，輸入法選單也會出現安裝項目，可再次開啟提示。\n確認並提供管理員授權後才會安裝，並重新啟動輸入法。"));
         note->setObjectName("updateInstructions"); note->setProperty("role", "help"); note->setWordWrap(true); options->addWidget(note);
         check_ = new QPushButton(QStringLiteral("檢查更新…")); check_->setObjectName("checkUpdates"); check_->setProperty("primary", true); layout->addWidget(check_);
         check_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
