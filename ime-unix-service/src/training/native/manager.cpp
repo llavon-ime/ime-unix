@@ -1,5 +1,6 @@
 #include "manager.hpp"
 #include "guide.hpp"
+#include "setup_wizard.hpp"
 #include "history_graph.hpp"
 #include "settings.hpp"
 #include "appearance.hpp"
@@ -174,17 +175,6 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     refreshButton_->setProperty("quiet", true);
     titleRow->addWidget(refreshButton_);
     layout->addLayout(titleRow);
-    quickStartDismissed_ = QuickStartPreferences::dismissed();
-    quickStart_ = new QFrame; quickStart_->setObjectName("quickStart");
-    auto* welcome = new QHBoxLayout(quickStart_);
-    welcome->setContentsMargins(16, 12, 16, 12); welcome->setSpacing(8);
-    welcome->addWidget(label(QStringLiteral("功能導覽"), "section"), 1);
-    auto* begin = button(QStringLiteral("認識功能"), "startQuickGuide", true);
-    auto* skip = button(QStringLiteral("略過全部"), "skipQuickGuide"); skip->setProperty("quiet", true);
-    welcome->addWidget(begin); welcome->addWidget(skip);
-    layout->addWidget(quickStart_); quickStart_->hide();
-    connect(begin, &QPushButton::clicked, this, [this] { showPage("guide"); guide_->startQuickGuide(); });
-    connect(skip, &QPushButton::clicked, this, &Manager::dismissQuickStart);
     pages_ = new QStackedWidget;
     layout->addWidget(pages_, 1);
     for (int index = 0; index < 3; ++index) pages_->addWidget(new QWidget);
@@ -204,7 +194,6 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     connect(navigation, &QListWidget::currentRowChanged, this, [this, navigation](int row) {
         if (row < 0) return;
         const int index = navigation->item(row)->data(Qt::UserRole).toInt();
-        quickStart_->setVisible(index == 3 && !quickStartDismissed_);
         // Settings and phrases have their own reload; status pages poll.
         refreshButton_->setVisible(index < 3);
         if (index < 3) ensurePersonalizationPages();
@@ -280,6 +269,19 @@ bool Manager::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void Manager::showPage(const QString& page) {
+    if (page == "setup") {
+        if (!setupWizard_) {
+            setupWizard_ = new SetupWizard(settings_, this);
+            applyAppearance(setupWizard_);
+            connect(setupWizard_, &SetupWizard::pageRequested, this, [this](const QString& destination) {
+                showPage(destination); raise(); activateWindow();
+            });
+            connect(setupWizard_, &QDialog::finished, this, [this] { raise(); activateWindow(); });
+        }
+        if (guide_) guide_->hide();
+        setupWizard_->restart(); setupWizard_->show(); setupWizard_->raise(); setupWizard_->activateWindow();
+        return;
+    }
     if (page == "guide") {
         if (!guide_) {
             guide_ = new GuidePage(this);
@@ -290,14 +292,8 @@ void Manager::showPage(const QString& page) {
             connect(guide_, &GuidePage::settingRequested, this, [this](const QString& key) {
                 guide_->hide(); showPage("settings"); raise(); activateWindow(); settings_->revealField(key);
             });
-            const auto finish = [this] {
-                dismissQuickStart(); guide_->hide(); guide_->startQuickGuide();
-                raise(); activateWindow();
-            };
-            connect(guide_, &GuidePage::finished, this, finish);
-            connect(guide_, &GuidePage::skipped, this, finish);
+            connect(guide_, &GuidePage::setupRequested, this, [this] { showPage("setup"); });
         }
-        quickStart_->hide();
         guide_->show(); guide_->raise(); guide_->activateWindow();
         return;
     }
@@ -306,13 +302,6 @@ void Manager::showPage(const QString& page) {
     auto* navigation = findChild<QListWidget*>("navigation");
     for (int row = 0; row < navigation->count(); ++row)
         if (index >= 0 && navigation->item(row)->data(Qt::UserRole).toInt() == index) navigation->setCurrentRow(row);
-}
-
-void Manager::dismissQuickStart() {
-    // Do not write engine settings, enable collection or start the backend.
-    quickStartDismissed_ = true; quickStart_->hide();
-    if (!QuickStartPreferences::dismiss())
-        notice(QStringLiteral("無法儲存教學偏好；這次已略過，下次開啟可能再次顯示。"), true);
 }
 
 QWidget* Manager::recordsPage() {
@@ -687,6 +676,8 @@ void Manager::refresh() {
 }
 
 void Manager::prepareForUpdate(std::function<void(UpdatePreparation)> reply) {
+    // An input setting still settling is written now, not lost to the restart.
+    settings_->flushPending();
     const auto dirty = [this] { return settings_->isDirty() || (phrases_ && phrases_->isDirty()); };
     if (dirty() || actionPending_) { reply(UpdatePreparation::Blocked); return; }
     if (running_) {
@@ -974,6 +965,7 @@ void Manager::train() {
 }
 
 void Manager::closeEvent(QCloseEvent* event) {
+    settings_->flushPending();
 #ifdef Q_OS_LINUX
     if (updates_ && updates_->busy()) {
         notice(QStringLiteral("更新正在處理，請等待完成；若尚在等待組字或訓練，可到軟體更新頁取消等待。"));
@@ -986,6 +978,7 @@ void Manager::closeEvent(QCloseEvent* event) {
     if (running_ && QMessageBox::question(this, QStringLiteral("工作仍在執行"), QStringLiteral("關閉會取消目前工作。取消工作並關閉？"),
         QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) { event->ignore(); return; }
     if (guide_) guide_->close();
+    if (setupWizard_) setupWizard_->close();
     timer_->stop(); event->accept();
 }
 

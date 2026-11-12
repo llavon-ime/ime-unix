@@ -62,8 +62,9 @@ set(service_src "${training}/..")
 
 set(engine_src "${CMAKE_CURRENT_SOURCE_DIR}/../../../../engine/src")
 add_library(llavon_lora_widgets STATIC manager.hpp manager.cpp appearance.hpp appearance.cpp controls.hpp controls.cpp host_settings.hpp host_settings.cpp backend.cpp history_graph.hpp history_graph.cpp
-    guide.hpp guide.cpp guide_illustration.hpp guide_illustration.cpp
+    guide.hpp guide.cpp guide_illustration.hpp guide_illustration.cpp setup_wizard.hpp setup_wizard.cpp
     settings.hpp settings.cpp phrase_table.hpp phrase_table.cpp phrase_list.hpp phrase_list.cpp "${engine_src}/config/config.cpp" "${engine_src}/config/config_schema.cpp"
+    "${engine_src}/bopomofo/keymap.cpp" "${engine_src}/bopomofo/syllable.cpp"
     "${engine_src}/phrase_override/phrase_override_store.cpp" "${engine_src}/text/utf.cpp")
 target_compile_features(llavon_lora_widgets PUBLIC cxx_std_23)
 qt_add_resources(llavon_lora_widgets native_appearance PREFIX "/native"

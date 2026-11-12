@@ -24,6 +24,7 @@ class HistoryGraph;
 class SettingsPage;
 class LinuxUpdatesPage;
 class GuidePage;
+class SetupWizard;
 
 enum class UpdatePreparation {
     Ready,
@@ -71,7 +72,6 @@ private:
     QWidget* trainingPage();
     QWidget* historyPage();
     void ensurePersonalizationPages();
-    void dismissQuickStart();
     void act(const QString& path, const QJsonObject& body = {}, Backend::Reply reply = {});
     void renderRecords(const QJsonObject& data);
     void renderProtection(const QJsonObject& data);
@@ -91,7 +91,7 @@ private:
     SettingsPage* settings_;
     SettingsPage* phrases_ = nullptr;
     GuidePage* guide_ = nullptr;
-    QWidget* quickStart_;
+    SetupWizard* setupWizard_ = nullptr;
     QPushButton* guideButton_;
     QPushButton* refreshButton_;
     QTimer* noticeTimer_;
@@ -103,7 +103,6 @@ private:
     bool busyCursor_ = false;
     QJsonObject lastHistory_;
     QString lastHistoryActive_;
-    bool quickStartDismissed_ = false;
     QLabel *heading_, *message_, *collection_, *counts_, *pageInfo_, *model_, *trainer_, *device_, *job_, *historyDetail_, *emptyRecords_;
     QLineEdit *password_, *confirmation_, *trainPassword_;
     QLabel* trainPasswordLabel_ = nullptr;

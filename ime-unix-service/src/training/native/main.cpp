@@ -1,4 +1,5 @@
 #include "manager.hpp"
+#include "setup_wizard.hpp"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -60,7 +61,7 @@ int main(int argc, char** argv) {
                       "  --db PATH          Override training database\n"
                       "  --cli PATH         Override manager CLI\n"
                       "  --tables-dir PATH  Override IME tables\n"
-                       "  --page PAGE        settings, phrases, records, training, history, updates, about\n"
+                       "  --page PAGE        settings, phrases, records, training, history, updates, about, setup\n"
                       "  --no-browser       Accepted for compatibility (always native)\n");
             return 0;
         }
@@ -80,7 +81,7 @@ int main(int argc, char** argv) {
             if (index + 1 >= rawArguments.size()) { std::fputs("--page requires a value\n", stderr); return 2; }
             page = rawArguments[index + 1];
         }
-        if (!QStringList{"settings", "phrases", "records", "training", "history", "updates", "about"}.contains(page)) {
+        if (!QStringList{"settings", "phrases", "records", "training", "history", "updates", "about", "setup"}.contains(page)) {
             std::fputs("unknown settings page\n", stderr); return 2;
         }
         QLocalSocket socket; socket.connectToServer(name);
@@ -130,7 +131,7 @@ int main(int argc, char** argv) {
         if (pageIndex + 1 >= arguments.size()) { std::fputs("--page requires a value\n", stderr); return 2; }
         page = arguments.takeAt(pageIndex + 1); arguments.removeAt(pageIndex);
     }
-    QStringList pages{"settings", "phrases", "records", "training", "history", "updates", "about"};
+    QStringList pages{"settings", "phrases", "records", "training", "history", "updates", "about", "setup"};
     if (!pages.contains(page)) { std::fputs("unknown settings page\n", stderr); return 2; }
     if (!QDir().mkpath(state)) {
         QMessageBox::critical(nullptr, QStringLiteral("無法開啟管理器"), QStringLiteral("無法建立訓練資料目錄：") + state);
@@ -159,6 +160,9 @@ int main(int argc, char** argv) {
     if (!arguments.contains("--cli") && !QFileInfo::exists(cliPath) && QFileInfo::exists(LLAVON_BUILD_CLI))
         arguments << "--cli" << LLAVON_BUILD_CLI;
     llavon::lora::Backend backend(backendPath, arguments);
+    // The setup opens over the settings page, after the window is shown.
+    const bool setup = page == "setup" || (page == "settings" && llavon::lora::SetupWizard::shouldOffer());
+    if (page == "setup") page = "settings";
     llavon::lora::Manager window(&backend, {}, page);
     auto replacementArguments = rawArguments;
     replacementArguments << "--replace-running";
@@ -203,6 +207,7 @@ int main(int argc, char** argv) {
         }
     });
     window.show();
+    if (setup) window.showPage("setup");
     trace("window-shown");
 #ifdef Q_OS_MACOS
     llavon::lora::activateMacApplication();

@@ -37,7 +37,14 @@ void applyAppearance(QWidget* window) {
     QString css = QStringLiteral(R"(
         QWidget { color: $text; font-size: 13px; font-weight: 400; }
         QMainWindow, QScrollArea, QStackedWidget, QWidget#settingsForm, QWidget#trainingContent { background: $background; }
-        QDialog#usageGuide { background: $background; }
+        QDialog#usageGuide, QDialog#setupWizard { background: $background; }
+        QFrame#setupPresetCard { background: $surface; border: 1px solid $border; border-radius: 9px; }
+        QFrame#setupPresetCard[selected="true"] { border: 2px solid $accent; }
+        QRadioButton { spacing: 8px; background: transparent; }
+        QRadioButton::indicator { width: 16px; height: 16px; border-radius: 9px; border: 1px solid $control; background: $surface; }
+        QRadioButton::indicator:hover { border-color: $secondary; }
+        QRadioButton::indicator:checked { border: 5px solid $accent; width: 8px; height: 8px; background: white; }
+        QRadioButton:focus { color: $accentText; }
         QWidget#sidebar { background: $sidebar; border-right: 1px solid $border; }
         QLabel[role="brand"] { font-size: 20px; font-weight: 600; padding-left: 8px; }
         QLabel[role="title"] { font-size: 24px; font-weight: 600; }
@@ -71,6 +78,7 @@ void applyAppearance(QWidget* window) {
         QPushButton[quiet="true"]:focus { color: $accentText; border: 2px solid $focusRing; background: $selection; }
         QPushButton:disabled, QPushButton[primary="true"]:disabled, QPushButton[quiet="true"]:disabled, QPushButton[destructive="true"]:disabled { color: $disabledText; background: $sidebar; border: 1px solid $border; padding: 4px 14px; }
         QPushButton[quiet="true"]:disabled { background: transparent; border-color: transparent; }
+        QPushButton[disclosure="true"] { text-align: left; padding-left: 4px; color: $text; font-weight: 600; }
         QPushButton[compact="true"] { padding: 4px 0px; }
         QPushButton[compact="true"]:focus { padding: 3px 0px; }
         QLineEdit, QComboBox, QSpinBox { padding: 4px 10px; min-height: 24px; border: 1px solid $control; border-radius: 7px; background: $surface; color: $text; selection-background-color: $accent; selection-color: white; }
@@ -110,7 +118,7 @@ void applyAppearance(QWidget* window) {
         QTabBar::tab { background: $sidebar; padding: 8px 16px; margin: 4px 2px 14px 0; border: 1px solid transparent; border-radius: 6px; color: $secondary; }
         QTabBar::tab:selected { background: $surface; border-color: $border; color: $text; font-weight: 500; }
         QTabBar::tab:hover { color: $accentText; }
-        QFrame#settingsCard, QFrame#phraseRow, QFrame#quickStart { background: $surface; border: 1px solid $border; border-radius: 9px; }
+        QFrame#settingsCard, QFrame#phraseRow { background: $surface; border: 1px solid $border; border-radius: 9px; }
         QFrame#settingRow, QFrame#resourceRow { background: transparent; border: none; }
         QFrame#rowDivider { background: $border; border: none; }
         QLabel[role="help"] { color: $secondary; font-size: 12px; background: transparent; }

@@ -8,6 +8,7 @@
 #include "appearance.hpp"
 #include "guide.hpp"
 #include "guide_illustration.hpp"
+#include "setup_wizard.hpp"
 #include <QWheelEvent>
 #include <QAbstractItemView>
 #include <QVBoxLayout>
@@ -29,6 +30,7 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSignalSpy>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -75,7 +77,7 @@ private slots:
     void settingsWithoutTrainingBackend();
     void deferredSettingGroups();
     void settingsPresets();
-    void featureGuide();
+    void setupWizard();
     void guideIllustrations();
     void guideDetailTopics();
     void quietInterface();
@@ -573,13 +575,15 @@ void NativeTests::unifiedSettings() {
     Manager window(&backend); window.show(); backend.start();
     window.showPage("settings");
     QCOMPARE(widget<QListWidget>(window, "navigation")->currentRow(), 0);
-    auto* groups = widget<QTabWidget>(window, "settingsGroups");
-    for (int index = 0; index < groups->count(); ++index) groups->setCurrentIndex(index);
+    capture(window, "12-unified-settings");
+    // Collapsed sections build their fields when opened. Both Esc settings
+    // share one choice.
+    click(window, "settingsDetailsToggle"); click(window, "settingsAdvancedToggle");
     for (const auto item : SettingsStore::schema().value("fields").toArray()) {
-        const auto field = item.toObject();
-        QVERIFY2(window.findChild<QWidget*>("setting_" + field.value("key").toString()), qPrintable(field.value("key").toString()));
+        auto key = item.toObject().value("key").toString();
+        if (key == "esc_clears_entire_buffer" || key == "esc_commits_composition") key = "escape_action";
+        QVERIFY2(window.findChild<QWidget*>("setting_" + key), qPrintable(key));
     }
-    groups->setCurrentIndex(0);
     auto* model = widget<QLineEdit>(window, "setting_model_path");
     auto* useDefault = widget<QPushButton>(window, "useDefaultModel");
     QVERIFY(!model->text().isEmpty()); QVERIFY(useDefault->isVisible());
@@ -587,12 +591,14 @@ void NativeTests::unifiedSettings() {
     QVERIFY(model->text().isEmpty()); QVERIFY(!useDefault->isVisible());
     auto* count = widget<QSpinBox>(window, "setting_candidate_page_size"); QCOMPARE(count->value(), 7);
     count->setValue(9);
+    // Leaving the page writes the input setting; the model waits for an explicit save.
     window.showPage("history"); window.showPage("settings"); QCOMPARE(count->value(), 9); QVERIFY(model->text().isEmpty());
+    QCOMPARE(store.load().value("candidate_page_size").toInt(), 9);
+    QVERIFY(!store.load().value("model_path").toString().isEmpty());
     click(window, "saveSettings");
     const auto updated = store.load();
     QCOMPARE(updated.value("candidate_page_size").toInt(), 9); QVERIFY(updated.value("model_path").toString().isEmpty());
-    groups->setCurrentIndex(1); capture(window, "12-unified-settings");
-    groups->setCurrentIndex(0); capture(window, "13-runtime-settings");
+    capture(window, "13-runtime-settings");
     window.showPage("phrases");
     click(window, "addPhrase");
     auto* row = phraseRow(window, 1); row->findChild<QLineEdit*>("phraseWord")->setText(QStringLiteral("你好"));
@@ -712,7 +718,7 @@ void NativeTests::pageLaunchRouting() {
     const auto identity = directory.path() + ":" + QDir::homePath();
     const auto name = "llavon-lora-" + QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha256).toHex().left(24));
     QLocalServer server; QVERIFY(server.listen(name));
-    for (const auto* page : {"settings", "phrases", "records", "training", "history", "updates", "about"}) {
+    for (const auto* page : {"settings", "phrases", "records", "training", "history", "updates", "about", "setup"}) {
         QProcess app;
         auto environment = QProcessEnvironment::systemEnvironment();
         // Warm routing must work without loading any GUI platform plugin.
@@ -747,12 +753,21 @@ void NativeTests::updateReplacementSafety() {
     window.prepareForUpdate([&](UpdatePreparation result) { preparation = result; answered = true; });
     QVERIFY(answered); QCOMPARE(preparation, UpdatePreparation::Ready);
 
+    click(window, "settingsAdvancedToggle");
     auto* contextLength = widget<QSpinBox>(window, "setting_context_length");
     contextLength->setValue(contextLength->value() + 1);
     preparation = UpdatePreparation::Ready; answered = false;
     window.prepareForUpdate([&](UpdatePreparation result) { preparation = result; answered = true; });
     QVERIFY(answered); QCOMPARE(preparation, UpdatePreparation::Blocked);
     click(window, "saveSettings");
+    // An input setting still settling does not block the update, and is saved first.
+    click(window, "settingsDetailsToggle");
+    auto* pageSize = widget<QSpinBox>(window, "setting_candidate_page_size");
+    pageSize->setValue(pageSize->value() == 7 ? 8 : 7);
+    preparation = UpdatePreparation::Blocked; answered = false;
+    window.prepareForUpdate([&](UpdatePreparation result) { preparation = result; answered = true; });
+    QVERIFY(answered); QCOMPARE(preparation, UpdatePreparation::Ready);
+    QCOMPARE(llavon::lora::SettingsStore().load().value("candidate_page_size").toInt(), pageSize->value());
 
     window.showPage("records");
     QSignalSpy ready(&window, &Manager::refreshed); backend.start();
@@ -804,15 +819,15 @@ void NativeTests::settingsWithoutTrainingBackend() {
     Backend backend(directory.path() + "/missing-training-backend", {});
     QSignalSpy errors(&backend, &Backend::error), ready(&backend, &Backend::ready);
     Manager window(&backend, {}, "settings"); window.show();
-    QVERIFY(window.findChild<QSpinBox*>("setting_context_length"));
+    QVERIFY(window.findChild<QComboBox*>("setting_keyboard_layout"));
     QVERIFY(!window.findChild<QTableWidget*>("records"));
     QVERIFY(!window.findChild<QPushButton*>("startTraining"));
     QVERIFY(!window.findChild<llavon::lora::HistoryGraph*>("history"));
     QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
-    widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+    click(window, "settingsDetailsToggle");
     auto* count = widget<QSpinBox>(window, "setting_candidate_page_size");
-    count->setValue(7); click(window, "saveSettings");
-    llavon::lora::SettingsStore store; QCOMPARE(store.load().value("candidate_page_size").toInt(), 7);
+    count->setValue(7);
+    llavon::lora::SettingsStore store; QTRY_COMPARE(store.load().value("candidate_page_size").toInt(), 7);
     window.showPage("training");
     QVERIFY(window.findChild<QTableWidget*>("records"));
     QVERIFY(window.findChild<QPushButton*>("startTraining"));
@@ -827,22 +842,45 @@ void NativeTests::deferredSettingGroups() {
     Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
     llavon::lora::SettingsStore store;
     auto values = store.load(); values["candidate_page_size"] = 9; values["keyboard_layout"] = "ibm"; store.save(values);
+    const auto originalContext = values.value("context_length").toInt();
     llavon::lora::SettingsPage page(false); page.show();
-    auto* tabs = page.findChild<QTabWidget*>("settingsGroups"); QVERIFY(tabs);
+    // Common settings are built at once; collapsed sections only when opened.
+    QCOMPARE(page.findChild<QComboBox*>("setting_keyboard_layout")->currentData().toString(), QStringLiteral("ibm"));
     QVERIFY(!page.findChild<QSpinBox*>("setting_candidate_page_size"));
+    QVERIFY(!page.findChild<QSpinBox*>("setting_context_length"));
+    auto* advanced = page.findChild<QPushButton*>("settingsAdvancedToggle"); QVERIFY(advanced);
+    auto* details = page.findChild<QPushButton*>("settingsDetailsToggle"); QVERIFY(details);
+    QTest::mouseClick(advanced, Qt::LeftButton);
     auto* context = page.findChild<QSpinBox*>("setting_context_length"); QVERIFY(context);
-    context->setValue(256);
-    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
-    auto saved = store.load(); QCOMPARE(saved.value("context_length").toInt(), 256);
-    QCOMPARE(saved.value("candidate_page_size").toInt(), 9); QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
-    QVERIFY(!page.isDirty()); tabs->setCurrentIndex(1); QVERIFY(!page.isDirty());
+    QCOMPARE(context->value(), originalContext);
+    // A model or runtime edit waits for the explicit save, even while input
+    // settings around it save on their own.
+    context->setValue(256); QVERIFY(page.isDirty());
+    QTest::mouseClick(details, Qt::LeftButton); QVERIFY(page.isDirty());
     auto* count = page.findChild<QSpinBox*>("setting_candidate_page_size"); QVERIFY(count); QCOMPARE(count->value(), 9);
-    count->setValue(7); QVERIFY(page.isDirty());
-    tabs->setCurrentIndex(2); QVERIFY(page.isDirty()); tabs->setCurrentIndex(1);
+    count->setValue(7);
+    QTRY_COMPARE(store.load().value("candidate_page_size").toInt(), 7);
+    auto saved = store.load();
+    QCOMPARE(saved.value("context_length").toInt(), originalContext);
+    QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
+    QVERIFY(page.isDirty());
+    // Collapsing a section keeps its edits.
+    QTest::mouseClick(details, Qt::LeftButton); QVERIFY(!count->isVisible());
+    QTest::mouseClick(details, Qt::LeftButton);
     QCOMPARE(count->value(), 7); QCOMPARE(context->value(), 256);
     QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
-    saved = store.load(); QCOMPARE(saved.value("candidate_page_size").toInt(), 7);
+    saved = store.load(); QCOMPARE(saved.value("context_length").toInt(), 256);
+    QCOMPARE(saved.value("candidate_page_size").toInt(), 7);
     QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
+    QVERIFY(!page.isDirty());
+    // Another program writing the file meanwhile, as the training page does
+    // when applying a model, keeps its value; only the edit made here is written.
+    auto external = store.load(); external["model_path"] = QStringLiteral("/test/applied.gguf"); store.save(external);
+    page.findChild<QCheckBox*>("setting_space_selects_candidate")->click();
+    saved = store.load();
+    QCOMPARE(saved.value("model_path").toString(), QStringLiteral("/test/applied.gguf"));
+    QCOMPARE(saved.value("space_selects_candidate").toBool(), !external.value("space_selects_candidate").toBool());
+    QCOMPARE(page.findChild<QLineEdit*>("setting_model_path")->text(), QStringLiteral("/test/applied.gguf"));
     QVERIFY(!page.isDirty());
 }
 
@@ -854,17 +892,16 @@ void NativeTests::settingsPresets() {
     values["selection_keys"] = "asdfghjkl"; store.save(values);
     llavon::lora::SettingsPage page(false); page.show();
     auto* preset = page.findChild<QComboBox*>("settingsPreset"); QVERIFY(preset);
-    QVERIFY(preset->count() >= 4);
-    QVERIFY(!page.findChild<QLabel*>("settingsPresetDescription")->text().isEmpty());
+    auto* description = page.findChild<QLabel*>("settingsPresetDescription");
+    // Settings that match no preset show as customized.
+    QCOMPARE(preset->currentData().toString(), QStringLiteral("custom"));
+    QVERIFY(preset->count() >= 5); QVERIFY(!description->text().isEmpty());
+    QVERIFY(page.matchingPreset().isEmpty());
 
-    // Applying fills unopened tabs too, but only saving writes the file.
+    // Choosing a habit applies and saves it at once, including settings in
+    // sections that were never opened.
     preset->setCurrentIndex(preset->findData(QStringLiteral("apple")));
-    QTest::mouseClick(page.findChild<QPushButton*>("applyPreset"), Qt::LeftButton);
-    QVERIFY(page.isDirty());
-    auto* tone = page.findChild<QCheckBox*>("setting_tone_key_overwrites_previous"); QVERIFY(tone);
-    QVERIFY(tone->isChecked());
-    QCOMPARE(store.load().value("tone_key_overwrites_previous").toBool(), false);
-    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    QVERIFY(!page.isDirty());
     auto saved = store.load();
     QVERIFY(saved.value("tone_key_overwrites_previous").toBool());
     QVERIFY(saved.value("keep_invalid_reading").toBool());
@@ -875,132 +912,155 @@ void NativeTests::settingsPresets() {
     // Keyboard layout and runtime settings are outside every preset.
     QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
     QCOMPARE(saved.value("context_length").toInt(), 256);
+    QCOMPARE(page.matchingPreset(), QStringLiteral("apple"));
+    QCOMPARE(preset->findData(QStringLiteral("custom")), -1);
+    QCOMPARE(page.findChild<QComboBox*>("setting_selection_keys")->currentData().toString(), QStringLiteral("1234567890"));
+    QTest::mouseClick(page.findChild<QPushButton*>("settingsDetailsToggle"), Qt::LeftButton);
+    auto* tone = page.findChild<QCheckBox*>("setting_tone_key_overwrites_previous"); QVERIFY(tone);
+    QVERIFY(tone->isChecked());
+    auto* escape = page.findChild<QComboBox*>("setting_escape_action"); QVERIFY(escape);
+    QCOMPARE(escape->currentData().toString(), QStringLiteral("commit"));
 
     // Re-applying the saved preset changes nothing.
-    QTest::mouseClick(page.findChild<QPushButton*>("applyPreset"), Qt::LeftButton);
-    QVERIFY(!page.isDirty());
+    page.applyPreset(QStringLiteral("apple"));
+    QVERIFY(page.findChild<QLabel*>("settingsStatus")->text().contains(QStringLiteral("相同")));
+    QCOMPARE(store.load(), saved);
+
+    // Changing a detail turns the habit into a custom one.
+    tone->click();
+    QVERIFY(!store.load().value("tone_key_overwrites_previous").toBool());
+    QCOMPARE(preset->currentData().toString(), QStringLiteral("custom"));
 
     preset->setCurrentIndex(preset->findData(QStringLiteral("microsoft")));
-    QTest::mouseClick(page.findChild<QPushButton*>("applyPreset"), Qt::LeftButton);
-    QVERIFY(page.isDirty()); QVERIFY(!tone->isChecked());
-    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    QVERIFY(!tone->isChecked());
     saved = store.load();
     QCOMPARE(saved.value("select_phrase").toString(), QStringLiteral("after_cursor"));
     QVERIFY(saved.value("esc_commits_composition").toBool());
     QVERIFY(saved.value("caps_lock_inputs_bopomofo").toBool());
     QCOMPARE(saved.value("keyboard_layout").toString(), QStringLiteral("ibm"));
+
+    // The single Esc choice writes both host settings.
+    escape->setCurrentIndex(escape->findData(QStringLiteral("clear_buffer")));
+    saved = store.load();
+    QVERIFY(saved.value("esc_clears_entire_buffer").toBool()); QVERIFY(!saved.value("esc_commits_composition").toBool());
+    escape->setCurrentIndex(escape->findData(QStringLiteral("clear_reading")));
+    saved = store.load();
+    QVERIFY(!saved.value("esc_clears_entire_buffer").toBool()); QVERIFY(!saved.value("esc_commits_composition").toBool());
+    QVERIFY(!page.isDirty());
 }
 
-void NativeTests::featureGuide() {
+void NativeTests::setupWizard() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
     Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
-    llavon::lora::SettingsStore store;
-    const auto saved = store.load(); store.save(saved);
-    QFile configuration(llavon::lora::SettingsStore::configPath()); QVERIFY(configuration.open(QIODevice::ReadOnly));
-    const auto before = configuration.readAll(); configuration.close();
-    QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+    using llavon::lora::SettingsStore;
+    using llavon::lora::SetupPreferences;
+    using llavon::lora::SetupWizard;
+    // Offered only on a first launch: nothing saved and the setup not seen.
+    QVERIFY(SetupWizard::shouldOffer());
     {
         Backend backend(directory.path() + "/missing-backend", {});
         QSignalSpy errors(&backend, &Backend::error), ready(&backend, &Backend::ready);
         Manager window(&backend, {}, "settings"); window.show();
-        QVERIFY(widget<QWidget>(window, "quickStart")->isVisible());
-        QVERIFY(!window.findChild<llavon::lora::GuidePage*>());
-        QCOMPARE(widget<QPushButton>(window, "skipQuickGuide")->text(), QStringLiteral("略過全部"));
-        capture(window, "30-feature-invitation");
-        click(window, "startQuickGuide");
-        auto* guide = widget<llavon::lora::GuidePage>(window, "usageGuide");
-        QVERIFY(guide->isVisible());
-        QVERIFY(guide->isWindow()); QCOMPARE(guide->windowModality(), Qt::NonModal);
-        QCOMPARE(widget<QListWidget>(window, "navigation")->currentRow(), 0);
-        auto* steps = widget<QStackedWidget>(window, "guideSteps");
-        auto* topics = widget<QTabWidget>(window, "guideTopics");
-        const auto advance = [&window] {
-            QCoreApplication::processEvents();
-            click(window, "guideNext");
-            QCoreApplication::processEvents();
-        };
-        QCOMPARE(steps->count(), 3); QCOMPARE(steps->currentIndex(), 0);
-        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
-        QVERIFY(!widget<QPushButton>(window, "guidePrevious")->isEnabled());
-        QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
-        capture(*guide, "31-feature-mixed-input");
-        click(window, "guideMixedFeature");
-        auto* smart = widget<QCheckBox>(window, "setting_smart_english");
-        QCOMPARE(smart->isChecked(), saved.value("smart_english").toBool());
-        QTRY_VERIFY(smart->isVisible());
-        click(window, "openGuide"); QCOMPARE(steps->currentIndex(), 0);
-        advance(); QCOMPARE(steps->currentIndex(), 1);
-        QTest::keyClick(guide, Qt::Key_Escape);
-        QTRY_VERIFY(!guide->isVisible()); QVERIFY(window.isVisible());
-        QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
-        click(window, "openGuide");
-        QCOMPARE(window.findChildren<llavon::lora::GuidePage*>().size(), 1);
-        QCOMPARE(widget<llavon::lora::GuidePage>(window, "usageGuide"), guide);
-        QCOMPARE(steps->currentIndex(), 1);
-        QCOMPARE(widget<QListWidget>(window, "navigation")->currentRow(), 0);
-        capture(*guide, "32-feature-phrase-overrides");
-        const auto originalPalette = QApplication::palette();
-        for (const bool dark : {false, true}) {
-            auto palette = originalPalette; palette.setColor(QPalette::Window, dark ? QColor("#202124") : QColor("#f5f5f7"));
-            QApplication::setPalette(palette); QCoreApplication::processEvents();
-            capture(*guide, dark ? "32-feature-phrase-dark" : "32-feature-phrase-light");
+        QVERIFY(!window.findChild<SetupWizard*>());
+        window.showPage("setup");
+        auto* wizard = widget<SetupWizard>(window, "setupWizard");
+        QVERIFY(wizard->isVisible()); QVERIFY(wizard->isWindow()); QCOMPARE(wizard->windowModality(), Qt::NonModal);
+        auto* steps = widget<QStackedWidget>(window, "setupSteps");
+        QCOMPARE(steps->count(), 4); QCOMPARE(steps->currentIndex(), 0);
+        QVERIFY(!widget<QPushButton>(window, "setupPrevious")->isEnabled());
+        QVERIFY(widget<QPushButton>(window, "setupSkip")->isVisible());
+        capture(*wizard, "30-setup-keyboard");
+
+        // 1. Keyboard layout: the preview follows the choice, which is saved at once.
+        QVERIFY(widget<QRadioButton>(window, "setupLayout_standard")->isChecked());
+        auto* preview = widget<llavon::lora::KeyboardPreview>(window, "setupKeyboardPreview");
+        QCOMPARE(preview->symbol('1'), QStringLiteral("ㄅ")); QCOMPARE(preview->symbol('2'), QStringLiteral("ㄉ"));
+        QCOMPARE(preview->symbol('6'), QStringLiteral("ˊ"));
+        QVERIFY(preview->accessibleDescription().contains(QStringLiteral("q ㄆ")));
+        widget<QRadioButton>(window, "setupLayout_ibm")->click();
+        QCOMPARE(SettingsStore().load().value("keyboard_layout").toString(), QStringLiteral("ibm"));
+        QCOMPARE(widget<QComboBox>(window, "setting_keyboard_layout")->currentData().toString(), QStringLiteral("ibm"));
+        QCOMPARE(preview->symbol('2'), QStringLiteral("ㄆ"));
+        widget<QRadioButton>(window, "setupLayout_hsu")->click();
+        QCOMPARE(preview->symbol('b'), QStringLiteral("ㄅ"));
+        QVERIFY(widget<QLabel>(window, "setupLayoutNote")->text().contains(QStringLiteral("多個注音")));
+        widget<QRadioButton>(window, "setupLayout_standard")->click();
+        QCOMPARE(SettingsStore().load().value("keyboard_layout").toString(), QStringLiteral("standard"));
+        for (const int width : {720, 620}) {
+            wizard->resize(width, 640); QCoreApplication::processEvents();
+            QCOMPARE(qobject_cast<QScrollArea*>(steps->currentWidget())->horizontalScrollBar()->maximum(), 0);
         }
-        QApplication::setPalette(originalPalette); QCoreApplication::processEvents();
-        click(window, "guidePrevious"); QCOMPARE(steps->currentIndex(), 0);
-        advance(); advance(); QCOMPARE(steps->currentIndex(), 2);
-        capture(*guide, "33-feature-personalization");
-        click(window, "guideRestart"); QCOMPARE(steps->currentIndex(), 0);
-        for (int index = 0; index < topics->count(); ++index) {
-            topics->setCurrentIndex(index);
-            QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
-            if (auto* area = qobject_cast<QScrollArea*>(topics->currentWidget())) {
-                QCoreApplication::processEvents(); QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
-            }
-        }
-        // Viewing every topic never enables recording or starts the helper.
+        click(window, "setupNext"); QCOMPARE(steps->currentIndex(), 1);
+
+        // 2. Input habit: the same presets as the settings page.
+        auto* page = window.findChild<llavon::lora::SettingsPage*>();
+        QVERIFY(widget<QRadioButton>(window, "setupPreset_llavon")->isChecked());
+        QVERIFY(!widget<QLabel>(window, "setupPresetNote")->isVisible());
+        capture(*wizard, "31-setup-habit");
+        widget<QRadioButton>(window, "setupPreset_microsoft")->click();
+        QCOMPARE(SettingsStore().load().value("select_phrase").toString(), QStringLiteral("after_cursor"));
+        QCOMPARE(widget<QComboBox>(window, "settingsPreset")->currentData().toString(), QStringLiteral("microsoft"));
+        // A detail changed in the settings page shows as customized here.
+        page->setValue("space_selects_candidate", true);
+        for (const auto* name : {"setupPreset_llavon", "setupPreset_microsoft", "setupPreset_apple", "setupPreset_mcbopomofo"})
+            QVERIFY(!widget<QRadioButton>(window, name)->isChecked());
+        QVERIFY(widget<QLabel>(window, "setupPresetNote")->isVisible());
+        // Clicking anywhere on a card chooses that habit.
+        auto* microsoftCard = widget<QRadioButton>(window, "setupPreset_microsoft")->parentWidget();
+        QTest::mouseClick(microsoftCard, Qt::LeftButton, Qt::NoModifier, QPoint(microsoftCard->width() - 20, microsoftCard->height() / 2));
+        QVERIFY(!SettingsStore().load().value("space_selects_candidate").toBool());
+        QVERIFY(widget<QRadioButton>(window, "setupPreset_microsoft")->isChecked());
+        click(window, "setupNext"); QCOMPARE(steps->currentIndex(), 2);
+
+        // 3. Smart Chinese-English.
+        auto* smart = widget<QCheckBox>(window, "setupSmartEnglish");
+        QVERIFY(!smart->isChecked());
+        QTest::mouseClick(smart, Qt::LeftButton);
+        QVERIFY(SettingsStore().load().value("smart_english").toBool());
+        QVERIFY(widget<QCheckBox>(window, "setting_smart_english")->isChecked());
+        capture(*wizard, "32-setup-mixed");
+        click(window, "setupPrevious"); QCOMPARE(steps->currentIndex(), 1);
+        QVERIFY(widget<QRadioButton>(window, "setupPreset_microsoft")->isChecked());
+        click(window, "setupNext"); click(window, "setupNext"); QCOMPARE(steps->currentIndex(), 3);
+
+        // 4. Try it, and where to go next.
+        QCOMPARE(widget<QPushButton>(window, "setupNext")->text(), QStringLiteral("完成"));
+        QVERIFY(!widget<QPushButton>(window, "setupSkip")->isVisible());
+        QVERIFY(widget<QLineEdit>(window, "setupTryInput")->isVisible());
+        capture(*wizard, "33-setup-done");
+        QVERIFY(!SetupPreferences::seen());
+        click(window, "setupPhrases");
+        QVERIFY(!wizard->isVisible()); QVERIFY(SetupPreferences::seen());
+        QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("替代詞彙"));
+        // The setup never starts the training helper or writes phrases.
         QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
         QVERIFY(!window.findChild<QTableWidget*>("records"));
-        QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
-        QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
-        guide->resize(660, 480); capture(*guide, "34-guide-compact");
-        QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
-        click(window, "guideSkipAll");
-        QVERIFY(llavon::lora::QuickStartPreferences::dismissed());
-        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
-        QVERIFY(!guide->isVisible());
-        QVERIFY(configuration.open(QIODevice::ReadOnly)); QCOMPARE(configuration.readAll(), before); configuration.close();
-        QVERIFY(window.close());
-    }
-    {
-        Backend backend(directory.path() + "/missing-backend", {});
-        Manager window(&backend, {}, "settings"); window.show();
-        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
-        click(window, "openGuide");
-        QCOMPARE(widget<QStackedWidget>(window, "guideSteps")->currentIndex(), 0);
-        // A direct settings link keeps already edited fields intact.
-        window.showPage("settings");
-        auto* context = widget<QSpinBox>(window, "setting_context_length"); context->setValue(256);
-        click(window, "openGuide"); click(window, "guideMixedFeature");
-        QCOMPARE(context->value(), 256);
-        context->setValue(saved.value("context_length").toInt()); click(window, "saveSettings");
-        click(window, "openGuide");
-        for (int step = 0; step < 3; ++step) {
-            QCoreApplication::processEvents(); click(window, "guideNext"); QCoreApplication::processEvents();
-        }
-        QTRY_VERIFY(!widget<llavon::lora::GuidePage>(window, "usageGuide")->isVisible());
-        QVERIFY(!widget<QWidget>(window, "quickStart")->isVisible());
-        click(window, "openGuide"); QCOMPARE(widget<QStackedWidget>(window, "guideSteps")->currentIndex(), 0);
-        QVERIFY(window.close());
+        QVERIFY(!QFile::exists(SettingsStore::phrasesPath()));
+
+        // The guide reopens the setup from its first step; Escape closes it.
+        click(window, "openGuide"); click(window, "guideSetup");
+        QVERIFY(wizard->isVisible()); QCOMPARE(steps->currentIndex(), 0);
         QVERIFY(!widget<llavon::lora::GuidePage>(window, "usageGuide")->isVisible());
+        QCOMPARE(window.findChildren<SetupWizard*>().size(), 1);
+        QTest::keyClick(wizard, Qt::Key_Escape);
+        QTRY_VERIFY(!wizard->isVisible()); QVERIFY(window.isVisible());
+        QVERIFY(window.close());
     }
-    // Skipping the initial invitation also persists, without building the guide.
-    Environment separate("XDG_CONFIG_HOME", (directory.path() + "/separate").toUtf8());
+    QVERIFY(!SetupWizard::shouldOffer());
+    // Saved settings mean someone already set the input method up.
+    Environment configured("XDG_CONFIG_HOME", (directory.path() + "/configured").toUtf8());
+    QVERIFY(SetupWizard::shouldOffer());
+    { SettingsStore store; store.save(store.load()); }
+    QVERIFY(!SetupWizard::shouldOffer());
+    // Skipping keeps the current settings and is not asked again.
+    Environment skipped("XDG_CONFIG_HOME", (directory.path() + "/skipped").toUtf8());
     Backend backend(directory.path() + "/missing-backend", {});
     Manager window(&backend, {}, "settings"); window.show();
-    click(window, "skipQuickGuide"); QVERIFY(llavon::lora::QuickStartPreferences::dismissed());
-    QVERIFY(!window.findChild<llavon::lora::GuidePage*>());
-    QVERIFY(!QFile::exists(llavon::lora::SettingsStore::configPath()));
+    window.showPage("setup"); click(window, "setupSkip");
+    QVERIFY(!widget<SetupWizard>(window, "setupWizard")->isVisible());
+    QVERIFY(SetupPreferences::seen()); QVERIFY(!SetupWizard::shouldOffer());
+    QVERIFY(!QFile::exists(SettingsStore::configPath()));
     QVERIFY(window.close());
 }
 
@@ -1015,11 +1075,15 @@ void NativeTests::guideIllustrations() {
     QSignalSpy errors(&backend, &Backend::error), ready(&backend, &Backend::ready);
     Manager window(&backend, {}, "settings"); window.show();
     QVERIFY(!window.findChild<llavon::lora::GuideIllustration*>());
+    click(window, "settingsAdvancedToggle");
     auto* context = widget<QSpinBox>(window, "setting_context_length");
     const auto original = context->value(); context->setValue(original == 256 ? 128 : 256);
     click(window, "openGuide"); auto* guide = widget<llavon::lora::GuidePage>(window, "usageGuide");
-    const QStringList names{"guideMixedIllustration", "guidePhraseIllustration", "guidePrivacyIllustration"};
+    auto* topics = widget<QTabWidget>(window, "guideTopics");
+    // The topic illustrations render real widgets, which must stay inert.
+    const QStringList names{"guideDetailedMixedIllustration", "guideDetailedPhraseIllustration", "guideDetailedPrivacyIllustration"};
     for (int step = 0; step < names.size(); ++step) {
+        topics->setCurrentIndex(step + 1); QCoreApplication::processEvents();
         auto* scene = guide->findChild<llavon::lora::GuideIllustration*>(names[step]); QVERIFY(scene);
         QVERIFY(scene->isVisible()); QVERIFY(scene->property("illustrationOnly").toBool());
         QVERIFY(scene->findChildren<QLineEdit*>().isEmpty());
@@ -1037,20 +1101,19 @@ void NativeTests::guideIllustrations() {
                 if (scene->visibleRegion().contains(target.center()))
                     QTest::mouseClick(scene, Qt::LeftButton, Qt::NoModifier, target.center());
             }
-            auto* area = qobject_cast<QScrollArea*>(widget<QStackedWidget>(window, "guideSteps")->currentWidget()); QVERIFY(area);
+            auto* area = qobject_cast<QScrollArea*>(topics->currentWidget()); QVERIFY(area);
             QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
         }
         guide->resize(660, 480); QCoreApplication::processEvents();
         capture(*guide, QStringLiteral("36-illustration-compact-%1").arg(step));
-        QVERIFY(widget<QPushButton>(window, "guideSkipAll")->isVisible());
+        QVERIFY(widget<QPushButton>(window, "guideSetup")->isVisible());
         guide->resize(780, 720); QCoreApplication::processEvents();
-        if (step < names.size() - 1) { click(window, "guideNext"); QCoreApplication::processEvents(); }
     }
     QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
     QVERIFY(!window.findChild<QTableWidget*>("records"));
     QVERIFY(!window.findChild<QPushButton*>("setup"));
     QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
-    QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+    QVERIFY(!llavon::lora::SetupPreferences::seen());
     QCOMPARE(context->value(), original == 256 ? 128 : 256);
     QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), before); file.close();
     context->setValue(original); click(window, "saveSettings"); QVERIFY(window.close());
@@ -1066,21 +1129,23 @@ void NativeTests::guideDetailTopics() {
     llavon::lora::GuidePage guide; llavon::lora::applyAppearance(&guide); guide.show();
     QSignalSpy pageRequests(&guide, &llavon::lora::GuidePage::pageRequested);
     QSignalSpy settingRequests(&guide, &llavon::lora::GuidePage::settingRequested);
-    auto* topics = guide.findChild<QTabWidget*>("guideTopics"); QVERIFY(topics); QCOMPARE(topics->count(), 6);
-    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 3);
+    QSignalSpy setupRequests(&guide, &llavon::lora::GuidePage::setupRequested);
+    auto* topics = guide.findChild<QTabWidget*>("guideTopics"); QVERIFY(topics); QCOMPARE(topics->count(), 5);
+    // Only the first topic is built on opening, and it has no illustration.
+    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 0);
     QVERIFY(!guide.findChild<QPushButton*>("guideRecords"));
     const QStringList names{"guideShortcutTopic", "guideMixedTopic", "guidePhraseTopic", "guidePrivacyTopic", "guideHelpTopic"};
     const auto originalPalette = QApplication::palette();
     const auto restorePalette = qScopeGuard([originalPalette] { QApplication::setPalette(originalPalette); });
-    for (int index = 1; index < topics->count(); ++index) {
+    for (int index = 0; index < topics->count(); ++index) {
         topics->setCurrentIndex(index);
         auto* area = qobject_cast<QScrollArea*>(topics->currentWidget()); QVERIFY(area);
-        QCOMPARE(area->objectName(), names[index - 1]);
-        if (index == 1) QCOMPARE(area->findChildren<QFrame*>("guideShortcutRow").size(), 10);
-        if (index >= 2 && index <= 4) QCOMPARE(area->findChildren<llavon::lora::GuideIllustration*>().size(), 1);
-        if (index == 4) QCOMPARE(area->findChildren<QWidget*>("guideFlowStage").size(), 3);
-        if (index == 5) QCOMPARE(area->findChildren<QFrame*>("guideHelpRow").size(), 2);
-        if (index >= 2 && index <= 4) {
+        QCOMPARE(area->objectName(), names[index]);
+        if (index == 0) QCOMPARE(area->findChildren<QFrame*>("guideShortcutRow").size(), 10);
+        if (index >= 1 && index <= 3) QCOMPARE(area->findChildren<llavon::lora::GuideIllustration*>().size(), 1);
+        if (index == 3) QCOMPARE(area->findChildren<QWidget*>("guideFlowStage").size(), 3);
+        if (index == 4) QCOMPARE(area->findChildren<QFrame*>("guideHelpRow").size(), 2);
+        if (index >= 1 && index <= 3) {
             auto* preview = area->findChild<llavon::lora::GuideIllustration*>();
             area->ensureWidgetVisible(preview); QCoreApplication::processEvents();
             for (const auto& target : preview->targetRects()) {
@@ -1098,18 +1163,18 @@ void NativeTests::guideDetailTopics() {
         guide.resize(660, 480); QCoreApplication::processEvents();
         capture(guide, QStringLiteral("71-topic-%1-compact").arg(index));
         QCOMPARE(area->horizontalScrollBar()->maximum(), 0);
-        auto* skip = guide.findChild<QPushButton*>("guideSkipAll"); QVERIFY(skip->isVisible());
-        QVERIFY(guide.rect().contains(QRect(skip->mapTo(&guide, QPoint()), skip->size())));
+        auto* setup = guide.findChild<QPushButton*>("guideSetup"); QVERIFY(setup->isVisible());
+        QVERIFY(guide.rect().contains(QRect(setup->mapTo(&guide, QPoint()), setup->size())));
         guide.resize(780, 720); QCoreApplication::processEvents();
     }
-    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 6);
-    topics->setCurrentIndex(0); topics->setCurrentIndex(4);
-    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 6); // Reopening reuses the topic.
-    QCOMPARE(pageRequests.count(), 0); QCOMPARE(settingRequests.count(), 0);
+    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 3);
+    topics->setCurrentIndex(0); topics->setCurrentIndex(3);
+    QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 3); // Reopening reuses the topic.
+    QCOMPARE(pageRequests.count(), 0); QCOMPARE(settingRequests.count(), 0); QCOMPARE(setupRequests.count(), 0);
     QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
-    QVERIFY(!llavon::lora::QuickStartPreferences::dismissed());
+    QVERIFY(!llavon::lora::SetupPreferences::seen());
     QVERIFY(configuration.open(QIODevice::ReadOnly)); QCOMPARE(configuration.readAll(), before); configuration.close();
-    for (const auto& entry : {QPair{2, QString("guideSmartEnglish")}, QPair{5, QString("guideKeyboard")}}) {
+    for (const auto& entry : {QPair{1, QString("guideSmartEnglish")}, QPair{4, QString("guideKeyboard")}}) {
         topics->setCurrentIndex(entry.first); QCoreApplication::processEvents();
         auto* button = guide.findChild<QPushButton*>(entry.second); QVERIFY(button);
         qobject_cast<QScrollArea*>(topics->currentWidget())->ensureWidgetVisible(button);
@@ -1119,7 +1184,7 @@ void NativeTests::guideDetailTopics() {
     QCOMPARE(settingRequests.count(), 2);
     QCOMPARE(settingRequests.at(0).at(0).toString(), QStringLiteral("smart_english"));
     QCOMPARE(settingRequests.at(1).at(0).toString(), QStringLiteral("keyboard_layout"));
-    for (const auto& entry : {QPair{3, QString("guidePhraseList")}, QPair{4, QString("guideRecords")}, QPair{5, QString("guideStatus")}}) {
+    for (const auto& entry : {QPair{2, QString("guidePhraseList")}, QPair{3, QString("guideRecords")}, QPair{4, QString("guideStatus")}}) {
         topics->setCurrentIndex(entry.first); QCoreApplication::processEvents();
         auto* button = guide.findChild<QPushButton*>(entry.second); QVERIFY(button);
         qobject_cast<QScrollArea*>(topics->currentWidget())->ensureWidgetVisible(button);
@@ -1130,6 +1195,8 @@ void NativeTests::guideDetailTopics() {
     QCOMPARE(pageRequests.at(0).at(0).toString(), QStringLiteral("phrases"));
     QCOMPARE(pageRequests.at(1).at(0).toString(), QStringLiteral("records"));
     QCOMPARE(pageRequests.at(2).at(0).toString(), QStringLiteral("about"));
+    QTest::mouseClick(guide.findChild<QPushButton*>("guideSetup"), Qt::LeftButton);
+    QCOMPARE(setupRequests.count(), 1);
     QVERIFY(guide.close());
 }
 
@@ -1147,6 +1214,15 @@ void NativeTests::quietInterface() {
     for (auto* label : window.findChildren<QLabel*>()) if (label->isVisible()) QVERIFY(!redundant.contains(label->text()));
     QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("輸入法設定"));
     capture(window, "60-quiet-settings");
+    // An input setting saves by itself and never shows as unsaved.
+    auto* smart = widget<QCheckBox>(window, "setting_smart_english");
+    smart->click();
+    QTRY_VERIFY(widget<QLabel>(window, "settingsStatus")->text().startsWith(QStringLiteral("已儲存")));
+    QCOMPARE(llavon::lora::SettingsStore().load().value("smart_english").toBool(), smart->isChecked());
+    QVERIFY(!widget<QListWidget>(window, "navigation")->currentItem()->text().endsWith(QStringLiteral("●")));
+    smart->click();
+    click(window, "settingsAdvancedToggle");
+    click(window, "reloadSettings"); QVERIFY(!widget<QLabel>(window, "settingsStatus")->isVisible());
     auto* context = widget<QSpinBox>(window, "setting_context_length");
     auto* saveSettings = widget<QPushButton>(window, "saveSettings");
     QVERIFY(!saveSettings->isEnabled());
@@ -1210,7 +1286,9 @@ void NativeTests::phraseEmptyDiscovery() {
     Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
     Backend backend(directory.path() + "/missing-backend", {});
     Manager window(&backend, {}, "settings"); window.show();
-    click(window, "openGuide"); click(window, "guideNext"); click(window, "guidePhrases");
+    click(window, "openGuide");
+    auto* topics = widget<QTabWidget>(window, "guideTopics"); topics->setCurrentIndex(2);
+    click(window, "guidePhraseList");
     auto* list = widget<llavon::lora::PhraseList>(window, "phraseList");
     auto* empty = widget<QWidget>(window, "phraseEmptyState"); QVERIFY(empty->isVisible());
     QVERIFY(widget<QLabel>(window, "phraseEmptyDescription")->text().contains(QStringLiteral("李拉風")));
@@ -1228,8 +1306,8 @@ void NativeTests::phraseEmptyDiscovery() {
     click(window, "savePhrases");
     llavon::lora::SettingsStore store;
     QCOMPARE(store.loadPhrases(), QStringLiteral("李拉風 ㄌㄧˇ-ㄌㄚ-ㄈㄥ\n"));
-    click(window, "openGuide"); QCOMPARE(widget<QStackedWidget>(window, "guideSteps")->currentIndex(), 1);
-    click(window, "guidePhrases"); QVERIFY(!empty->isVisible());
+    click(window, "openGuide"); QCOMPARE(topics->currentIndex(), 2);
+    click(window, "guidePhraseList"); QVERIFY(!empty->isVisible());
     QTest::mouseClick(phraseRow(window, 0)->findChild<QPushButton*>("removePhrase"), Qt::LeftButton);
     QVERIFY(empty->isVisible()); click(window, "savePhrases"); QVERIFY(store.loadPhrases().isEmpty());
     QVERIFY(window.close());
@@ -1246,7 +1324,7 @@ void NativeTests::appearanceChanges() {
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
     Manager window(&backend); window.show(); backend.start();
     window.showPage("settings");
-    widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+    widget<QPushButton>(window, "settingsDetailsToggle")->setChecked(true);
     auto* count = widget<QSpinBox>(window, "setting_candidate_page_size");
     count->setValue(8); // An appearance change must not reconstruct/lose edits.
     for (const bool dark : {false, true}) {
@@ -1255,7 +1333,7 @@ void NativeTests::appearanceChanges() {
         QCOMPARE(window.palette().color(QPalette::Window).lightness() < 128, dark);
         QCOMPARE(count->value(), 8);
         QVERIFY(!QPixmap(dark ? ":/native/chevron-dark.xpm" : ":/native/chevron-light.xpm").isNull());
-        window.showPage("settings"); widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+        window.showPage("settings"); QVERIFY(count->isVisible());
         capture(window, dark ? "31-settings-dark" : "30-settings-light");
         window.showPage("phrases");
         auto* reading = phraseRow(window, 1)->findChild<QComboBox*>("phraseReading_1");
@@ -1264,7 +1342,7 @@ void NativeTests::appearanceChanges() {
         capture(window, dark ? "33-phrases-dark" : "32-phrases-light");
         click(window, "savePhrases");
     }
-    window.showPage("settings"); click(window, "saveSettings");
+    window.showPage("settings");
     QCOMPARE(store.load().value("candidate_page_size").toInt(), 8);
 }
 
@@ -1342,8 +1420,7 @@ void NativeTests::controlInteractions() {
     const auto restore = qScopeGuard([original] { QApplication::setPalette(original); });
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
     Manager window(&backend); window.show(); backend.start(); window.showPage("settings");
-    click(window, "skipQuickGuide"); // This suite exercises controls, not the first-use invitation.
-    widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+    click(window, "settingsDetailsToggle"); click(window, "settingsAdvancedToggle");
     auto* keyboard = widget<QComboBox>(window, "setting_keyboard_layout");
     auto* save = widget<QPushButton>(window, "saveSettings");
     auto popupCapture = [](QComboBox* combo, const QString& name) {
@@ -1356,7 +1433,8 @@ void NativeTests::controlInteractions() {
     for (const bool dark : {false, true}) {
         auto palette = original; palette.setColor(QPalette::Window, dark ? QColor("#202124") : QColor("#f5f5f7"));
         QApplication::setPalette(palette); QCoreApplication::processEvents();
-        window.showPage("settings"); widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+        window.showPage("settings");
+        widget<QScrollArea>(window, "settingsScroll")->verticalScrollBar()->setValue(0);
         keyboard->setFocus(); keyboard->showPopup();
         QTRY_VERIFY(keyboard->view()->isVisible());
         popupCapture(keyboard, dark ? "41-keyboard-menu-dark" : "40-keyboard-menu-light");
@@ -1404,12 +1482,17 @@ void NativeTests::controlInteractions() {
         QTest::mouseClick(cancel, Qt::LeftButton); QCOMPARE(cancelled.count(), 0);
         capture(window, dark ? "49-training-controls-dark" : "48-training-controls-light");
     }
-    window.showPage("settings"); click(window, "saveSettings");
+    window.showPage("settings");
     QCOMPARE(store.load().value("keyboard_layout").toString(), keyboard->currentData().toString());
-    window.resize(800, 620); widget<QTabWidget>(window, "settingsGroups")->setCurrentIndex(1);
+    window.resize(800, 620); widget<QScrollArea>(window, "settingsScroll")->verticalScrollBar()->setValue(0);
     capture(window, "50-controls-compact");
+    // The settings page scrolls vertically; no control may overflow sideways.
+    QCOMPARE(widget<QScrollArea>(window, "settingsScroll")->horizontalScrollBar()->maximum(), 0);
     for (auto* combo : window.findChildren<QComboBox*>()) if (combo->isVisible()) {
-        QVERIFY(window.rect().contains(QRect(combo->mapTo(&window, QPoint()), combo->size())));
+        const QRect bounds(combo->mapTo(&window, QPoint()), combo->size());
+        QVERIFY(bounds.left() >= 0); QVERIFY(bounds.right() < window.width());
+        if (!combo->visibleRegion().isEmpty() && combo->visibleRegion().boundingRect() == combo->rect())
+            QVERIFY(window.rect().contains(bounds));
     }
     QWidget standalone; QVBoxLayout layout(&standalone);
     llavon::lora::NativeComboBox longNames(&standalone); layout.addWidget(&longNames);

@@ -261,7 +261,7 @@ const std::vector<ConfigPreset>& config_presets() {
     // Preferences.swift, and macOS Zhuyin as documented by Apple, McBopomofo
     // (issue 753) and vChewing, plus behavior verified on a Mac.
     static const std::vector<ConfigPreset> presets = {
-        {"llavon", "Llavon 預設", "還原輸入行為的預設值。", {}},
+        {"llavon", "拉風預設", "空白鍵選字、每頁 10 個候選字、大寫鎖定時仍輸入注音。", {}},
         {"microsoft", "微軟注音", "接近 Windows 微軟注音：直式候選窗、選游標後的字、大寫鎖定時仍輸入注音。",
          {
              {"selection_key_count", 9},

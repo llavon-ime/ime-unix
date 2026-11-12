@@ -44,13 +44,20 @@ GuideIllustration::GuideIllustration(Kind kind, QWidget* parent) : QWidget(paren
         auto page = std::make_unique<SettingsPage>(false);
         page->revealField("smart_english");
         auto* field = page->findChild<QCheckBox*>("setting_smart_english");
-        field->setChecked(true);
+        {
+            // Settings save as soon as they change; the picture must not.
+            const QSignalBlocker blocker(field);
+            field->setChecked(true);
+        }
         excerpt_ = field->parentWidget();
-        secondary_ = page->findChild<QPushButton*>("saveSettings");
+        auto* status = page->findChild<QLabel*>("settingsStatus");
+        status->setText(QStringLiteral("已儲存並套用")); status->setVisible(true);
+        status->setWordWrap(false); status->setMinimumHeight(32); status->setAlignment(Qt::AlignCenter);
+        secondary_ = status;
         marked_ = {field, secondary_};
         source_ = std::move(page);
         first_->setText(QStringLiteral("① 開啟智慧中英混輸"));
-        second_->setText(QStringLiteral("② 儲存並套用"));
+        second_->setText(QStringLiteral("② 立即儲存並套用"));
         setMinimumHeight(218);
     } else if (kind == Kind::Phrases) {
         auto list = std::make_unique<PhraseList>(QString());

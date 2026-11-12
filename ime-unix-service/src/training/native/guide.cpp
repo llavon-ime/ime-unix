@@ -132,29 +132,15 @@ void illustration(QVBoxLayout* layout, GuideIllustration::Kind kind, int page, c
     if (name) preview->setObjectName(name);
     layout->addWidget(preview);
 }
-QIcon stepIcon(bool backward, bool finished = false) {
-    QIcon icon;
-    for (const auto ratio : {1, 2}) {
-        QPixmap image(18 * ratio, 18 * ratio); image.setDevicePixelRatio(ratio); image.fill(Qt::transparent);
-        QPainter painter(&image); painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(backward ? appearance().text : QColor(Qt::white), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        if (finished) painter.drawPolyline(QPolygonF{QPointF(3, 9), QPointF(7, 13), QPointF(15, 5)});
-        else {
-            painter.drawLine(QPointF(3, 9), QPointF(15, 9));
-            painter.drawPolyline(backward ? QPolygonF{QPointF(8, 4), QPointF(3, 9), QPointF(8, 14)} :
-                QPolygonF{QPointF(10, 4), QPointF(15, 9), QPointF(10, 14)});
-        }
-        painter.end(); icon.addPixmap(image);
-    }
-    return icon;
-}
 }
 
-bool QuickStartPreferences::dismissed() {
+// The key predates the setup; keeping it means people who dismissed the old
+// feature tour are not asked again.
+bool SetupPreferences::seen() {
     QSettings preferences(preferencesPath(), QSettings::IniFormat);
     return preferences.value("quickStartDismissed", false).toBool();
 }
-bool QuickStartPreferences::dismiss() {
+bool SetupPreferences::markSeen() {
     QSettings preferences(preferencesPath(), QSettings::IniFormat);
     preferences.setValue("quickStartDismissed", true);
     preferences.sync();
@@ -173,87 +159,30 @@ GuidePage::GuidePage(QWidget* parent) : QDialog(parent) {
     topics_->setObjectName("guideTopics");
     layout->addWidget(topics_);
 
-    auto* quick = new QWidget;
-    auto* quickLayout = new QVBoxLayout(quick);
-    quickLayout->setContentsMargins(0, 0, 0, 0);
-    quickLayout->setSpacing(16);
-    progress_ = paragraph({}, "muted");
-    progress_->setObjectName("guideProgress");
-    quickLayout->addWidget(progress_);
-    steps_ = new QStackedWidget;
-    steps_->setObjectName("guideSteps");
-    quickLayout->addWidget(steps_, 1);
-    auto mixedFeature = topic(QStringLiteral("英文和中文，一起打"),
-        QStringLiteral("一起判斷英文與注音，不必一直切換輸入方式。"));
-    QString mixedGroup;
-    for (const auto field : SettingsStore::schema().value("fields").toArray())
-        if (field.toObject().value("key").toString() == "smart_english") mixedGroup = field.toObject().value("group").toString();
-    illustration(mixedFeature.layout, GuideIllustration::Kind::MixedInput, 3, QStringLiteral("輸入法設定 › %1").arg(mixedGroup));
-    auto* example = new QHBoxLayout;
-    auto* raw = paragraph(QStringLiteral("hello283"), "guideExample"); raw->setObjectName("guideMixedRaw");
-    auto* arrow = paragraph(QStringLiteral("→"), "guideExample");
-    auto* result = paragraph(QStringLiteral("hello打"), "guideExample"); result->setObjectName("guideMixedResult");
-    example->addWidget(raw); example->addWidget(arrow); example->addWidget(result); example->addStretch();
-    mixedFeature.layout->addWidget(paragraph(QStringLiteral("標準注音鍵盤範例；結果仍可改選。"), "muted"));
-    auto* mixedAction = new QPushButton(QStringLiteral("查看智慧型中英文…")); mixedAction->setObjectName("guideMixedFeature"); mixedAction->setAutoDefault(false);
-    example->addWidget(mixedAction); mixedFeature.layout->addLayout(example);
-    connect(mixedAction, &QPushButton::clicked,
-        this, [this] { emit settingRequested("smart_english"); });
-    mixedFeature.layout->addStretch(); steps_->addWidget(mixedFeature.area);
-
-    auto phraseFeature = topic(QStringLiteral("讓常用名字，一次選對"),
-        QStringLiteral("相同注音優先使用指定寫法，不必訓練模型。"));
-    illustration(phraseFeature.layout, GuideIllustration::Kind::Phrases, 4, QStringLiteral("替代詞彙 › 詞彙與讀音"));
-    phraseFeature.layout->addWidget(paragraph(QStringLiteral("讀音相符才替代，仍可手動改選。"), "muted"));
-    connect(action(phraseFeature.layout, QStringLiteral("管理替代詞彙…"), "guidePhrases"), &QPushButton::clicked,
-        this, [this] { emit pageRequested("phrases"); });
-    phraseFeature.layout->addStretch(); steps_->addWidget(phraseFeature.area);
-
-    auto personalFeature = topic(QStringLiteral("讓模型更懂你的用字習慣"),
-        QStringLiteral("用保留的輸入紀錄，訓練自己的 LoRA。"));
-    illustration(personalFeature.layout, GuideIllustration::Kind::Personalization, 0, QStringLiteral("訓練資料 › 設定資料密碼"));
-    personalFeature.layout->addWidget(paragraph(QStringLiteral("收集預設關閉；自行啟用後才加密記錄，可暫停或刪除。訓練需另備基礎模型與訓練器。"), "muted"));
-    connect(action(personalFeature.layout, QStringLiteral("查看本機個人化…"), "guidePersonalization"), &QPushButton::clicked,
-        this, [this] { emit pageRequested("records"); });
-    personalFeature.layout->addStretch(); steps_->addWidget(personalFeature.area);
-    auto* navigation = new QHBoxLayout;
-    previous_ = new QPushButton(QStringLiteral("上一步")); previous_->setObjectName("guidePrevious");
-    previous_->setAutoDefault(false);
-    next_ = new QPushButton; next_->setObjectName("guideNext"); next_->setProperty("primary", true); next_->setFixedWidth(160);
-    auto* restart = new QPushButton(QStringLiteral("重新開始")); restart->setObjectName("guideRestart"); restart->setProperty("quiet", true);
-    restart->setAutoDefault(false); next_->setAutoDefault(false);
-    navigation->addWidget(previous_); navigation->addWidget(restart); navigation->addStretch(); navigation->addWidget(next_);
-    quickLayout->addLayout(navigation);
-    connect(previous_, &QPushButton::clicked, this, [this] { steps_->setCurrentIndex(steps_->currentIndex() - 1); updateStep(); });
-    connect(next_, &QPushButton::clicked, this, [this] {
-        if (steps_->currentIndex() == steps_->count() - 1) emit finished();
-        else { steps_->setCurrentIndex(steps_->currentIndex() + 1); updateStep(); }
-    });
-    connect(restart, &QPushButton::clicked, this, &GuidePage::startQuickGuide);
-    topics_->addTab(quick, QStringLiteral("功能導覽"));
-
-    // Build detailed examples only when their tab is opened, not on launch or
-    // on the first visit to the three-step tour.
+    // Topics are built when their tab is opened, not on launch.
     for (const auto& title : {QStringLiteral("快捷鍵"), QStringLiteral("中英混輸"), QStringLiteral("常用詞彙"),
              QStringLiteral("個人化"), QStringLiteral("疑難排解")}) {
         auto placeholder = topic(title, {}); topics_->addTab(placeholder.area, title);
     }
     connect(topics_, &QTabWidget::currentChanged, this, &GuidePage::buildTopic);
-    auto* skip = new QPushButton(QStringLiteral("略過全部")); skip->setObjectName("guideSkipAll"); skip->setProperty("quiet", true);
-    skip->setAutoDefault(false);
-    layout->addWidget(skip, 0, Qt::AlignLeft);
-    connect(skip, &QPushButton::clicked, this, &GuidePage::skipped);
-    updateStep();
+    buildTopic(0);
+    auto* footer = new QHBoxLayout;
+    auto* setup = new QPushButton(QStringLiteral("重新進行開始設定…")); setup->setObjectName("guideSetup");
+    setup->setProperty("quiet", true); setup->setAutoDefault(false);
+    setup->setToolTip(QStringLiteral("再選一次鍵盤配置、輸入習慣與中英混輸。"));
+    footer->addWidget(setup); footer->addStretch();
+    layout->addLayout(footer);
+    connect(setup, &QPushButton::clicked, this, &GuidePage::setupRequested);
 }
 
 void GuidePage::buildTopic(int index) {
-    if (index <= 0 || builtTopics_.contains(index)) return;
+    if (index < 0 || builtTopics_.contains(index)) return;
     auto* area = qobject_cast<QScrollArea*>(topics_->widget(index));
     if (!area) return;
     auto* layout = qobject_cast<QVBoxLayout*>(area->widget()->layout());
     if (!layout) return;
     builtTopics_.insert(index);
-    if (index == 1) {
+    if (index == 0) {
         area->setObjectName("guideShortcutTopic");
         layout->addWidget(paragraph(QStringLiteral("選字與修正"), "section"));
         shortcut(layout, {"Enter"}, QStringLiteral("提交組字"), QStringLiteral("選字窗開啟時，先確認候選"));
@@ -267,17 +196,17 @@ void GuidePage::buildTopic(int index) {
         shortcut(layout, {"`"}, QStringLiteral("開啟分類符號"));
         shortcut(layout, {"Shift", QStringLiteral("← / →")}, QStringLiteral("標記詞彙範圍"));
         shortcut(layout, {"Enter"}, QStringLiteral("加入標記的替代詞彙"), QStringLiteral("限 2–8 個有注音的字，不會提交整句"));
-    } else if (index == 2) {
+    } else if (index == 1) {
         area->setObjectName("guideMixedTopic");
         layout->addWidget(paragraph(QStringLiteral("預設關閉；開啟後一起判斷英文與注音。"), "muted"));
-        illustration(layout, GuideIllustration::Kind::MixedInput, 3, QStringLiteral("輸入法設定 › 輸入行為"), "guideDetailedMixedIllustration");
+        illustration(layout, GuideIllustration::Kind::MixedInput, 3, QStringLiteral("輸入法設定 › 常用"), "guideDetailedMixedIllustration");
         conversion(layout, "hello283", QStringLiteral("hello打"));
         layout->addWidget(paragraph(QStringLiteral("283 是「ㄉㄚˇ」的標準鍵盤按鍵；其他配置請使用對應按鍵。"), "muted"));
         shortcut(layout, {QStringLiteral("↓")}, QStringLiteral("查看其他解讀與原文"));
         shortcut(layout, {"Enter"}, QStringLiteral("提交目前預覽"), QStringLiteral("混輸的空白保留在組字中，不會提交整句"));
         connect(action(layout, QStringLiteral("查看智慧型中英文…"), "guideSmartEnglish"), &QPushButton::clicked,
             this, [this] { emit settingRequested("smart_english"); });
-    } else if (index == 3) {
+    } else if (index == 2) {
         area->setObjectName("guidePhraseTopic");
         layout->addWidget(paragraph(QStringLiteral("人名與專有名詞，用你指定的寫法。"), "muted"));
         illustration(layout, GuideIllustration::Kind::Phrases, 4, QStringLiteral("替代詞彙 › 詞彙與讀音"), "guideDetailedPhraseIllustration");
@@ -288,7 +217,7 @@ void GuidePage::buildTopic(int index) {
         layout->addWidget(paragraph(QStringLiteral("相同讀音優先替代，仍可改選；在設定 App 編輯後要儲存並套用。"), "muted"));
         connect(action(layout, QStringLiteral("管理替代詞彙…"), "guidePhraseList"), &QPushButton::clicked,
             this, [this] { emit pageRequested("phrases"); });
-    } else if (index == 4) {
+    } else if (index == 3) {
         area->setObjectName("guidePrivacyTopic");
         layout->addWidget(paragraph(QStringLiteral("日常打字不必訓練；需要時再開啟本機個人化。"), "muted"));
         illustration(layout, GuideIllustration::Kind::Personalization, 0, QStringLiteral("訓練資料 › 設定資料密碼"), "guideDetailedPrivacyIllustration");
@@ -297,7 +226,7 @@ void GuidePage::buildTopic(int index) {
         layout->addWidget(paragraph(QStringLiteral("選字推論在本機完成。訓練需另備基礎 checkpoint 與訓練器，可能下載資源；看指南不會收集或開始訓練。"), "muted"));
         connect(action(layout, QStringLiteral("查看訓練資料…"), "guideRecords"), &QPushButton::clicked,
             this, [this] { emit pageRequested("records"); });
-    } else if (index == 5) {
+    } else if (index == 4) {
         area->setObjectName("guideHelpTopic");
         layout->addWidget(paragraph(QStringLiteral("找不到拉風輸入方式"), "section"));
 #ifdef Q_OS_MACOS
@@ -323,20 +252,4 @@ void GuidePage::buildTopic(int index) {
     layout->addStretch();
 }
 
-void GuidePage::startQuickGuide() {
-    topics_->setCurrentIndex(0);
-    steps_->setCurrentIndex(0);
-    updateStep();
-}
-void GuidePage::changeEvent(QEvent* event) {
-    QDialog::changeEvent(event);
-    if (previous_ && next_ && (event->type() == QEvent::PaletteChange || event->type() == QEvent::StyleChange)) updateStep();
-}
-void GuidePage::updateStep() {
-    progress_->setText(QStringLiteral("功能 %1 / %2").arg(steps_->currentIndex() + 1).arg(steps_->count()));
-    previous_->setEnabled(steps_->currentIndex() > 0);
-    next_->setText(steps_->currentIndex() == steps_->count() - 1 ? QStringLiteral("完成導覽") : QStringLiteral("下一個功能"));
-    previous_->setIcon(stepIcon(true));
-    next_->setIcon(stepIcon(false, steps_->currentIndex() == steps_->count() - 1));
-}
 } // namespace llavon::lora
