@@ -44,11 +44,10 @@ using Options = std::map<std::string, std::string>;
 
 Options parse(int argc, char** argv) {
     Options options;
-    for (int i = 2; i < argc; ++i) {
+    for (int i = 2; i < argc; i += 2) {
         const std::string name = argv[i];
         if (!name.starts_with("--") || i + 1 >= argc || !options.emplace(name, argv[i + 1]).second)
             throw std::invalid_argument("expected unique --option value pairs");
-        ++i;
     }
     return options;
 }

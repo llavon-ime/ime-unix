@@ -196,6 +196,12 @@ void InputProcessor::commit_text(std::u16string text) {
 }
 
 namespace {
+// Decoder output picks quote sides from the session state without taking
+// them; record the quotes it actually typed so the next one alternates.
+void observe_quotes(QuoteAlternation& quotes, std::u16string_view text) {
+    for (const char16_t ch : text) quotes.observe(ch);
+}
+
 // Pending smart input is inserted at the buffer caret, just like settled
 // literals and phonetic segments. Display and all commit routes share this
 // assembly so a suffix never moves in front of newly typed text.
@@ -274,6 +280,7 @@ InputEffect InputProcessor::reset(InputSession& session, const Config& config, I
                                (reason == InputResetReason::FocusOut &&
                                 (!session.pending_token.empty() || complete_composition));
     if (should_commit) {
+        if (!session.pending_token.empty()) observe_quotes(session.quotes, pending_rendered_text(session));
         auto text = composition_with_pending(session.buffer, pending_rendered_text(session), true);
         effect_.training_sample = commit_training_sample(session, text);
         commit_text(std::move(text));
@@ -351,7 +358,8 @@ void InputProcessor::process_impl(const InputKey& key) {
         return;
     }
 
-    const auto chewing_punctuation = chewing_punctuation_for_key(key, layout);
+    const auto chewing_punctuation =
+        chewing_punctuation_for_key(key, layout, punctuation_style_from_config(config_->punctuation_style));
     const bool punctuation_is_bopomofo = !key.has_blocking_modifier() &&
         lookup_bopomofo_key(raw_symbol, layout, false).has_value();
     const auto punctuation = punctuation_is_bopomofo ? std::nullopt : chewing_punctuation;
@@ -518,7 +526,7 @@ void InputProcessor::process_impl(const InputKey& key) {
 
             if (punctuation && key.has(InputKeyState::Ctrl)) {
                 (void)settle_pending_preview();
-                (void)session_->buffer.add_literal(*punctuation);
+                (void)session_->buffer.add_literal(session_->quotes.take(*punctuation));
                 (void)transition_to(InputStateKind::Inputting);
                 redraw();
                 consume();
@@ -581,7 +589,7 @@ void InputProcessor::process_impl(const InputKey& key) {
 
     if (punctuation) {
         if (!session_->buffer.has_unfinished_reading()) {
-            (void)session_->buffer.add_literal(*punctuation);
+            (void)session_->buffer.add_literal(session_->quotes.take(*punctuation));
             (void)transition_to(InputStateKind::Inputting);
             redraw();
         }
@@ -831,6 +839,7 @@ CandidateKeyConfig InputProcessor::candidate_key_config() const {
 }
 
 void InputProcessor::commit_current() {
+    if (!session_->pending_token.empty()) observe_quotes(session_->quotes, pending_rendered_text(*session_));
     auto text = current_preedit(*session_);
     effect_.training_sample = commit_training_sample(*session_, text);
     session_->buffer.clear();
@@ -843,6 +852,7 @@ void InputProcessor::commit_current() {
 }
 
 void InputProcessor::commit_composition_with(char32_t extra) {
+    if (!session_->pending_token.empty()) observe_quotes(session_->quotes, pending_rendered_text(*session_));
     auto text = current_preedit(*session_);
     if (extra != 0) text += utf8_to_u16(char32_to_utf8(extra));
     effect_.training_sample = commit_training_sample(*session_, text);
@@ -905,6 +915,7 @@ bool InputProcessor::commit_mixed_candidate_impl(int index) {
                                                     session_->mixed_decision.preview_path);
     if (index >= static_cast<int>(entries.size())) return false;
 
+    observe_quotes(session_->quotes, entries[static_cast<size_t>(index)].text);
     auto text = composition_with_pending(session_->buffer, entries[static_cast<size_t>(index)].text);
     session_->buffer.clear();
     session_->clear_pending_input();
@@ -983,6 +994,11 @@ bool InputProcessor::apply_mixed_path(const MixedPath& path, std::size_t char_in
         }
     }
     session_->buffer = std::move(next);
+    for (const auto& segment : path.segments) {
+        if (segment.kind != MixedSegmentKind::Bopomofo && !segment.consumed_boundary) {
+            observe_quotes(session_->quotes, segment.text);
+        }
+    }
     session_->clear_pending_input();
     (void)transition_to(InputStateKind::Inputting);
     mark_prediction_dirty();
@@ -1147,8 +1163,9 @@ void InputProcessor::rerun_pending_decision() {
     }
     auto preceding_text = session_->context_text;
     preceding_text += session_->buffer.rendered_prefix_before_caret();
-    const MixedDecodeContext context{preceding_text, session_->pending_provenance.origin,
-                                     previous_preview};
+    const MixedDecodeContext context{preceding_text, session_->pending_provenance.origin, previous_preview,
+                                     punctuation_style_from_config(config_->punctuation_style),
+                                     session_->quotes};
     auto result = decoder_.decode(session_->pending_token.raw, session_->pending_token.layout,
                                   false, context);
     const auto preview = result.best_path;

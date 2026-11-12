@@ -241,16 +241,17 @@ static bool test_config_presets() {
     ok = ok && config.esc_commits_composition && !config.esc_clears_entire_buffer;
     ok = ok && !config.space_selects_candidate && config.caps_lock_inputs_bopomofo;
     ok = ok && config.shift_letter_keys == "directly_output_uppercase";
+    ok = ok && config.punctuation_style == "chewing";
     ok = ok && apply_config_preset(config, "apple");
     ok = ok && config.tone_key_overwrites_previous && config.keep_invalid_reading;
-    ok = ok && config.shift_backspace_removes_tone;
+    ok = ok && config.shift_backspace_removes_tone && config.punctuation_style == "apple";
     ok = ok && config.esc_commits_composition && !config.esc_clears_entire_buffer;
     ok = ok && config.candidate_layout == "vertical" && config.caps_lock_inputs_bopomofo;
     ok = ok && config.shift_letter_keys == "directly_output_uppercase";
     ok = ok && apply_config_preset(config, "mcbopomofo");
     ok = ok && !config.tone_key_overwrites_previous && !config.keep_invalid_reading;
     ok = ok && !config.esc_commits_composition && !config.caps_lock_inputs_bopomofo;
-    ok = ok && !config.shift_backspace_removes_tone;
+    ok = ok && !config.shift_backspace_removes_tone && config.punctuation_style == "chewing";
     ok = ok && config.space_selects_candidate && config.select_phrase == "before_cursor";
     ok = ok && apply_config_preset(config, "llavon");
     ok = ok && to_json(config) == to_json(default_config());
@@ -292,6 +293,7 @@ int run_config_tests() {
     ok = ok && !cfg.esc_commits_composition;
     ok = ok && !cfg.shift_backspace_removes_tone;
     ok = ok && !cfg.keep_invalid_reading;
+    ok = ok && cfg.punctuation_style == "chewing";
     ok = ok && cfg.caps_lock_inputs_bopomofo;
     ok = ok && cfg.shift_letter_keys == "directly_output_uppercase";
 
@@ -305,6 +307,7 @@ int run_config_tests() {
     ok = ok && roundtrip.candidate_tab_action == cfg.candidate_tab_action;
     ok = ok && roundtrip.tone_key_overwrites_previous == cfg.tone_key_overwrites_previous;
     ok = ok && roundtrip.keep_invalid_reading == cfg.keep_invalid_reading;
+    ok = ok && roundtrip.punctuation_style == cfg.punctuation_style;
     ok = ok && roundtrip.select_phrase == cfg.select_phrase;
     ok = ok && roundtrip.caps_lock_inputs_bopomofo == cfg.caps_lock_inputs_bopomofo;
     ok = ok && roundtrip.shift_letter_keys == cfg.shift_letter_keys;
@@ -374,6 +377,7 @@ int run_config_tests() {
                << "KeepInvalidReading=True\n"
                << "EscKeyCommitsComposingBuffer=True\n"
                << "ShiftBackSpaceRemovesTone=True\n"
+               << "PunctuationStyle=蘋果注音\n"
                << "CapsLockInputsBopomofo=False\n"
                << "SmartModelPreview=False\n"
                << "ShiftLetterKeys=直接放入組字區\n";
@@ -399,6 +403,7 @@ int run_config_tests() {
     ok = ok && loaded.keep_invalid_reading;
     ok = ok && loaded.esc_commits_composition;
     ok = ok && loaded.shift_backspace_removes_tone;
+    ok = ok && loaded.punctuation_style == "apple";
     ok = ok && !loaded.caps_lock_inputs_bopomofo;
     ok = ok && loaded.shift_letter_keys == "directly_put_to_buffer";
 

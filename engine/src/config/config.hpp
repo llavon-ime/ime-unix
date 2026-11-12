@@ -37,6 +37,10 @@ struct Config {
     // macOS Zhuyin style: Shift+BackSpace removes only the tone of the
     // character before the caret, turning it back into an editable reading.
     bool shift_backspace_removes_tone = false;
+    // Which full-width marks the punctuation keys type: libchewing's table
+    // ("chewing") or macOS Zhuyin's ("apple": \ is 、, ' and " alternate
+    // between opening and closing quotes, _ is ＿ and ^ is ＾).
+    std::string punctuation_style = "chewing";
     // CapsLock on still inputs bopomofo (MS IME style).
     bool caps_lock_inputs_bopomofo = true;
     std::string shift_letter_keys = "directly_output_uppercase";

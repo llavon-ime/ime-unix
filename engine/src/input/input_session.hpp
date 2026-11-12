@@ -12,6 +12,7 @@
 #include "input/mixed_input_decoder.hpp"
 #include "input/pending_token.hpp"
 #include "input/prediction_state.hpp"
+#include "input/punctuation.hpp"
 #include "protocol/protocol.hpp"
 #include "symbol/symbol_menu.hpp"
 
@@ -76,6 +77,8 @@ struct InputSession {
     // An explicit submission waits for both buffer and mixed-preview inference.
     // Any later edit or lifecycle boundary cancels this intent.
     std::optional<InputKey> deferred_commit;
+    // Which side the next macOS Zhuyin-style quote is; kept across commits.
+    QuoteAlternation quotes;
 
     void clear_pending_input() {
         pending_token.clear();

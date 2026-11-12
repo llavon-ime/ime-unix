@@ -548,7 +548,7 @@ void NativeTests::unifiedSettings() {
     store.save(values);
     QCOMPARE(store.load(), values);
     auto invalid = values; invalid["candidate_page_size"] = 0;
-    QVERIFY_EXCEPTION_THROWN(store.save(invalid), std::runtime_error);
+    QVERIFY_THROWS_EXCEPTION(std::runtime_error, store.save(invalid));
     QCOMPARE(store.load(), values);
     // Host-owned/unknown fields must survive a round trip. Stale snapshots must
     // not overwrite a newer model chosen from the training page or elsewhere.
@@ -561,13 +561,13 @@ void NativeTests::unifiedSettings() {
     bytes += "FutureSetting=keep\n";
 #endif
     QVERIFY(file.open(QIODevice::WriteOnly)); file.write(bytes); file.close();
-    QVERIFY_EXCEPTION_THROWN(store.save(values), std::runtime_error);
+    QVERIFY_THROWS_EXCEPTION(std::runtime_error, store.save(values));
     values = store.load(); store.save(values);
     QVERIFY(file.open(QIODevice::ReadOnly)); QVERIFY(file.readAll().contains("keep")); file.close();
     store.loadPhrases(); store.savePhrases(QStringLiteral("# 測試\n拉風 ㄌㄚ-ㄈㄥ\n"));
     llavon::ime::PhraseOverrideStore hostPhrases(SettingsStore::phrasesPath().toStdString());
     QVERIFY(hostPhrases.load()); QCOMPARE(hostPhrases.entries().size(), std::size_t(1));
-    QVERIFY_EXCEPTION_THROWN(store.savePhrases(QStringLiteral("不合法")), std::runtime_error);
+    QVERIFY_THROWS_EXCEPTION(std::runtime_error, store.savePhrases(QStringLiteral("不合法")));
     QVERIFY(store.loadPhrases().contains(QStringLiteral("拉風")));
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI});
     Manager window(&backend); window.show(); backend.start();
@@ -638,7 +638,7 @@ void NativeTests::phraseLookup() {
     llavon::lora::SettingsStore store(tablePath); store.loadPhrases();
     store.savePhrases(QStringLiteral("拉風 ㄌㄚ-ㄈㄥ\n"));
     const auto saved = store.loadPhrases();
-    QVERIFY_EXCEPTION_THROWN(store.savePhrases(QStringLiteral("你好 ㄌㄚ-ㄈㄥ")), std::runtime_error);
+    QVERIFY_THROWS_EXCEPTION(std::runtime_error, store.savePhrases(QStringLiteral("你好 ㄌㄚ-ㄈㄥ")));
     QCOMPARE(store.loadPhrases(), saved);
     Backend backend(LLAVON_NATIVE_BACKEND, {"--state-dir", directory.path() + "/training", "--cli", LLAVON_TEST_CLI,
         "--tables-dir", QStringLiteral(LLAVON_TEST_TABLES)});
@@ -869,6 +869,7 @@ void NativeTests::settingsPresets() {
     QVERIFY(saved.value("tone_key_overwrites_previous").toBool());
     QVERIFY(saved.value("keep_invalid_reading").toBool());
     QVERIFY(saved.value("shift_backspace_removes_tone").toBool());
+    QCOMPARE(saved.value("punctuation_style").toString(), QStringLiteral("apple"));
     QCOMPARE(saved.value("candidate_layout").toString(), QStringLiteral("vertical"));
     QCOMPARE(saved.value("selection_keys").toString(), QStringLiteral("1234567890"));
     // Keyboard layout and runtime settings are outside every preset.

@@ -7,6 +7,7 @@ set -euo pipefail
 #                             (engine/tests/rawkey, including a service-backed
 #                             prediction test)
 # Host-free, so Linux and macOS run exactly the same suites.
+# LLAVON_IME_WARNINGS_AS_ERRORS=ON makes compiler warnings fail the build (CI).
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${LLAVON_IME_ENGINE_TEST_BUILD_DIR:-${ROOT_DIR}/build/engine-tests}"
@@ -37,6 +38,7 @@ cmake -S "${ROOT_DIR}/engine" -B "${BUILD_DIR}" \
     ${GENERATOR_ARGS[@]+"${GENERATOR_ARGS[@]}"} \
     ${TOOLCHAIN_ARGS[@]+"${TOOLCHAIN_ARGS[@]}"} \
     -DCMAKE_BUILD_TYPE=Release \
+    -DLLAVON_IME_WARNINGS_AS_ERRORS="${LLAVON_IME_WARNINGS_AS_ERRORS:-OFF}" \
     -DLLAVON_IME_ENGINE_BUILD_TESTS=ON
 cmake --build "${BUILD_DIR}" --target llavon_ime_tests llavon_ime_rawkey_tests --parallel
 

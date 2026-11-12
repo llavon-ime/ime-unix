@@ -135,6 +135,9 @@ const std::vector<ConfigField>& config_fields() {
                       &Config::keep_invalid_reading),
         boolean_field("shift_backspace_removes_tone", "ShiftBackSpaceRemovesTone", "Shift+退格鍵移除前一字的聲調",
                       "輸入行為", &Config::shift_backspace_removes_tone),
+        choice_field("punctuation_style", "PunctuationStyle", "標點符號樣式", "輸入行為",
+                     &Config::punctuation_style,
+                     {{"chewing", "新酷音", {}}, {"apple", "蘋果注音", {"macos"}}}),
         boolean_field("smart_english", "SmartEnglish", "智慧型中英文", "輸入行為", &Config::smart_english),
         // The memory probe helper is Linux-only (process_vm_readv), so the
         // option is only offered where it can actually work.
@@ -270,7 +273,7 @@ const std::vector<ConfigPreset>& config_presets() {
              {"caps_lock_inputs_bopomofo", true},
              {"shift_letter_keys", "directly_output_uppercase"s},
          }},
-        {"apple", "蘋果注音", "接近 macOS 內建注音：直式候選窗、聲調鍵修改前一字、保留組不出字的注音、Esc 送出。",
+        {"apple", "蘋果注音", "接近 macOS 內建注音：直式候選窗、聲調鍵修改前一字、保留組不出字的注音、Esc 送出、蘋果的標點符號。",
          {
              {"selection_key_count", 9},
              {"candidate_page_size", 9},
@@ -281,6 +284,7 @@ const std::vector<ConfigPreset>& config_presets() {
              {"tone_key_overwrites_previous", true},
              {"keep_invalid_reading", true},
              {"shift_backspace_removes_tone", true},
+             {"punctuation_style", "apple"s},
              {"caps_lock_inputs_bopomofo", true},
              {"shift_letter_keys", "directly_output_uppercase"s},
          }},
@@ -315,6 +319,7 @@ const std::vector<std::string>& config_preset_field_keys() {
         "tone_key_overwrites_previous",
         "keep_invalid_reading",
         "shift_backspace_removes_tone",
+        "punctuation_style",
     };
     return keys;
 }

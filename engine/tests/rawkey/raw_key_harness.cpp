@@ -419,6 +419,8 @@ void Harness::set_config(std::string_view path, std::string_view value) {
         updated.shift_backspace_removes_tone = on;
     } else if (path == "KeepInvalidReading") {
         updated.keep_invalid_reading = on;
+    } else if (path == "PunctuationStyle") {
+        updated.punctuation_style = value == "apple" || value == "蘋果注音" ? "apple" : "chewing";
     } else {
         fail((std::string("unmapped config path: ") + std::string(path)).c_str(), __FILE__, __LINE__);
     }

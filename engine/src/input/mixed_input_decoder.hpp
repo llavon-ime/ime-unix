@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "bopomofo/keymap.hpp"
+#include "input/punctuation.hpp"
 
 namespace llavon::ime {
 
@@ -60,6 +61,10 @@ struct MixedDecodeContext {
     std::u16string_view preceding_text = {};
     MixedInputOrigin pending_origin = MixedInputOrigin::Standalone;
     const MixedPath* previous_preview = nullptr;
+    // Marks for sentence punctuation after Chinese, and which side the next
+    // alternating quote starts on.
+    PunctuationStyle punctuation_style = PunctuationStyle::Chewing;
+    QuoteAlternation quotes = {};
 };
 
 struct MixedDecodeResult {

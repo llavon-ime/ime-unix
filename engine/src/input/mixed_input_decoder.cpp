@@ -123,12 +123,28 @@ std::u16string render_segment(const MixedSegment& segment) {
 // Full-width sentence punctuation for a Shift punctuation key typed right
 // after Chinese. Keys that are phonetic keys on this layout never convert,
 // and symbols that commonly belong to ASCII syntax (@ # $ _ = + ~ ...) stay.
-std::optional<char16_t> sentence_punctuation(char16_t key, BopomofoKeyboardLayout layout) {
+std::optional<char16_t> sentence_punctuation(char16_t key, BopomofoKeyboardLayout layout,
+                                             PunctuationStyle style) {
     if (std::u16string_view(u"<>':\"!?[]{}()").find(key) == std::u16string_view::npos) return std::nullopt;
     if (lookup_bopomofo_key(key, layout, false)) return std::nullopt;
-    const auto mapped = lookup_chewing_punctuation_key(key);
+    const auto mapped = punctuation_for_ascii(key, style);
     if (!mapped || *mapped > 0xFFFF) return std::nullopt;
     return static_cast<char16_t>(*mapped);
+}
+
+// The side of an alternating quote on one path: the last quote of the same
+// kind already on the path decides, otherwise the input context's state.
+template <typename Link>
+char16_t alternate_quote(char16_t mark, const std::shared_ptr<Link>& path, QuoteAlternation quotes) {
+    if (mark != u'‘' && mark != u'“') return mark;
+    const char16_t close = mark == u'‘' ? u'’' : u'”';
+    for (auto link = path; link; link = link->prev) {
+        const auto& text = link->segment.text;
+        if (text.size() == 1 && (text.front() == mark || text.front() == close)) {
+            return text.front() == mark ? close : mark;
+        }
+    }
+    return static_cast<char16_t>(quotes.take(mark));
 }
 
 }  // namespace
@@ -782,7 +798,7 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
     const auto ascii_after_separator = [&](const MixedSegment& next) {
         return next.kind == MixedSegmentKind::Latin || next.kind == MixedSegmentKind::Number ||
             (next.kind == MixedSegmentKind::Symbol && next.raw.size() == 1 && next.raw != u" " &&
-             !sentence_punctuation(next.raw.front(), layout));
+             !sentence_punctuation(next.raw.front(), layout, context.punctuation_style));
     };
     const auto extend = [&](const Entry& entry, MixedSegment segment, size_t candidate,
                             bool lexical_word, bool ordinal_prior, bool recovery_piece = false,
@@ -910,7 +926,9 @@ MixedDecodeResult MixedInputDecoder::decode(std::u16string_view raw, BopomofoKey
                 previous = previous->prev;
             }
             if (previous && previous->segment.kind == MixedSegmentKind::Bopomofo) {
-                if (const auto mark = sentence_punctuation(segment.raw.front(), layout)) segment.text.assign(1, *mark);
+                if (const auto mark = sentence_punctuation(segment.raw.front(), layout, context.punctuation_style)) {
+                    segment.text.assign(1, alternate_quote(*mark, entry.path, context.quotes));
+                }
             }
         }
         std::u16string rendered = entry.path ? entry.path->rendered : std::u16string();

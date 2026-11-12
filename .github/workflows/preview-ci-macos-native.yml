@@ -64,6 +64,8 @@ jobs:
           ccache --zero-stats
 
       - name: Run the engine and raw-key test suites
+        env:
+          LLAVON_IME_WARNINGS_AS_ERRORS: "ON"
         run: scripts/verify-engine-tests.sh
 
       - name: Verify update feed signatures and installation gating
@@ -82,6 +84,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_MANIFEST_FEATURES=llama-metal \
+            -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
             -DIME_UNIX_SERVICE_BUILD_TESTS=ON
           cmake --build build/ime-unix-service-macos-ci --parallel 4
           ctest --test-dir build/ime-unix-service-macos-ci --output-on-failure --timeout 60
