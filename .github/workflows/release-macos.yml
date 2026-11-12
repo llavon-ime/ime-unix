@@ -67,6 +67,17 @@ jobs:
           lfs: true
           fetch-depth: 0
 
+      - name: Cache vcpkg and Sparkle downloads
+        uses: ./.github/actions/vcpkg-cache
+        with:
+          downloads-key: release
+
+      - name: Cache Sparkle release archive
+        uses: actions/cache@v4
+        with:
+          path: build/Sparkle-*.tar.xz
+          key: ${{ runner.os }}-sparkle-${{ hashFiles('macos/scripts/sparkle-config.sh') }}
+
       - name: Resolve version
         id: version
         run: |

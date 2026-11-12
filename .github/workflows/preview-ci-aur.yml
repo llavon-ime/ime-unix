@@ -60,6 +60,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 
+      - name: Cache vcpkg tool and downloads
+        uses: ./.github/actions/vcpkg-cache
+        with:
+          downloads-key: ci
+
       - name: Bootstrap vcpkg
         run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 

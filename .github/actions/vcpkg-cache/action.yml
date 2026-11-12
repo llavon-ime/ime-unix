@@ -1,0 +1,56 @@
+name: Cache vcpkg tool and downloads
+description: >
+  Keep the vcpkg executable and the archives vcpkg downloads next to the binary
+  cache, so a GitHub CDN outage does not stop every job that builds with vcpkg.
+
+inputs:
+  downloads-key:
+    description: >
+      Suffix that separates the downloads cache of jobs with different
+      manifests, for example ci or release. All jobs on one OS share the prefix.
+    required: false
+    default: ci
+
+runs:
+  using: composite
+  steps:
+    # Every script skips bootstrap-vcpkg.sh when vcpkg/vcpkg exists. Restoring
+    # it skips the one download vcpkg cannot take from its binary cache; the
+    # key changes together with the pinned tool release.
+    - name: Restore the vcpkg executable
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          vcpkg/vcpkg
+          vcpkg/vcpkg.disable-metrics
+        key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-tool-${{ hashFiles('vcpkg/scripts/vcpkg-tool-metadata.txt') }}
+
+    # vcpkg keeps fetched source archives and prebuilt tools in vcpkg/downloads.
+    # Restore the newest entry for this platform and let vcpkg fill any gaps.
+    - name: Restore vcpkg downloads
+      uses: actions/cache/restore@v4
+      with:
+        path: vcpkg/downloads
+        key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-downloads-${{ inputs.downloads-key }}-${{ hashFiles('vcpkg/scripts/vcpkg-tool-metadata.txt', 'vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-vcpkg-downloads-${{ inputs.downloads-key }}-
+          ${{ runner.os }}-${{ runner.arch }}-vcpkg-downloads-
+
+    # Only save the executable after the job succeeded, so a build that stops
+    # right after bootstrap cannot store a broken tool. The downloads are
+    # checksum-verified archives, so a failed later step may still keep them.
+    - name: Save the vcpkg executable
+      if: success()
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          vcpkg/vcpkg
+          vcpkg/vcpkg.disable-metrics
+        key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-tool-${{ hashFiles('vcpkg/scripts/vcpkg-tool-metadata.txt') }}
+
+    - name: Save vcpkg downloads
+      if: success() || failure()
+      uses: actions/cache/save@v4
+      with:
+        path: vcpkg/downloads
+        key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-downloads-${{ inputs.downloads-key }}-${{ hashFiles('vcpkg/scripts/vcpkg-tool-metadata.txt', 'vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json') }}

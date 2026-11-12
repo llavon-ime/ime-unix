@@ -1,4 +1,4 @@
-Linux Fcitx5 與 macOS 前端共用 `engine/` 的輸入行為；架構見 `README.md`，發布與 tag 遵循 `RELEASING.md`。
+Linux Fcitx5 與 macOS 前端共用 `engine/` 的輸入行為；架構見 `README.md`，發布與 tag 遵循 `RELEASING.md`。回覆與 commit message 使用繁體中文（既有英文 commit message 維持原樣）；產品名、API、檔名與必要技術名詞保留原文。
 
 ## 驗證
 - 全部 engine 測試：`scripts/verify-engine-tests.sh`；單一 suite：`build/engine-tests/tests/llavon_ime_rawkey_tests "名稱片段"`。其他元件的指令見 `.github/workflows/`。

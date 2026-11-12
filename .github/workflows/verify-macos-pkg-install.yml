@@ -4,13 +4,16 @@ on:
   push:
     branches:
       - main
+      - preview
     paths:
+      - ".github/actions/**"
       - ".github/workflows/verify-macos-pkg-install.yml"
       - "macos/**"
       - "packaging/macos/**"
       - "scripts/package-macos.sh"
   pull_request:
     paths:
+      - ".github/actions/**"
       - ".github/workflows/verify-macos-pkg-install.yml"
       - "macos/**"
       - "packaging/macos/**"
@@ -42,6 +45,11 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-native-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
+
+      - name: Cache vcpkg tool and downloads
+        uses: ./.github/actions/vcpkg-cache
+        with:
+          downloads-key: ci
 
       - name: Install build prerequisites
         run: brew install pkg-config

@@ -75,6 +75,11 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Cache vcpkg tool and downloads
+        uses: ./.github/actions/vcpkg-cache
+        with:
+          downloads-key: release
+
       - name: Trust container checkout
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
@@ -112,18 +117,32 @@ jobs:
       # Keep tagged builds reproducible without changing the released source.
       # The official tarball is verified against its published SHA-256 and
       # unpacked under /tmp, so the build needs no package manager or Python.
+      - name: Restore pinned package-build CMake
+        id: cmake-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/cmake-4.4.3
+          key: ${{ runner.os }}-cmake-4.4.3-linux-x86_64
       - name: Install pinned package-build CMake
         env:
           CMAKE_TOOL_SHA256: "d6c83076c575bc00b823522ac974bda66d0af05d6ddc30e739c12385cf32c6cc"
         run: |
           set -euo pipefail
-          archive=/tmp/cmake-4.4.3-linux-x86_64.tar.gz
-          curl --fail --location --retry 3 --output "${archive}" \
-            "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz"
-          echo "${CMAKE_TOOL_SHA256}  ${archive}" | sha256sum --check -
-          mkdir -p /tmp/cmake-4.4.3
-          tar -xzf "${archive}" -C /tmp/cmake-4.4.3 --strip-components=1
+          if [[ "${{ steps.cmake-cache.outputs.cache-hit }}" != "true" ]]; then
+            archive=/tmp/cmake-4.4.3-linux-x86_64.tar.gz
+            curl --fail --location --retry 3 --output "${archive}" \
+              "https://github.com/Kitware/CMake/releases/download/v4.4.3/cmake-4.4.3-linux-x86_64.tar.gz"
+            echo "${CMAKE_TOOL_SHA256}  ${archive}" | sha256sum --check -
+            mkdir -p /tmp/cmake-4.4.3
+            tar -xzf "${archive}" -C /tmp/cmake-4.4.3 --strip-components=1
+          fi
           echo /tmp/cmake-4.4.3/bin >> "${GITHUB_PATH}"
+      - name: Save pinned package-build CMake
+        if: (success() || failure()) && steps.cmake-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/cmake-4.4.3
+          key: ${{ runner.os }}-cmake-4.4.3-linux-x86_64
 
       - name: Cache vcpkg binary cache
         uses: actions/cache@v4

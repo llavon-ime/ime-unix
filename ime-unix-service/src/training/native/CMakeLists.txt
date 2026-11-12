@@ -149,21 +149,39 @@ if(APPLE)
         set_source_files_properties("${localized_name}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/${language}.lproj")
         target_sources(llavon-ime-lora-gui PRIVATE "${localized_name}")
     endforeach()
-    install(TARGETS llavon-ime-lora-gui BUNDLE DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    # Build the bundle in a staging directory beside the installed one, then
+    # rename it into place. Deploying in place leaves the Qt frameworks
+    # rewritten but unsigned until the final codesign, and a manager that
+    # relaunches itself in that window is killed by the code-signing check.
+    set(lora_gui_stage "${CMAKE_INSTALL_BINDIR}/.llavon-ime-lora-gui.staging")
+    install(CODE "file(REMOVE_RECURSE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${lora_gui_stage}\")")
+    install(TARGETS llavon-ime-lora-gui BUNDLE DESTINATION "${lora_gui_stage}")
     install(CODE "
         set(launcher \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/llavon-ime-lora-gui\")
         file(REMOVE \"\${launcher}\")
     ")
     install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/llavon-ime-lora-gui" DESTINATION "${CMAKE_INSTALL_BINDIR}")
     qt_generate_deploy_script(TARGET llavon-ime-lora-gui OUTPUT_SCRIPT deploy_script
-        CONTENT "qt_deploy_runtime_dependencies(EXECUTABLE \"${CMAKE_INSTALL_BINDIR}/llavon-ime-lora-gui.app\")")
+        CONTENT "qt_deploy_runtime_dependencies(EXECUTABLE \"${lora_gui_stage}/llavon-ime-lora-gui.app\")")
     install(SCRIPT "${deploy_script}")
     # macdeployqt rewrites third-party dylib install names. Re-sign the complete
     # bundle after those edits; release packaging replaces this ad-hoc identity.
+    # A running manager keeps its mapped files after the rename, and the next
+    # launch only ever finds a complete, signed bundle.
     install(CODE "
+        set(llavon_gui_stage \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${lora_gui_stage}\")
+        set(llavon_gui_bundle \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/llavon-ime-lora-gui.app\")
         execute_process(COMMAND /usr/bin/codesign --force --deep --timestamp=none --sign -
-            \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/llavon-ime-lora-gui.app\"
+            \"\${llavon_gui_stage}/llavon-ime-lora-gui.app\"
             COMMAND_ERROR_IS_FATAL ANY)
+        execute_process(COMMAND /usr/bin/codesign --verify --deep --strict
+            \"\${llavon_gui_stage}/llavon-ime-lora-gui.app\"
+            COMMAND_ERROR_IS_FATAL ANY)
+        if(EXISTS \"\${llavon_gui_bundle}\" OR IS_SYMLINK \"\${llavon_gui_bundle}\")
+            file(RENAME \"\${llavon_gui_bundle}\" \"\${llavon_gui_stage}/retired.app\")
+        endif()
+        file(RENAME \"\${llavon_gui_stage}/llavon-ime-lora-gui.app\" \"\${llavon_gui_bundle}\")
+        file(REMOVE_RECURSE \"\${llavon_gui_stage}\")
     ")
 else()
     install(TARGETS llavon-ime-lora-gui RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

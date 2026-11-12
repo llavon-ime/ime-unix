@@ -100,11 +100,11 @@ git diff --submodule=log "${previous_tag}..HEAD"
 
 ## 五、建立並推送 tag
 
-取得最終確認後，以完整 release notes 建立 annotated tag。建議使用 heredoc，避免 shell quoting 改變換行或標點：
+取得最終確認後，以完整 release notes 建立 annotated tag。務必加上 `--cleanup=whitespace`：git 預設會把 `#` 開頭的行當註解刪掉，release notes 的 `### 改善` 這類標題會整行消失，只剩段落文字。建議使用 heredoc，避免 shell quoting 改變換行或標點：
 
 ```sh
 version="0.9.10"
-git tag -a "v${version}" -F - <<'NOTES'
+git tag -a --cleanup=whitespace "v${version}" -F - <<'NOTES'
 改善 macOS 自動更新與輸入來源管理。
 
 ### 改善
@@ -117,11 +117,12 @@ git tag -a "v${version}" -F - <<'NOTES'
 NOTES
 ```
 
-推送前再次驗證 tag 類型、目標與摘要：
+推送前再次驗證 tag 類型、目標、標題與摘要（標題數量要等於 notes 裡的段數）：
 
 ```sh
 test "$(git cat-file -t "refs/tags/v${version}")" = tag
 test "$(git rev-parse "refs/tags/v${version}^{commit}")" = "$(git rev-parse HEAD)"
+git tag -l --format='%(contents)' "v${version}" | grep -c '^###'
 python3 scripts/tag-release-notes.py \
   --tag "v${version}" \
   --output "${TMPDIR:-/tmp}/llavon-release-notes.md"
