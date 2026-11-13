@@ -33,6 +33,15 @@ namespace {
 // caret. Long enough to be unique, short enough to survive scrolling.
 constexpr std::size_t kMemoryCommitHistoryUnits = 32;
 
+// Messages that have left the field (a chat client clears it on send) keep
+// feeding the model. On posts newer than the model, accuracy rises with up to
+// about 200 units of earlier messages and then levels off.
+constexpr std::size_t kSentHistoryUnits = 200;
+// ime-core keeps a sliding window of at most 320 tokens and cuts it back to
+// about 128 when it overflows. History plus the field stays below that, so the
+// injected messages are not cut away again on the next prediction.
+constexpr std::size_t kInjectedContextUnits = 300;
+
 // True when the client itself gives the caret context, so the memory probe has
 // nothing to add and must not write anything.
 bool client_reports_text(Host& host, ContextId context) {
@@ -114,7 +123,8 @@ Engine::Engine(EngineOptions options, Host& host)
       config_(options_.config),
       on_training_commit_(options_.on_training_commit),
       on_training_discard_(options_.on_training_discard),
-      correction_window_(options_.commit_correction_window) {
+      correction_window_(options_.commit_correction_window),
+      sent_message_window_(options_.sent_message_context_window) {
     processor_.set_state_observer([this](InputStateKind previous, InputStateKind next) {
         if (previous == InputStateKind::Empty && next == InputStateKind::Inputting) {
             // Samples published from here on may contain this composition's
@@ -159,6 +169,7 @@ void Engine::detach(ContextId context) {
     sessions_.erase(it);
     context_lifetimes_.erase(context);
     if (recent_commit_ && recent_commit_->context == context) recent_commit_.reset();
+    sent_history_.erase(context);
     if (memory_probe_context_ == context) memory_probe_context_ = 0;
 }
 
@@ -377,6 +388,7 @@ void Engine::apply_effect(ContextId context, InputSession& session, const InputE
         // password and enabled encrypted collection.
         const bool allow_training = effect.training_sample && !host_.is_sensitive(context);
         host_.commit(context, effect.commit);
+        if (!host_.is_sensitive(context)) remember_sent_message(context, effect.commit);
         // The committed text lands in the client's document; clients that do
         // not draw the composition itself (Konsole, VTE) can still be located
         // through it on the next composition. Keep a bounded tail.
@@ -487,6 +499,62 @@ void Engine::update_pending_model(ContextId context) {
     it->second->on_input();
 }
 
+void Engine::remember_sent_message(ContextId context, std::u16string_view committed) {
+    if (committed.empty()) return;
+    const auto now = std::chrono::steady_clock::now();
+    const auto program = host_.program(context);
+    auto& history = sent_history_[context];
+    if (history.program != program || now - history.recorded_at > sent_message_window_) {
+        history = SentHistory{};
+        history.program = program;
+    }
+    history.draft.emplace_back(committed);
+    history.recorded_at = now;
+    // A field that never empties (a document) would otherwise grow without
+    // bound; only the tail can ever become history.
+    std::size_t units = 0;
+    for (const auto& commit : history.draft) units += commit.size();
+    while (units > kSentHistoryUnits && history.draft.size() > 1) {
+        units -= history.draft.front().size();
+        history.draft.erase(history.draft.begin());
+    }
+}
+
+void Engine::inject_sent_history(ContextId context, InputSession& session, std::size_t limit) {
+    const auto it = sent_history_.find(context);
+    if (it == sent_history_.end()) return;
+    auto& history = it->second;
+    if (history.program != host_.program(context) ||
+        std::chrono::steady_clock::now() - history.recorded_at > sent_message_window_) {
+        sent_history_.erase(it);
+        return;
+    }
+    // No source sees text in front of the caret: what was committed has left
+    // the field (a chat client cleared it on send), or nothing can tell. Either
+    // way it is a finished message now.
+    if (session.context_text.empty() && !history.draft.empty()) {
+        for (const auto& commit : history.draft) history.sent.append(commit);
+        // The reply starts a new line. Without the break the model reads it as
+        // the message's continuation, which is what lets an unrelated earlier
+        // message pull the reply off course.
+        history.sent.push_back(u'\n');
+        history.draft.clear();
+        if (history.sent.size() > kSentHistoryUnits) history.sent = utf16_tail(history.sent, kSentHistoryUnits);
+    }
+    if (history.sent.empty()) return;
+
+    // The field's own text always wins; history only fills what is left.
+    const std::size_t budget = std::min(limit, kInjectedContextUnits);
+    const std::size_t field = session.context_text.size();
+    if (field + 1 >= budget) return;
+    auto text = utf16_tail(history.sent, std::min(kSentHistoryUnits, budget - field));
+    if (text.empty()) return;
+    text.append(session.context_text);
+    session.context_text = std::move(text);
+    if (session.context_source == ContextSource::None) session.context_source = ContextSource::SentMessage;
+    log_context("sent-history", session.context_text);
+}
+
 void Engine::remember_recent_commit(ContextId context, const protocol::SessionId& event_id,
                                     std::u16string_view committed_tail, std::uint64_t accessibility_sequence) {
     recent_commit_ = RecentCommit{context, event_id, std::chrono::steady_clock::now(),
@@ -520,6 +588,19 @@ void Engine::withdraw_recent_commit(ContextId context) {
     }
     if (on_training_discard_) on_training_discard_(pending.event_id);
     else transport_.discard_commit(pending.event_id);
+    // The user is correcting what was just committed, so it must not stand in
+    // as context for the replacement.
+    if (const auto it = sent_history_.find(context); it != sent_history_.end()) {
+        auto& history = it->second;
+        if (!history.draft.empty()) {
+            history.draft.pop_back();
+        } else if (!history.sent.empty()) {
+            // Already a finished message: drop that whole last line.
+            history.sent.pop_back();
+            const auto line = history.sent.rfind(u'\n');
+            history.sent.erase(line == std::u16string::npos ? 0 : line + 1);
+        }
+    }
 }
 
 bool Engine::should_probe_memory(ContextId context, const InputSession& session) const {
@@ -664,14 +745,18 @@ void Engine::close_prediction_session(InputSession& session) {
 }
 
 void Engine::resync_context(ContextId context, InputSession& session) {
-    // Context is read fresh from the current source for every prediction; it
-    // is never accumulated or reused across requests.
+    // The field's context is read fresh from the current source for every
+    // prediction; only messages that have left the field are carried over.
     session.context_text.clear();
     session.context_source = ContextSource::None;
     if (host_.is_sensitive(context)) return;
 
     const std::size_t limit = config_.context_length > 0 ? static_cast<std::size_t>(config_.context_length) : 0;
+    read_field_context(context, session, limit);
+    inject_sent_history(context, session, limit);
+}
 
+void Engine::read_field_context(ContextId context, InputSession& session, std::size_t limit) {
     // Some clients report an empty (but valid) document, notably Electron,
     // Chromium and terminals. An empty client prefix must not shadow the
     // accessibility sample, which may still hold the focused widget's text.

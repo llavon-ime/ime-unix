@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "config/config.hpp"
 #include "context/accessibility_context.hpp"
@@ -52,6 +53,10 @@ struct EngineOptions {
     // How long an immediate Backspace may still withdraw the last commit. The
     // service stages commits for the same span; tests shorten it.
     std::chrono::milliseconds commit_correction_window{kCommitCorrectionWindow};
+    // How long messages the user sent keep feeding the field's context after
+    // the last commit. Tests shorten it; production keeps a conversation-sized
+    // span so a later, unrelated conversation does not inherit them.
+    std::chrono::seconds sent_message_context_window{std::chrono::minutes{10}};
 };
 
 // Host-agnostic input method engine: owns the per-context sessions, routes
@@ -160,6 +165,7 @@ private:
     std::function<void(const InputEffect::CommitSample&, std::u16string_view)> on_training_commit_;
     std::function<void(const protocol::SessionId&)> on_training_discard_;
     std::chrono::milliseconds correction_window_{kCommitCorrectionWindow};
+    std::chrono::seconds sent_message_window_{std::chrono::minutes{10}};
     // The commit an immediate Backspace could still withdraw.
     struct RecentCommit {
         ContextId context = 0;
@@ -187,6 +193,26 @@ private:
     // there, so the probe can locate the caret with it. Cleared whenever the
     // caret may have moved without a commit (forwarded key, focus change).
     std::u16string memory_commit_history_;
+
+    // What this program committed through the IME, per input context. Chat
+    // clients clear the field when a message is sent, which would otherwise
+    // leave the model with only the message being written. Finished messages
+    // stay in front of the field's own context until the window passes or the
+    // program changes.
+    struct SentHistory {
+        std::string program;
+        // Messages that have left the field, oldest first; each ends in a
+        // line break.
+        std::u16string sent;
+        // Commits since the field was last seen empty: the message being
+        // written, still part of the field's own text.
+        std::vector<std::u16string> draft;
+        std::chrono::steady_clock::time_point recorded_at{};
+    };
+    std::unordered_map<ContextId, SentHistory> sent_history_;
+    void remember_sent_message(ContextId context, std::u16string_view committed);
+    void read_field_context(ContextId context, InputSession& session, std::size_t limit);
+    void inject_sent_history(ContextId context, InputSession& session, std::size_t limit);
 };
 
 }  // namespace llavon::ime

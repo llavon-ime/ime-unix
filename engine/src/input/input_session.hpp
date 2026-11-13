@@ -50,7 +50,7 @@ struct PendingInputProvenance {
 
 // Where the last resolved context came from. The memory probe is only worth
 // its writes when nothing else produced text.
-enum class ContextSource : std::uint8_t { None, Client, Accessibility, Memory };
+enum class ContextSource : std::uint8_t { None, Client, Accessibility, Memory, SentMessage };
 
 // Per-input-context editing state. The engine swaps the whole object in and
 // out of the active input context, so every field always travels together.

@@ -75,6 +75,7 @@ set(LLAVON_IME_RAWKEY_TEST_SOURCES
     rawkey/native_terminal_commit_control_tests.cpp
     rawkey/phrase_override_tests.cpp
     rawkey/prediction_integration_tests.cpp
+    rawkey/sent_message_tests.cpp
     rawkey/service_resilience_tests.cpp
     rawkey/vulkan_pipeline_cache_tests.cpp
     rawkey/live_mixed_model_tests.cpp
