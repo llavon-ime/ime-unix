@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - preview
     paths:
       - ".github/actions/**"
       - ".github/workflows/verify-macos-pkg-install.yml"

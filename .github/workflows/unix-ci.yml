@@ -1,0 +1,113 @@
+name: Unix CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unix-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-service:
+    name: Build and test Unix service
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout ime-unix
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            autoconf autoconf-archive automake libtool \
+            cmake \
+            curl \
+            dbus python3 \
+            ninja-build \
+            libsqlite3-dev \
+            qt6-base-dev qt6-base-dev-tools \
+            pkg-config \
+            tar \
+            unzip \
+            zip
+
+      - name: Cache vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-vcpkg-
+
+      - name: Cache vcpkg tool and downloads
+        uses: ./.github/actions/vcpkg-cache
+        with:
+          downloads-key: ci
+
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Build and test
+        run: |
+          set -euo pipefail
+          cmake -S ime-unix-service -B build/ime-unix-service -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
+            -DIME_UNIX_SERVICE_BUILD_TESTS=ON
+          cmake --build build/ime-unix-service
+          ctest --test-dir build/ime-unix-service --output-on-failure
+
+  build-addon:
+    name: Build and test Fcitx5 addon
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm cmake fcitx5 git ninja nlohmann-json pkgconf
+
+      - name: Checkout ime-unix
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build and test
+        run: |
+          set -euo pipefail
+          cmake -S fcitx5 -B build/fcitx5 -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
+            -DLLAVON_IME_BUILD_TESTS=ON
+          cmake --build build/fcitx5
+          ctest --test-dir build/fcitx5 --output-on-failure
+
+      - name: Build and test memory helper with strict warnings
+        run: |
+          set -euo pipefail
+          for debug in OFF ON; do
+            build_dir="build/memscan-${debug}"
+            cmake -S memscan -B "${build_dir}" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLAVON_IME_DEBUG="${debug}" \
+              -DLLAVON_IME_WARNINGS_AS_ERRORS=ON \
+              -DLLAVON_IME_MEMSCAN_BUILD_TESTS=ON
+            cmake --build "${build_dir}"
+            ctest --test-dir "${build_dir}" --output-on-failure
+          done

@@ -15,7 +15,7 @@ Linux Fcitx5 與 macOS 前端共用 `engine/` 的輸入行為；架構見 `READM
 - 未經同意就跑會安裝輸入法的腳本（`scripts/build-linux.sh`、`scripts/build-macos*.sh`、`macos/scripts/build-native-app.sh --install`）、新增相依、改使用者資料或 IPC 格式、改 `ime-core/` 或 submodule 指標。
 
 ## Git
-- 只有使用者要求時才 commit、push、建 tag、amend 已推送的提交或 force push；push 到 `preview`／`main` 會自動發布 AUR。
+- 只有使用者要求時才 commit、push、建 tag、amend 已推送的提交或 force push；push 到 `main` 會自動發布 AUR。
 - 只提交指定範圍內的正式程式碼、建置／CI 設定、必要資源與回歸測試。`docs/`、臨時研究、一次性腳本、實驗資料、測試輸出、截圖、日誌與本機設定不提交；依用途判斷，不看檔名。
 - 保留其他 session 的修改；用明確路徑暫存，不用 `git add .`、`-A`、`commit -a`。commit 前看 `git diff --cached` 與 `--check`。
 - 驗證實際要提交的版本；工作區有範圍外修改（含 `M ime-core`）時用乾淨 worktree。

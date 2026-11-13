@@ -1,7 +1,7 @@
 name: Verify Linux app-managed updates
 on:
   push:
-    branches: [main, preview]
+    branches: [main]
     paths:
       - '.github/actions/**'
       - 'engine/**'

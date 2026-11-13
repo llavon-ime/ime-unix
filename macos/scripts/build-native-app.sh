@@ -69,8 +69,8 @@ fi
 prepare_sparkle
 
 if [[ -z "${VERSION}" ]]; then
-    # Prefer the highest release tag: the squashed main/preview branches do not
-    # have the newest tags in their history, so git describe would report an
+    # Prefer the highest release tag: a squashed main branch does not always
+    # have the newest tags in its history, so git describe would report an
     # old version.
     VERSION="$(git -C "${ROOT_DIR}" tag --sort=-v:refname 2>/dev/null | head -1 | sed 's/^v//' || true)"
     if [[ -z "${VERSION}" ]]; then

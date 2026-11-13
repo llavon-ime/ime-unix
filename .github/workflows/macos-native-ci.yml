@@ -3,11 +3,9 @@ name: Native macOS CI
 on:
   push:
     branches:
-      - preview
       - main
   pull_request:
     branches:
-      - preview
       - main
   workflow_dispatch:
 
@@ -15,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: preview-native-macos-${{ github.workflow }}-${{ github.ref }}
+  group: native-macos-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
