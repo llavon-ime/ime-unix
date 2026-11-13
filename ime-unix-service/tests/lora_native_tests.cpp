@@ -10,6 +10,8 @@
 #include "guide_illustration.hpp"
 #include "setup_wizard.hpp"
 #include <QWheelEvent>
+#include <QScopeGuard>
+#include <unistd.h>
 #include <QAbstractItemView>
 #include <QVBoxLayout>
 #include <QScrollBar>
@@ -77,6 +79,7 @@ private slots:
     void settingsWithoutTrainingBackend();
     void deferredSettingGroups();
     void settingsPresets();
+    void settingsAutosaveFailure();
     void setupWizard();
     void lookSwitching();
     void guideIllustrations();
@@ -950,6 +953,32 @@ void NativeTests::settingsPresets() {
     QVERIFY(!page.isDirty());
 }
 
+void NativeTests::settingsAutosaveFailure() {
+    if (::geteuid() == 0) QSKIP("root writes into read-only directories");
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    { llavon::lora::SettingsStore store; store.save(store.load()); }
+    const auto folder = QFileInfo(llavon::lora::SettingsStore::configPath()).absolutePath();
+    const auto writable = QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner;
+    const auto restore = qScopeGuard([folder, writable] { QFile::setPermissions(folder, writable); });
+    llavon::lora::SettingsPage page(false); page.show();
+    auto* smart = page.findChild<QCheckBox*>("setting_smart_english"); QVERIFY(smart);
+    const bool before = smart->isChecked();
+    QVERIFY(QFile::setPermissions(folder, QFile::ReadOwner | QFile::ExeOwner));
+    smart->click(); page.flushPending();
+    // A failed automatic save stays unsaved instead of silently disappearing.
+    QVERIFY(page.isDirty());
+    QVERIFY(page.findChild<QPushButton*>("saveSettings")->isEnabled());
+    QVERIFY(page.findChild<QLabel*>("settingsStatus")->text().startsWith(QStringLiteral("尚未儲存")));
+    QCOMPARE(smart->isChecked(), !before);
+    QCOMPARE(llavon::lora::SettingsStore().load().value("smart_english").toBool(), before);
+    // Once the file can be written again, saving keeps the edit.
+    QVERIFY(QFile::setPermissions(folder, writable));
+    QTest::mouseClick(page.findChild<QPushButton*>("saveSettings"), Qt::LeftButton);
+    QVERIFY(!page.isDirty());
+    QCOMPARE(llavon::lora::SettingsStore().load().value("smart_english").toBool(), !before);
+}
+
 void NativeTests::setupWizard() {
     QTemporaryDir directory; QVERIFY(directory.isValid());
     Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
@@ -987,6 +1016,19 @@ void NativeTests::setupWizard() {
         QCOMPARE(preview->symbol('b'), QStringLiteral("ㄅ"));
         QVERIFY(widget<QLabel>(window, "setupLayoutNote")->text().contains(QStringLiteral("多個注音")));
         widget<QRadioButton>(window, "setupLayout_standard")->click();
+        QCOMPARE(SettingsStore().load().value("keyboard_layout").toString(), QStringLiteral("standard"));
+        // Arrow keys move the choice and save it like a click.
+        auto* standard = widget<QRadioButton>(window, "setupLayout_standard");
+        wizard->activateWindow(); QVERIFY(QTest::qWaitForWindowActive(wizard));
+        standard->setFocus(); QTRY_VERIFY(standard->hasFocus());
+        QTest::keyClick(standard, Qt::Key_Right);
+        QRadioButton* moved = nullptr;
+        for (auto* option : wizard->findChildren<QRadioButton*>())
+            if (option->objectName().startsWith(QStringLiteral("setupLayout_")) && option->isChecked()) moved = option;
+        QVERIFY(moved); QVERIFY(moved != standard);
+        QCOMPARE(SettingsStore().load().value("keyboard_layout").toString(), moved->property("value").toString());
+        QCOMPARE(widget<QComboBox>(window, "setting_keyboard_layout")->currentData().toString(), moved->property("value").toString());
+        standard->click();
         QCOMPARE(SettingsStore().load().value("keyboard_layout").toString(), QStringLiteral("standard"));
         for (const int width : {720, 620}) {
             wizard->resize(width, 640); QCoreApplication::processEvents();
@@ -1053,6 +1095,15 @@ void NativeTests::setupWizard() {
     Environment configured("XDG_CONFIG_HOME", (directory.path() + "/configured").toUtf8());
     QVERIFY(SetupWizard::shouldOffer());
     { SettingsStore store; store.save(store.load()); }
+    QVERIFY(!SetupWizard::shouldOffer());
+    // Settings kept only in the older JSON file count as set up too.
+    Environment legacy("XDG_CONFIG_HOME", (directory.path() + "/legacy").toUtf8());
+    QVERIFY(SetupWizard::shouldOffer());
+    {
+        const auto path = QString::fromStdString(llavon::ime::legacy_config_path().string());
+        QVERIFY(QDir().mkpath(QFileInfo(path).absolutePath()));
+        QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write("{}\n");
+    }
     QVERIFY(!SetupWizard::shouldOffer());
     // Skipping keeps the current settings and is not asked again.
     Environment skipped("XDG_CONFIG_HOME", (directory.path() + "/skipped").toUtf8());

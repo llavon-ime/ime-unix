@@ -5,6 +5,7 @@
 #include "settings.hpp"
 
 #include "bopomofo/keymap.hpp"
+#include "config/config.hpp"
 
 #include <QButtonGroup>
 #include <QFileInfo>
@@ -23,6 +24,7 @@
 #include <QStyle>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <filesystem>
 
 namespace llavon::lora {
 namespace {
@@ -172,7 +174,13 @@ void KeyboardPreview::paintEvent(QPaintEvent*) {
 }
 
 bool SetupWizard::shouldOffer() {
-    return !UiPreferences::seen() && !QFileInfo::exists(SettingsStore::configPath());
+    // Linux still reads the older JSON settings when there is no fcitx file,
+    // so either one means the input method was set up before.
+    const auto exists = [](const std::filesystem::path& path) {
+        return QFileInfo::exists(QString::fromStdString(path.string()));
+    };
+    return !UiPreferences::seen() && !exists(llavon::ime::config_path()) &&
+           !exists(llavon::ime::legacy_config_path());
 }
 
 SetupWizard::SetupWizard(SettingsPage* settings, QWidget* parent) : QDialog(parent), settings_(settings) {

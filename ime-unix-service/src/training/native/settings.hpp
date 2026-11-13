@@ -79,6 +79,9 @@ private:
     void showStatus(const QString& message);
     SettingsStore store_;
     bool phrases_, dirty_ = false, loading_ = false;
+    // An input setting that could not be saved automatically stays unsaved,
+    // so it is neither reloaded away nor reported as saved.
+    bool autoSaveFailed_ = false;
     QMap<QString, QWidget*> fields_;
     QMap<QString, QJsonArray> sectionFields_;
     QMap<QString, QVBoxLayout*> sectionLayouts_;

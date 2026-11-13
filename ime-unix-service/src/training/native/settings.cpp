@@ -551,13 +551,21 @@ void SettingsPage::autoSave() {
             store_.save(latest); target = latest;
             for (auto it = latest.constBegin(); it != latest.constEnd(); ++it)
                 if (!advancedKeys_.contains(it.key()) || current_.value(it.key()) == original_.value(it.key())) current_[it.key()] = it.value();
+            autoSaveFailed_ = false;
             original_ = target; fill(); changed();
             notifyHost(false);
             return;
         }
         original_ = target;
+        if (autoSaveFailed_) { autoSaveFailed_ = false; changed(); }
         notifyHost(false);
-    } catch (const std::exception& error) { showStatus(QString::fromUtf8(error.what())); }
+    } catch (const std::exception& error) {
+        // Keep the edit: "儲存並套用" retries it, and the page is not reloaded
+        // over it while it is unsaved.
+        autoSaveFailed_ = true;
+        setDirty(true);
+        showStatus(QStringLiteral("尚未儲存：%1").arg(QString::fromUtf8(error.what())));
+    }
 }
 
 bool SettingsPage::checkPhrases(bool explicitCheck) {
@@ -581,7 +589,10 @@ void SettingsPage::changed() {
     // Undoing an edit returns to the saved state instead of staying "unsaved".
     bool dirty = false;
     if (phrases_) dirty = phraseList_->text() != loadedPhrases_;
-    else for (const auto& key : advancedKeys_) dirty = dirty || current_.value(key) != original_.value(key);
+    else {
+        dirty = autoSaveFailed_;
+        for (const auto& key : advancedKeys_) dirty = dirty || current_.value(key) != original_.value(key);
+    }
     setDirty(dirty);
     showStatus(dirty_ ? QStringLiteral("尚未儲存") : QString());
 }
@@ -591,7 +602,7 @@ bool SettingsPage::reload() {
     bool loaded = true;
     try {
         if (phrases_) { phraseList_->loadText(store_.loadPhrases()); loadedPhrases_ = phraseList_->text(); }
-        else { original_ = store_.load(); current_ = original_; fill(); }
+        else { original_ = store_.load(); current_ = original_; fill(); autoSaveFailed_ = false; }
         setDirty(false); showStatus({});
     } catch (const std::exception& error) { loaded = false; showStatus(QString::fromUtf8(error.what())); }
     loading_ = false;
@@ -610,7 +621,7 @@ void SettingsPage::save() {
             if (settle_) settle_->stop();
             for (auto it = current_.constBegin(); it != current_.constEnd(); ++it)
                 runtime = runtime || (runtimeSetting(it.key()) && it.value() != original_.value(it.key()));
-            store_.save(current_); original_ = current_;
+            store_.save(current_); original_ = current_; autoSaveFailed_ = false;
         }
         setDirty(false); notifyHost(runtime);
     } catch (const std::exception& error) { showStatus(QString::fromUtf8(error.what())); }
