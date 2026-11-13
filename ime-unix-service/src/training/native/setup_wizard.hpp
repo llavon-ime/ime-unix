@@ -53,6 +53,7 @@ private:
     SettingsPage* settings_;
     QStackedWidget* steps_;
     QLabel* progress_;
+    QWidget* stepBar_;
     QLabel* layoutNote_ = nullptr;
     QLabel* presetNote_ = nullptr;
     QPushButton *previous_, *next_, *skip_;

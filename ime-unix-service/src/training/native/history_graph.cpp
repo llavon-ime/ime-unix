@@ -49,7 +49,7 @@ public:
         auto font = painter->font(); font.setPixelSize(11); font.setWeight(QFont::Normal); painter->setFont(font);
         painter->setPen(c.secondary);
         const bool base = data(0).toString() == "base" || data(0).toString().startsWith("base:");
-        painter->drawText(16, 25, base ? QStringLiteral("原始版本") : "LoRA · " + data(0).toString());
+        painter->drawText(16, 25, base ? QStringLiteral("原始版本") : QStringLiteral("LoRA"));
         if (active_ || latest_) {
             painter->setPen(active_ ? c.accentText : c.secondary);
             painter->drawText(QRectF(115, 10, 98, 22), Qt::AlignRight | Qt::AlignVCenter,
@@ -121,7 +121,7 @@ void HistoryGraph::setRuns(const QJsonArray& runs, const QJsonArray& bases, cons
     scene()->clear(); nodes_.clear(); parents_.clear(); edges_.clear();
     runs_ = runs; bases_ = bases; activeModel_ = activeModel;
     if (bases.isEmpty()) {
-        auto* root = new HistoryNode("base", "Base model", QStringLiteral("原始模型 · 所有分支的起點"),
+        auto* root = new HistoryNode("base", "Base model", QStringLiteral("原始模型，所有分支的起點"),
             QStringLiteral("選取可回復預設模型"), activeModel.isEmpty(), false, [this] { updateEdges(); });
         scene()->addItem(root); nodes_.insert("base", root);
     } else for (const auto value : bases) {
@@ -132,7 +132,7 @@ void HistoryGraph::setRuns(const QJsonArray& runs, const QJsonArray& bases, cons
         const bool active = activeModel.isEmpty() ? base.value("current").toBool()
             : base.value("model_path").toString() == activeModel;
         auto* root = new HistoryNode(id, QStringLiteral("Base model %1").arg(fingerprint.left(8)),
-            QStringLiteral("原始模型 · %1").arg(revision.left(12)),
+            QStringLiteral("原始模型 %1").arg(revision.left(12)),
             base.value("current").toBool() ? QStringLiteral("目前下載的基底") : QStringLiteral("可重新匯出並套用"),
             active, false, [this] { updateEdges(); });
         scene()->addItem(root); nodes_.insert(id, root);
@@ -143,9 +143,9 @@ void HistoryGraph::setRuns(const QJsonArray& runs, const QJsonArray& bases, cons
         const QMap<QString, QString> strengths{{"ultra-low", QStringLiteral("極低")}, {"low", QStringLiteral("低")},
             {"medium", QStringLiteral("中")}, {"high", QStringLiteral("高")}, {"advanced", QStringLiteral("進階")}};
         auto* node = new HistoryNode(id, QStringLiteral("訓練 #%1").arg(id),
-            strengths.value(run.value("strength").toString(), QStringLiteral("個人化訓練")) + " · " +
-                run.value("completed_at").toString().left(16).replace('T', ' '),
-            QStringLiteral("+%1 / 累計 %2 筆 · %3 步").arg(valueText(run.value("record_count")),
+            QStringLiteral("%1強度，%2").arg(strengths.value(run.value("strength").toString(), QStringLiteral("未知")),
+                run.value("completed_at").toString().left(16).replace('T', ' ')),
+            QStringLiteral("新增 %1 筆，累計 %2 筆，%3 步").arg(valueText(run.value("record_count")),
                 valueText(run.value("cumulative_count")), valueText(run.value("optimizer_steps"))),
             !activeModel.isEmpty() && run.value("model_path").toString() == activeModel,
             value == runs.first(), [this] { updateEdges(); });

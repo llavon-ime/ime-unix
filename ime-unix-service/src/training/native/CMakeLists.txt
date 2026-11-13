@@ -68,7 +68,7 @@ add_library(llavon_lora_widgets STATIC manager.hpp manager.cpp appearance.hpp ap
     "${engine_src}/phrase_override/phrase_override_store.cpp" "${engine_src}/text/utf.cpp")
 target_compile_features(llavon_lora_widgets PUBLIC cxx_std_23)
 qt_add_resources(llavon_lora_widgets native_appearance PREFIX "/native"
-    FILES chevron-light.xpm chevron-dark.xpm up-light.xpm up-dark.xpm)
+    FILES chevron-light.xpm chevron-dark.xpm up-light.xpm up-dark.xpm AppIcon.png)
 set_target_properties(llavon_lora_widgets PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(llavon_lora_widgets PUBLIC Qt6::Widgets Qt6::Network nlohmann_json::nlohmann_json PRIVATE utf8cpp::utf8cpp)
 target_include_directories(llavon_lora_widgets PUBLIC "${engine_src}")
@@ -83,9 +83,8 @@ endif()
 target_include_directories(llavon_lora_widgets PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(llavon-ime-lora-gui main.cpp)
+# The window and sidebar use the copy in llavon_lora_widgets' resources.
 set(app_icon "${CMAKE_CURRENT_SOURCE_DIR}/AppIcon.png")
-qt_add_resources(llavon-ime-lora-gui native_app_icon PREFIX "/native"
-    BASE "${CMAKE_CURRENT_SOURCE_DIR}" FILES "${app_icon}")
 if(APPLE)
     find_program(SIPS_EXECUTABLE sips REQUIRED)
     find_program(ICONUTIL_EXECUTABLE iconutil REQUIRED)

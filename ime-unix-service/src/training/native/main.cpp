@@ -1,4 +1,5 @@
 #include "manager.hpp"
+#include "appearance.hpp"
 #include "setup_wizard.hpp"
 
 #include <QApplication>
@@ -121,7 +122,7 @@ int main(int argc, char** argv) {
     QGuiApplication::setApplicationDisplayName(QStringLiteral("拉風輸入法"));
 #ifndef Q_OS_MACOS
     QGuiApplication::setDesktopFileName(QStringLiteral("llavon-ime-lora"));
-    QApplication::setWindowIcon(QIcon(QStringLiteral(":/native/AppIcon.png")));
+    QApplication::setWindowIcon(llavon::lora::appIcon());
 #endif
     QStringList arguments = application.arguments(); arguments.removeFirst();
     arguments.removeAll("--replace-running");

@@ -72,6 +72,8 @@ private:
     QWidget* trainingPage();
     QWidget* historyPage();
     void ensurePersonalizationPages();
+    void setLook(const QString& look);
+    void refreshAppearance();
     void act(const QString& path, const QJsonObject& body = {}, Backend::Reply reply = {});
     void renderRecords(const QJsonObject& data);
     void renderProtection(const QJsonObject& data);

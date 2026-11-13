@@ -13,6 +13,7 @@
 #include <QCheckBox>
 #include <QAccessible>
 #include <QApplication>
+#include <QButtonGroup>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
@@ -44,6 +45,7 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <array>
 
 namespace llavon::lora {
 namespace {
@@ -116,6 +118,7 @@ QString timeLabel(const QString& value) {
 }
 
 Manager::Manager(Backend* backend, const QString& hostHelper, const QString& initialPage) : backend_(backend) {
+    setTheme(UiPreferences::look() == QStringLiteral("workbook") ? Theme::Workbook : Theme::Keycap);
     setWindowTitle(QStringLiteral("拉風輸入法"));
     resize(1080, 760);
     setMinimumSize(800, 620);
@@ -128,8 +131,17 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     sidebar->setFixedWidth(204);
     auto* side = new QVBoxLayout(sidebar);
     side->setContentsMargins(12, 24, 12, 16);
-    side->addWidget(label(QStringLiteral("拉風"), "brand"));
-    side->addSpacing(24);
+    // The line-art alpaca is the brand; the wordmark sits beside it.
+    auto* brand = new QHBoxLayout; brand->setSpacing(10); brand->setContentsMargins(6, 0, 0, 0);
+    auto* mark = new QLabel; mark->setObjectName("brandMark"); mark->setFixedSize(40, 40);
+    mark->setPixmap(appIcon().pixmap(40, 40)); mark->setAccessibleName(QStringLiteral("拉風輸入法"));
+    brand->addWidget(mark);
+    auto* wordmark = new QVBoxLayout; wordmark->setSpacing(0);
+    wordmark->addWidget(label(QStringLiteral("拉風"), "brand"));
+    wordmark->addWidget(label(QStringLiteral("注音輸入法"), "brandTag"));
+    brand->addLayout(wordmark, 1);
+    side->addLayout(brand);
+    side->addSpacing(22);
     auto* navigation = new QListWidget;
     navigation->setObjectName("navigation");
     const QStringList sections{QStringLiteral("訓練資料"), QStringLiteral("模型與訓練"), QStringLiteral("訓練歷程"), QStringLiteral("輸入法設定"), QStringLiteral("替代詞彙"), QStringLiteral("軟體更新"), QStringLiteral("版本與狀態")};
@@ -148,6 +160,24 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     navigation->setSpacing(2);
     navigation->setMinimumHeight(300);
     side->addWidget(navigation, 1);
+    // The app's own look, kept apart from the input method settings.
+    side->addWidget(label(QStringLiteral("外觀"), "help"));
+    side->addSpacing(4);
+    auto* lookRow = new QHBoxLayout; lookRow->setSpacing(6); lookRow->setContentsMargins(0, 0, 0, 0);
+    auto* looks = new QButtonGroup(this);
+    const QList<std::array<QString, 4>> lookChoices{
+        {QStringLiteral("keycap"), QStringLiteral("鍵帽"), QStringLiteral("lookKeycap"), QStringLiteral("像鍵盤一樣的按鍵")},
+        {QStringLiteral("workbook"), QStringLiteral("作業簿"), QStringLiteral("lookWorkbook"), QStringLiteral("國語作業簿的方格與楷書；需要已安裝的楷書字型")}};
+    for (const auto& [value, text, name, tip] : lookChoices) {
+        auto* option = new QPushButton(text); option->setObjectName(name); option->setCheckable(true);
+        option->setAutoDefault(false); option->setProperty("segment", true); option->setProperty("value", value);
+        option->setToolTip(tip); option->setAccessibleDescription(tip); option->setMinimumHeight(30);
+        option->setChecked(value == UiPreferences::look());
+        looks->addButton(option); lookRow->addWidget(option, 1);
+    }
+    connect(looks, &QButtonGroup::buttonClicked, this, [this](QAbstractButton* option) { setLook(option->property("value").toString()); });
+    side->addLayout(lookRow);
+    side->addSpacing(10);
     guideButton_ = button(QStringLiteral("使用指南"), "openGuide");
     guideButton_->setProperty("quiet", true);
     side->addWidget(guideButton_);
@@ -158,9 +188,8 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     layout->setContentsMargins(28, 24, 28, 24);
     layout->setSpacing(24);
     auto* titleRow = new QHBoxLayout;
-    heading_ = label({}, "title");
+    heading_ = new PageTitle;
     heading_->setObjectName("pageHeading");
-    heading_->setWordWrap(false);
     titleRow->addWidget(heading_);
     // In the title row a message appears beside the page it concerns without
     // shifting the content below, such as the history graph's viewport.
@@ -232,6 +261,29 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     showPage(initialPage);
 }
 
+void Manager::setLook(const QString& look) {
+    setTheme(look == QStringLiteral("workbook") ? Theme::Workbook : Theme::Keycap);
+    if (!UiPreferences::setLook(look)) notice(QStringLiteral("無法儲存外觀偏好；這次已切換，下次開啟可能還原。"), true);
+    refreshAppearance();
+    if (theme() == Theme::Workbook && kaiFamily().isEmpty())
+        notice(QStringLiteral("沒有找到楷書字型，標題會用一般字體。安裝「教育部標準楷書」或「標楷體」後重新開啟設定。"));
+}
+
+void Manager::refreshAppearance() {
+    applyAppearance(this);
+    // Navigation glyphs are drawn in the text colour of the current mode.
+    auto* navigation = findChild<QListWidget*>("navigation");
+    for (int row = 0; row < navigation->count(); ++row)
+        if (const int page = navigation->item(row)->data(Qt::UserRole).toInt(); page >= 0)
+            navigation->item(row)->setIcon(navigationIcon(page));
+    if (setupWizard_) applyAppearance(setupWizard_);
+    if (guide_) applyAppearance(guide_);
+    // Painted widgets (title squares, keyboard, history) follow the new look.
+    heading_->updateGeometry();
+    for (auto* window : {static_cast<QWidget*>(this), static_cast<QWidget*>(setupWizard_), static_cast<QWidget*>(guide_)})
+        if (window) for (auto* child : window->findChildren<QWidget*>()) child->update();
+}
+
 void Manager::markUnsaved(int page, bool unsaved) {
     const QStringList titles{QStringLiteral("輸入法設定"), QStringLiteral("替代詞彙")};
     auto* navigation = findChild<QListWidget*>("navigation");
@@ -260,11 +312,7 @@ bool Manager::eventFilter(QObject* watched, QEvent* event) {
     // A clicked button must not keep a focus ring that reads as "selected".
     if (event->type() == QEvent::Polish)
         if (auto* pushButton = qobject_cast<QPushButton*>(watched)) pushButton->setFocusPolicy(Qt::TabFocus);
-    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
-        applyAppearance(this);
-        if (guide_) applyAppearance(guide_);
-        if (history_) history_->viewport()->update();
-    }
+    if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) refreshAppearance();
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -470,12 +518,12 @@ QWidget* Manager::trainingPage() {
     strength_ = new NativeComboBox;
     strength_->setObjectName("strength");
     const QStringList names{"ultra-low", "low", "medium", "high", "advanced"};
-    const QStringList titles{QStringLiteral("極低 · 微幅調整"), QStringLiteral("低 · 保守學習"),
-        QStringLiteral("中 · 加強個人用字"), QStringLiteral("高 · 明顯調整"), QStringLiteral("進階 · 自訂參數")};
+    const QStringList titles{QStringLiteral("極低：微幅調整"), QStringLiteral("低：保守學習"),
+        QStringLiteral("中：加強個人用字"), QStringLiteral("高：明顯調整"), QStringLiteral("進階：自訂參數")};
     for (int i = 0; i < names.size(); ++i) strength_->addItem(titles[i], names[i]);
     base_ = new NativeComboBox;
     base_->setObjectName("trainingBase");
-    base_->addItem(QStringLiteral("Base model · 從頭開始"), "");
+    base_->addItem(QStringLiteral("Base model（從頭開始）"), "");
     strength_->setMaximumWidth(400); base_->setMaximumWidth(400);
     form->addRow(QStringLiteral("訓練強度"), strength_);
     form->addRow(QStringLiteral("訓練基底"), base_);
@@ -569,7 +617,7 @@ QWidget* Manager::historyPage() {
     tools->addWidget(reset); tools->addWidget(arrange);
     layout->addLayout(tools);
     history_ = new HistoryGraph;
-    const auto graphHelp = QStringLiteral("拖曳空白平移 · 拖曳節點調整位置 · Ctrl + 滾輪縮放\n+ / − 縮放、0 重設視圖、[ / ] 切換節點、方向鍵微調位置。");
+    const auto graphHelp = QStringLiteral("拖曳空白處平移，拖曳節點調整位置，Ctrl + 滾輪縮放。\n+ / − 縮放、0 重設視圖、[ / ] 切換節點、方向鍵微調位置。");
     history_->setToolTip(graphHelp); history_->setAccessibleDescription(graphHelp);
     reset->setToolTip(graphHelp);
     connect(smaller, &QPushButton::clicked, this, [this] { history_->zoomBy(0.8); });
@@ -609,7 +657,7 @@ QWidget* Manager::historyPage() {
         const auto run = historyRuns_.value(id);
         const auto parent = text(run.value("parent_id"));
         const auto fingerprint = run.value("base_model_fingerprint").toString();
-        historyDetail_->setText(QStringLiteral("訓練 #%1  ←  %2\nRank %3 · Alpha %4 · Dropout %5 · %6")
+        historyDetail_->setText(QStringLiteral("訓練 #%1，接續 %2\nRank %3，Alpha %4，Dropout %5，模組 %6")
             .arg(id, parent == "0" ? "Base model " + fingerprint.left(8) : "#" + parent, text(run.value("rank")),
                  text(run.value("alpha")), text(run.value("dropout")), run.value("target_modules").toString()));
         historyDetail_->setToolTip(run.value("model_path").toString() + "\n" +
@@ -745,7 +793,7 @@ void Manager::renderProtection(const QJsonObject& protection) {
     protection_ = protection;
     const bool configured = protection.value("configured").toBool(), unlocked = protection.value("unlocked").toBool();
     collection_->setText(!configured ? QStringLiteral("設定資料密碼後才會開始加密收集。請妥善保存密碼；忘記時只能清除已收集的資料。") :
-        QStringLiteral("%1 · %2").arg(protection.value("enabled").toBool() ? QStringLiteral("正在加密收集") : QStringLiteral("已暫停收集"),
+        QStringLiteral("%1，%2").arg(protection.value("enabled").toBool() ? QStringLiteral("正在加密收集") : QStringLiteral("已暫停收集"),
                                    unlocked ? QStringLiteral("已解鎖檢視") : QStringLiteral("文字已鎖定")));
     password_->setVisible(!unlocked); confirmation_->setVisible(!configured); setup_->setVisible(!configured);
     unlock_->setVisible(configured && !unlocked); lock_->setVisible(unlocked);
@@ -776,7 +824,7 @@ void Manager::renderRecords(const QJsonObject& recordPage) {
         auto* stamp = new QTableWidgetItem(timeLabel(row.value("committed_at").toString()));
         stamp->setData(Qt::UserRole, id); records_->setItem(index, 0, stamp);
         const bool unlocked = row.value("text").toBool();
-        const auto answer = unlocked ? row.value("answer").toString() : QStringLiteral("已加密 · 解鎖後檢視");
+        const auto answer = unlocked ? row.value("answer").toString() : QStringLiteral("已加密，解鎖後才能檢視");
         const auto context = row.value("context").toString();
         auto* sentence = new QTableWidgetItem(answer + (context.isEmpty() ? "" : "\n" + context));
         sentence->setToolTip(answer + "\n" + context); records_->setItem(index, 1, sentence);
@@ -809,12 +857,12 @@ void Manager::renderState(const QJsonObject& state) {
 #ifdef Q_OS_LINUX
     updateBusy = updates_ && updates_->busy();
 #endif
-    model_->setText(state.value("model_ready").toBool() ? QStringLiteral("已就緒 · %1").arg(state.value("revision").toString().left(12)) : QStringLiteral("尚未下載 · 訓練需要未量化的 checkpoint"));
-    trainer_->setText(state.value("trainer_ready").toBool() ? QStringLiteral("已就緒 · %1").arg(state.value("trainer_version").toString()) : QStringLiteral("尚未安裝，或版本與目前輸入法不符"));
-    if (state.value("model_update_available").isBool()) model_->setText(model_->text() + (state.value("model_update_available").toBool() ? QStringLiteral(" · 有更新") : QStringLiteral(" · 已是固定版本")));
-    if (state.value("trainer_update_available").isBool()) trainer_->setText(trainer_->text() + (state.value("trainer_update_available").toBool() ? QStringLiteral(" · 有更新") : QStringLiteral(" · 已是固定版本")));
+    model_->setText(state.value("model_ready").toBool() ? QStringLiteral("已就緒（%1）").arg(state.value("revision").toString().left(12)) : QStringLiteral("尚未下載；訓練需要未量化的 checkpoint"));
+    trainer_->setText(state.value("trainer_ready").toBool() ? QStringLiteral("已就緒（%1）").arg(state.value("trainer_version").toString()) : QStringLiteral("尚未安裝，或版本與目前輸入法不符"));
+    if (state.value("model_update_available").isBool()) model_->setText(model_->text() + (state.value("model_update_available").toBool() ? QStringLiteral("，有更新") : QStringLiteral("，已是固定版本")));
+    if (state.value("trainer_update_available").isBool()) trainer_->setText(trainer_->text() + (state.value("trainer_update_available").toBool() ? QStringLiteral("，有更新") : QStringLiteral("，已是固定版本")));
     const QMap<QString, QString> devices{{"apple", "Apple Silicon / Metal"}, {"amd", "AMD / ROCm"}, {"nvidia", "NVIDIA / CUDA"}, {"none", "CPU"}};
-    device_->setText(QStringLiteral("訓練裝置 · %1").arg(devices.value(state.value("gpu").toString(), QStringLiteral("自動偵測"))));
+    device_->setText(QStringLiteral("訓練裝置：%1").arg(devices.value(state.value("gpu").toString(), QStringLiteral("自動偵測"))));
     device_->setToolTip(QStringLiteral("後端由訓練器自動選擇"));
     const QMap<QString, QString> kinds{{"fetch", QStringLiteral("下載基礎模型")}, {"install", QStringLiteral("安裝訓練器")},
         {"train", QStringLiteral("個人化訓練")}, {"export", QStringLiteral("匯出模型")}, {"check", QStringLiteral("檢查模型版本")}, {"trainer-check", QStringLiteral("檢查訓練器版本")}};
@@ -889,15 +937,15 @@ void Manager::renderHistory(const QJsonObject& history) {
         const auto fingerprint = model.value("fingerprint").toString();
         const auto id = model.value("id").toString("base:" + fingerprint);
         auto title = QStringLiteral("Base model %1").arg(fingerprint.left(8));
-        if (model.value("current").toBool()) title += QStringLiteral(" · 目前下載");
+        if (model.value("current").toBool()) title += QStringLiteral("（目前下載）");
         base_->addItem(title, id); base_->setItemData(base_->count() - 1, model, Qt::UserRole + 1);
         historyRuns_.insert(id, model);
     }
-    if (base_->count() == 0) base_->addItem(QStringLiteral("Base model · 從頭開始"), "");
+    if (base_->count() == 0) base_->addItem(QStringLiteral("Base model（從頭開始）"), "");
     const auto runs = history.value("runs").toArray();
     for (const auto value : runs) {
         const auto run = value.toObject(); const auto id = text(run.value("id"));
-        const auto title = QStringLiteral("#%1 · %2").arg(id, timeLabel(run.value("completed_at").toString()));
+        const auto title = QStringLiteral("訓練 #%1（%2）").arg(id, timeLabel(run.value("completed_at").toString()));
         base_->addItem(title, id); base_->setItemData(base_->count() - 1, run, Qt::UserRole + 1);
         historyRuns_.insert(id, run);
     }

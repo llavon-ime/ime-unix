@@ -78,6 +78,7 @@ private slots:
     void deferredSettingGroups();
     void settingsPresets();
     void setupWizard();
+    void lookSwitching();
     void guideIllustrations();
     void guideDetailTopics();
     void quietInterface();
@@ -954,7 +955,7 @@ void NativeTests::setupWizard() {
     Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
     Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
     using llavon::lora::SettingsStore;
-    using llavon::lora::SetupPreferences;
+    using llavon::lora::UiPreferences;
     using llavon::lora::SetupWizard;
     // Offered only on a first launch: nothing saved and the setup not seen.
     QVERIFY(SetupWizard::shouldOffer());
@@ -1029,9 +1030,9 @@ void NativeTests::setupWizard() {
         QVERIFY(!widget<QPushButton>(window, "setupSkip")->isVisible());
         QVERIFY(widget<QLineEdit>(window, "setupTryInput")->isVisible());
         capture(*wizard, "33-setup-done");
-        QVERIFY(!SetupPreferences::seen());
+        QVERIFY(!UiPreferences::seen());
         click(window, "setupPhrases");
-        QVERIFY(!wizard->isVisible()); QVERIFY(SetupPreferences::seen());
+        QVERIFY(!wizard->isVisible()); QVERIFY(UiPreferences::seen());
         QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("替代詞彙"));
         // The setup never starts the training helper or writes phrases.
         QTest::qWait(100); QCOMPARE(errors.count(), 0); QCOMPARE(ready.count(), 0);
@@ -1059,9 +1060,56 @@ void NativeTests::setupWizard() {
     Manager window(&backend, {}, "settings"); window.show();
     window.showPage("setup"); click(window, "setupSkip");
     QVERIFY(!widget<SetupWizard>(window, "setupWizard")->isVisible());
-    QVERIFY(SetupPreferences::seen()); QVERIFY(!SetupWizard::shouldOffer());
+    QVERIFY(UiPreferences::seen()); QVERIFY(!SetupWizard::shouldOffer());
     QVERIFY(!QFile::exists(SettingsStore::configPath()));
     QVERIFY(window.close());
+}
+
+void NativeTests::lookSwitching() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    Environment config("XDG_CONFIG_HOME", (directory.path() + "/config").toUtf8());
+    Environment phrases("LLAVON_IME_PHRASE_OVERRIDES_PATH", (directory.path() + "/phrases.txt").toUtf8());
+    using llavon::lora::Theme;
+    const auto restore = qScopeGuard([] { llavon::lora::setTheme(Theme::Keycap); });
+    {
+        Backend backend(directory.path() + "/missing-backend", {});
+        Manager window(&backend, {}, "settings"); window.show();
+        // The keyboard look is the default.
+        QCOMPARE(llavon::lora::UiPreferences::look(), QStringLiteral("keycap"));
+        QCOMPARE(llavon::lora::theme(), Theme::Keycap);
+        QVERIFY(widget<QPushButton>(window, "lookKeycap")->isChecked());
+        auto* heading = widget<QLabel>(window, "pageHeading");
+        const auto keycapHeading = heading->sizeHint();
+        capture(window, "80-look-keycap");
+        click(window, "lookWorkbook");
+        QCOMPARE(llavon::lora::theme(), Theme::Workbook);
+        QCOMPARE(llavon::lora::UiPreferences::look(), QStringLiteral("workbook"));
+        QVERIFY(widget<QPushButton>(window, "lookWorkbook")->isChecked());
+        // Each heading character now sits in its own square.
+        QVERIFY(heading->sizeHint() != keycapHeading);
+        auto* notice = widget<QLabel>(window, "notice");
+        if (llavon::lora::kaiFamily().isEmpty()) {
+            QVERIFY(notice->isVisible()); QVERIFY(notice->text().contains(QStringLiteral("楷書")));
+        } else {
+            QVERIFY(!notice->text().contains(QStringLiteral("楷書")));
+        }
+        capture(window, "81-look-workbook");
+        window.showPage("setup"); capture(*widget<llavon::lora::SetupWizard>(window, "setupWizard"), "82-look-workbook-setup");
+        // The look is the app's own preference, not an input method setting.
+        QVERIFY(!QFile::exists(llavon::lora::SettingsStore::configPath()));
+        QVERIFY(window.close());
+    }
+    {
+        Backend backend(directory.path() + "/missing-backend", {});
+        llavon::lora::setTheme(Theme::Keycap);
+        Manager window(&backend, {}, "settings"); window.show();
+        QCOMPARE(llavon::lora::theme(), Theme::Workbook);
+        QVERIFY(widget<QPushButton>(window, "lookWorkbook")->isChecked());
+        click(window, "lookKeycap");
+        QCOMPARE(llavon::lora::theme(), Theme::Keycap);
+        QCOMPARE(llavon::lora::UiPreferences::look(), QStringLiteral("keycap"));
+        QVERIFY(window.close());
+    }
 }
 
 void NativeTests::guideIllustrations() {
@@ -1113,7 +1161,7 @@ void NativeTests::guideIllustrations() {
     QVERIFY(!window.findChild<QTableWidget*>("records"));
     QVERIFY(!window.findChild<QPushButton*>("setup"));
     QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
-    QVERIFY(!llavon::lora::SetupPreferences::seen());
+    QVERIFY(!llavon::lora::UiPreferences::seen());
     QCOMPARE(context->value(), original == 256 ? 128 : 256);
     QVERIFY(file.open(QIODevice::ReadOnly)); QCOMPARE(file.readAll(), before); file.close();
     context->setValue(original); click(window, "saveSettings"); QVERIFY(window.close());
@@ -1172,7 +1220,7 @@ void NativeTests::guideDetailTopics() {
     QCOMPARE(guide.findChildren<llavon::lora::GuideIllustration*>().size(), 3); // Reopening reuses the topic.
     QCOMPARE(pageRequests.count(), 0); QCOMPARE(settingRequests.count(), 0); QCOMPARE(setupRequests.count(), 0);
     QVERIFY(!QFile::exists(llavon::lora::SettingsStore::phrasesPath()));
-    QVERIFY(!llavon::lora::SetupPreferences::seen());
+    QVERIFY(!llavon::lora::UiPreferences::seen());
     QVERIFY(configuration.open(QIODevice::ReadOnly)); QCOMPARE(configuration.readAll(), before); configuration.close();
     for (const auto& entry : {QPair{1, QString("guideSmartEnglish")}, QPair{4, QString("guideKeyboard")}}) {
         topics->setCurrentIndex(entry.first); QCoreApplication::processEvents();
@@ -1497,7 +1545,7 @@ void NativeTests::controlInteractions() {
     QWidget standalone; QVBoxLayout layout(&standalone);
     llavon::lora::NativeComboBox longNames(&standalone); layout.addWidget(&longNames);
     llavon::lora::applyAppearance(&standalone); longNames.setFixedWidth(220);
-    for (int i = 0; i < 14; ++i) longNames.addItem(QStringLiteral("訓練版本 %1 · ").arg(i) + QString(100, QChar(0x9577)));
+    for (int i = 0; i < 14; ++i) longNames.addItem(QStringLiteral("訓練版本 %1：").arg(i) + QString(100, QChar(0x9577)));
     standalone.show(); QVERIFY(QTest::qWaitForWindowExposed(&standalone));
     longNames.setFocus(); longNames.showPopup(); QTRY_VERIFY(longNames.view()->isVisible());
     const auto closePopup = qScopeGuard([&longNames] { longNames.hidePopup(); });

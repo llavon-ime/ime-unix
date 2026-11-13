@@ -60,6 +60,41 @@ Step step(const QString& title, const QString& introduction) {
     area->setWidget(content);
     return {area, layout};
 }
+// Where the setup is: numbered keys (the current one pressed), or exercise
+// book squares the teacher has ticked and circled.
+class StepBar final : public QWidget {
+public:
+    explicit StepBar(int count) : count_(count) { setObjectName("setupStepBar"); setFixedSize(count * 34, 26); }
+    void setCurrent(int current) { current_ = current; update(); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
+        const auto c = appearance();
+        auto number = font(); number.setPixelSize(12); number.setWeight(QFont::DemiBold); painter.setFont(number);
+        for (int index = 0; index < count_; ++index) {
+            const QRectF box(index * 34.0 + 1, 1, 26, 22);
+            if (theme() == Theme::Workbook) {
+                painter.setPen(QPen(c.edge, 1)); painter.setBrush(c.surface); painter.drawRect(box);
+                painter.setPen(QPen(c.marker, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin)); painter.setBrush(Qt::NoBrush);
+                if (index < current_)
+                    painter.drawPolyline(QPolygonF{QPointF(box.left() + 6, box.center().y()), QPointF(box.left() + 11, box.bottom() - 5), QPointF(box.right() - 5, box.top() + 4)});
+                else if (index == current_) painter.drawEllipse(box.adjusted(3, 2, -3, -2));
+                continue;
+            }
+            const bool done = index < current_, pressed = index == current_;
+            const QRectF key = pressed ? box.adjusted(0, 2, 0, 0) : box.adjusted(0, 0, 0, -2);
+            if (!pressed) { painter.setPen(Qt::NoPen); painter.setBrush(done ? c.secondary : c.edge); painter.drawRoundedRect(key.translated(0, 2), 5, 5); }
+            painter.setPen(QPen(done ? c.accent : pressed ? c.control : c.border, 1));
+            painter.setBrush(done ? c.accent : pressed ? c.selection : c.surface);
+            painter.drawRoundedRect(key, 5, 5);
+            painter.setPen(done ? c.onAccent : pressed ? c.text : c.secondary);
+            painter.drawText(key, Qt::AlignCenter, QString::number(index + 1));
+        }
+    }
+private:
+    int count_, current_ = 0;
+};
+
 QJsonObject schemaField(const QString& key) {
     for (const auto item : SettingsStore::schema().value("fields").toArray())
         if (item.toObject().value("key").toString() == key) return item.toObject();
@@ -103,7 +138,10 @@ void KeyboardPreview::paintEvent(QPaintEvent*) {
     const double key = std::min(52.0, (width() - 2.0 - gap * 11) / units);
     const double totalWidth = units * key + gap * 11, totalHeight = 4 * key + 3 * gap;
     const QPointF origin((width() - totalWidth) / 2, (height() - totalHeight) / 2);
-    auto symbolFont = font(); symbolFont.setPixelSize(std::max(12, static_cast<int>(key * 0.42))); symbolFont.setWeight(QFont::Medium);
+    const bool workbook = theme() == Theme::Workbook;
+    auto symbolFont = font(); symbolFont.setPixelSize(std::max(12, static_cast<int>(key * (workbook ? 0.5 : 0.42))));
+    symbolFont.setWeight(workbook ? QFont::Normal : QFont::DemiBold);
+    if (workbook && !displayFamily().isEmpty()) symbolFont.setFamily(displayFamily());
     auto keyFont = font(); keyFont.setPixelSize(std::max(9, static_cast<int>(key * 0.22)));
     for (int row = 0; row < keyRows.size(); ++row) {
         for (int column = 0; column < keyRows[row].size(); ++column) {
@@ -111,20 +149,30 @@ void KeyboardPreview::paintEvent(QPaintEvent*) {
             const QRectF bounds(origin.x() + (rowOffsets[row] + column) * key + column * gap,
                                 origin.y() + row * (key + gap), key, key);
             const auto value = symbol(character);
-            painter.setPen(QPen(colors.border, 1));
-            painter.setBrush(value.isEmpty() ? colors.background : colors.surface);
-            painter.drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6);
+            if (workbook) {
+                // Exercise book squares: the grid line, no keycap depth.
+                painter.setPen(QPen(colors.edge, 1)); painter.setBrush(value.isEmpty() ? colors.sidebar : colors.surface);
+                painter.drawRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5));
+            } else {
+                // A deeper lower edge reads as a keycap.
+                painter.setPen(Qt::NoPen); painter.setBrush(colors.edge);
+                painter.drawRoundedRect(bounds.adjusted(0, 2, 0, 3), 6, 6);
+                painter.setPen(QPen(colors.border, 1));
+                painter.setBrush(value.isEmpty() ? colors.sidebar : colors.surface);
+                painter.drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), 6, 6);
+            }
             painter.setFont(keyFont); painter.setPen(colors.secondary);
             painter.drawText(bounds.adjusted(6, 3, -4, -2), Qt::AlignLeft | Qt::AlignTop, QString(character).toUpper());
             if (value.isEmpty()) continue;
-            painter.setFont(symbolFont); painter.setPen(colors.text);
+            // The 注音 legend is printed in red on the keycap, written in ink in the book.
+            painter.setFont(symbolFont); painter.setPen(workbook ? colors.text : colors.marker);
             painter.drawText(bounds.adjusted(0, key * 0.18, 0, 0), Qt::AlignCenter, value);
         }
     }
 }
 
 bool SetupWizard::shouldOffer() {
-    return !SetupPreferences::seen() && !QFileInfo::exists(SettingsStore::configPath());
+    return !UiPreferences::seen() && !QFileInfo::exists(SettingsStore::configPath());
 }
 
 SetupWizard::SetupWizard(SettingsPage* settings, QWidget* parent) : QDialog(parent), settings_(settings) {
@@ -135,8 +183,11 @@ SetupWizard::SetupWizard(SettingsPage* settings, QWidget* parent) : QDialog(pare
     resize(720, 640); setMinimumSize(620, 520);
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(28, 20, 28, 18); layout->setSpacing(14);
+    auto* header = new QHBoxLayout; header->setSpacing(12);
+    stepBar_ = new StepBar(4); header->addWidget(stepBar_, 0, Qt::AlignVCenter);
     progress_ = paragraph({}, "muted"); progress_->setObjectName("setupProgress");
-    layout->addWidget(progress_);
+    header->addWidget(progress_, 1);
+    layout->addLayout(header);
     steps_ = new QStackedWidget; steps_->setObjectName("setupSteps");
     layout->addWidget(steps_, 1);
 
@@ -284,7 +335,7 @@ void SetupWizard::showEvent(QShowEvent* event) {
 void SetupWizard::done(int result) {
     // Closing in any way counts as seen: the setup never asks twice.
     settings_->flushPending();
-    (void)SetupPreferences::markSeen();
+    (void)UiPreferences::markSeen();
     QDialog::done(result);
 }
 
@@ -318,7 +369,8 @@ void SetupWizard::describeLayout(const QString& layout) {
 
 void SetupWizard::updateStep() {
     const int index = steps_->currentIndex(), last = steps_->count() - 1;
-    progress_->setText(QStringLiteral("開始使用 · %1 / %2").arg(index + 1).arg(steps_->count()));
+    progress_->setText(QStringLiteral("開始使用　%1 / %2").arg(index + 1).arg(steps_->count()));
+    static_cast<StepBar*>(stepBar_)->setCurrent(index);
     previous_->setEnabled(index > 0);
     skip_->setVisible(index < last);
     next_->setText(index == last ? QStringLiteral("完成") : QStringLiteral("下一步"));

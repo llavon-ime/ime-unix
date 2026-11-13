@@ -1,6 +1,7 @@
 #pragma once
 #include <QCheckBox>
 #include <QComboBox>
+#include <QLabel>
 
 namespace llavon::lora {
 // Shared by the real data page and its read-only guide illustration.
@@ -27,6 +28,19 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override;
     bool hitButton(const QPoint& position) const override { return rect().contains(position); }
+};
+
+// The page heading. In the workbook look each character sits in its own
+// 田字格 square, as when practising characters in a Taiwanese exercise book.
+class PageTitle final : public QLabel {
+public:
+    explicit PageTitle(QWidget* parent = nullptr);
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override { return sizeHint(); }
+protected:
+    void paintEvent(QPaintEvent* event) override;
+private:
+    int cell() const;
 };
 
 class NativeCheckBox final : public QCheckBox {

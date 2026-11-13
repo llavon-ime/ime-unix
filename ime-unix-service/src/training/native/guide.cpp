@@ -136,13 +136,23 @@ void illustration(QVBoxLayout* layout, GuideIllustration::Kind kind, int page, c
 
 // The key predates the setup; keeping it means people who dismissed the old
 // feature tour are not asked again.
-bool SetupPreferences::seen() {
+bool UiPreferences::seen() {
     QSettings preferences(preferencesPath(), QSettings::IniFormat);
     return preferences.value("quickStartDismissed", false).toBool();
 }
-bool SetupPreferences::markSeen() {
+bool UiPreferences::markSeen() {
     QSettings preferences(preferencesPath(), QSettings::IniFormat);
     preferences.setValue("quickStartDismissed", true);
+    preferences.sync();
+    return preferences.status() == QSettings::NoError;
+}
+QString UiPreferences::look() {
+    QSettings preferences(preferencesPath(), QSettings::IniFormat);
+    return preferences.value("look").toString() == QStringLiteral("workbook") ? QStringLiteral("workbook") : QStringLiteral("keycap");
+}
+bool UiPreferences::setLook(const QString& look) {
+    QSettings preferences(preferencesPath(), QSettings::IniFormat);
+    preferences.setValue("look", look);
     preferences.sync();
     return preferences.status() == QSettings::NoError;
 }
@@ -150,7 +160,7 @@ bool SetupPreferences::markSeen() {
 GuidePage::GuidePage(QWidget* parent) : QDialog(parent) {
     setObjectName("usageGuide");
     setAttribute(Qt::WA_StyledBackground, true);
-    setWindowTitle(QStringLiteral("拉風 · 使用指南"));
+    setWindowTitle(QStringLiteral("拉風使用指南"));
     setWindowModality(Qt::NonModal);
     resize(780, 720); setMinimumSize(660, 480);
     auto* layout = new QVBoxLayout(this);
@@ -210,7 +220,7 @@ void GuidePage::buildTopic(int index) {
         area->setObjectName("guidePhraseTopic");
         layout->addWidget(paragraph(QStringLiteral("人名與專有名詞，用你指定的寫法。"), "muted"));
         illustration(layout, GuideIllustration::Kind::Phrases, 4, QStringLiteral("替代詞彙 › 詞彙與讀音"), "guideDetailedPhraseIllustration");
-        layout->addWidget(paragraph(QStringLiteral("每筆 2–8 個字 · 同一組讀音限一筆 · 多音字需確認"), "muted"));
+        layout->addWidget(paragraph(QStringLiteral("每筆 2–8 個字，同一組讀音只能有一筆，多音字要確認讀音。"), "muted"));
         layout->addWidget(paragraph(QStringLiteral("也能直接從組字加入"), "section"));
         shortcut(layout, {"Shift", QStringLiteral("← / →")}, QStringLiteral("標記 2–8 個有注音的字"));
         shortcut(layout, {"Enter"}, QStringLiteral("加入替代詞彙，不會提交整句"));

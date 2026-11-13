@@ -7,12 +7,16 @@ class QTabWidget;
 
 namespace llavon::lora {
 
-// UI-only preferences, separate from engine settings and training consent.
-class SetupPreferences final {
+// Preferences of the settings app itself, separate from engine settings and
+// training consent.
+class UiPreferences final {
 public:
     // The first-run setup was finished, skipped or closed.
     static bool seen();
     static bool markSeen();
+    // "keycap" (default) or "workbook".
+    static QString look();
+    static bool setLook(const QString& look);
 };
 
 class GuidePage final : public QDialog {

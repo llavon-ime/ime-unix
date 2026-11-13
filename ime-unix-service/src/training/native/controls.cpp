@@ -62,7 +62,7 @@ public:
         if (index.row() == combo_->currentIndex()) {
             painter->save();
             checkmark(*painter, QRectF(option.rect.right() - 26, option.rect.center().y() - 8, 16, 16),
-                option.state.testFlag(QStyle::State_Selected) ? option.palette.color(QPalette::HighlightedText) : appearance().accent);
+                appearance().text);
             painter->restore();
         }
     }
@@ -133,7 +133,7 @@ void NativeSwitch::paintEvent(QPaintEvent*) {
     QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
     const auto c = appearance();
     const QRectF track = QRectF(rect()).adjusted(1, 1, -1, -1);
-    if (hasFocus()) { painter.setPen(QPen(c.background.lightness() < 128 ? c.accentText : c.accent, 2)); painter.setBrush(Qt::NoBrush); painter.drawRoundedRect(QRectF(rect()).adjusted(.5, .5, -.5, -.5), 12, 12); }
+    if (hasFocus()) { painter.setPen(QPen(c.accent, 2)); painter.setBrush(Qt::NoBrush); painter.drawRoundedRect(QRectF(rect()).adjusted(.5, .5, -.5, -.5), 12, 12); }
     painter.setPen(Qt::NoPen);
     // The off track outlines the control, so it needs the 3:1 boundary colour.
     painter.setBrush(!isEnabled() ? c.border : isChecked() ? c.accent : c.control);
@@ -141,7 +141,35 @@ void NativeSwitch::paintEvent(QPaintEvent*) {
     painter.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2);
     const qreal diameter = pill.height() - 4;
     const qreal x = isChecked() ? pill.right() - 2 - diameter : pill.left() + 2;
-    painter.setBrush(Qt::white); painter.drawEllipse(QRectF(x, pill.top() + 2, diameter, diameter));
+    painter.setBrush(isChecked() && isEnabled() ? c.onAccent : c.surface); painter.drawEllipse(QRectF(x, pill.top() + 2, diameter, diameter));
+}
+
+PageTitle::PageTitle(QWidget* parent) : QLabel(parent) {
+    setTextFormat(Qt::PlainText); setWordWrap(false); setProperty("role", "title");
+}
+int PageTitle::cell() const { return fontMetrics().height() + 8; }
+QSize PageTitle::sizeHint() const {
+    if (theme() != Theme::Workbook) return QLabel::sizeHint();
+    const auto count = static_cast<int>(text().size());
+    return {std::max(1, count) * cell() + 2, cell() + 2};
+}
+void PageTitle::paintEvent(QPaintEvent* event) {
+    if (theme() != Theme::Workbook) { QLabel::paintEvent(event); return; }
+    QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing);
+    const auto c = appearance();
+    const int size = cell();
+    const auto characters = text();
+    for (qsizetype index = 0; index < characters.size(); ++index) {
+        const QRectF square(1 + static_cast<double>(index) * size, 1, size, size);
+        // The dashed cross guides where strokes go; the frame is the grid.
+        painter.setPen(QPen(c.edge, 1, Qt::DashLine));
+        painter.drawLine(QPointF(square.center().x(), square.top()), QPointF(square.center().x(), square.bottom()));
+        painter.drawLine(QPointF(square.left(), square.center().y()), QPointF(square.right(), square.center().y()));
+        painter.setPen(QPen(c.accent, 1.4)); painter.setBrush(Qt::NoBrush);
+        painter.drawRect(square);
+        painter.setPen(c.text); painter.setFont(font());
+        painter.drawText(square, Qt::AlignCenter, characters.mid(index, 1));
+    }
 }
 
 NativeCheckBox::NativeCheckBox(const QString& text, QWidget* parent) : QCheckBox(text, parent) {
@@ -160,6 +188,6 @@ void NativeCheckBox::paintEvent(QPaintEvent*) {
     if (checkState() == Qt::PartiallyChecked) {
         painter.setPen(QPen(isEnabled() ? c.accent : c.secondary, 2, Qt::SolidLine, Qt::RoundCap));
         painter.drawLine(QPointF(indicator.left() + 4, indicator.center().y()), QPointF(indicator.right() - 4, indicator.center().y()));
-    } else if (isChecked()) checkmark(painter, indicator, isEnabled() ? QColor(Qt::white) : c.secondary);
+    } else if (isChecked()) checkmark(painter, indicator, isEnabled() ? c.onAccent : c.secondary);
 }
 }
