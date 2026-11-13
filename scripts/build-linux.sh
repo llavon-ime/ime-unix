@@ -21,7 +21,7 @@ case "$(uname -m)" in
         ;;
 esac
 
-for command in git cmake curl install pkg-config sed; do
+for command in git cmake curl install pkg-config sed sha256sum; do
     if ! command -v "${command}" >/dev/null 2>&1; then
         echo "Required command not found: ${command}" >&2
         exit 2
@@ -68,17 +68,42 @@ if [[ ! -x "${ROOT_DIR}/vcpkg/vcpkg" ]]; then
     "${ROOT_DIR}/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
 fi
 
+# The model is republished under the same file name, so a cached copy is only
+# reused when it matches the SHA-256 Hugging Face reports for the current
+# revision (the x-linked-etag of the resolve redirect). Without that header
+# (offline, or a mirror that does not send it) the cached copy is kept.
+MODEL_SHA256="$(curl --silent --head --max-time 15 "${MODEL_URL}" 2>/dev/null |
+    tr -d '\r' |
+    sed -n 's/^x-linked-etag: *"\{0,1\}\([0-9a-f]\{64\}\)"\{0,1\}$/\1/Ip' |
+    head -n 1 || true)"
+
+download_model=0
 if [[ ! -s "${MODEL_PATH}" ]]; then
+    download_model=1
+elif [[ -z "${MODEL_SHA256}" ]]; then
+    echo "Warning: could not get the latest model checksum from ${MODEL_URL};" >&2
+    echo "         using the existing model without checking it: ${MODEL_PATH}" >&2
+elif [[ "$(sha256sum "${MODEL_PATH}" | cut -d' ' -f1)" != "${MODEL_SHA256}" ]]; then
+    echo "Existing model does not match the latest release (${MODEL_SHA256}); updating it."
+    download_model=1
+else
+    echo "Using existing model (up to date): ${MODEL_PATH}"
+fi
+
+if ((download_model)); then
     echo "Downloading model to ${MODEL_PATH}..."
     mkdir -p "${MODEL_DIR}"
     MODEL_PART_PATH="${MODEL_PATH}.part"
     trap 'rm -f "${MODEL_PART_PATH}"' EXIT
     curl --fail --location --retry 3 --output "${MODEL_PART_PATH}" "${MODEL_URL}"
     test -s "${MODEL_PART_PATH}"
+    if [[ -n "${MODEL_SHA256}" ]] &&
+        ! printf '%s  %s\n' "${MODEL_SHA256}" "${MODEL_PART_PATH}" | sha256sum --check --status; then
+        echo "Downloaded model does not match the expected SHA-256 ${MODEL_SHA256}." >&2
+        exit 1
+    fi
     mv "${MODEL_PART_PATH}" "${MODEL_PATH}"
     trap - EXIT
-else
-    echo "Using existing model: ${MODEL_PATH}"
 fi
 
 LLAVON_DEBUG_FLAG="-DLLAVON_IME_DEBUG=OFF"
