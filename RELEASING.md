@@ -79,20 +79,16 @@ git diff --submodule=log "${previous_tag}..HEAD"
 ## 四、發布前檢查
 
 1. 執行與變更範圍相關的完整測試。
-2. 確認版本號尚未存在：
+2. 執行發布前檢查，全部通過才能建立 tag：
 
    ```sh
    version="0.9.10"
-   ! git rev-parse -q --verify "refs/tags/v${version}"
+   scripts/release-preflight.sh "${version}"
    ```
 
-3. 確認發布 commit 就是遠端 `main`：
+   腳本只讀取狀態，不會建立或推送 tag。它確認目前在 `main`、工作區與 submodule 乾淨、`HEAD` 就是遠端 `main`、版本號尚未使用且比上一版新，以及這個 commit 在 `main` 上的 CI 全部成功。CI 還在執行時加上 `--wait` 等它跑完；不可以在 CI 完成前建立 tag，tag 推送後才發現的失敗只能用新的 patch 版本修正。
 
-   ```sh
-   test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-   ```
-
-4. 向維護者展示以下資訊並取得最終確認：
+3. 向維護者展示以下資訊並取得最終確認：
    - 預定版本號。
    - 上一版至本版的比較範圍。
    - 測試結果。
