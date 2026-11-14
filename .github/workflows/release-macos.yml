@@ -25,17 +25,12 @@ env:
   RELEASE_REPOSITORY: ${{ github.repository }}
 
 jobs:
-  verify-input-behavior:
-    uses: ./.github/workflows/verify-release-engine.yml
-    with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
-    permissions:
-      contents: read
-
+  # scripts/release-preflight.sh requires a green main CI on the exact commit
+  # before the tag is created, so the release does not repeat the engine and
+  # raw-key suites here. verify-release-engine.yml remains available manually.
   release-macos:
     name: Build pkg and publish Sparkle updates
     runs-on: macos-26
-    needs: verify-input-behavior
     env:
       GH_TOKEN: ${{ github.token }}
       MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}

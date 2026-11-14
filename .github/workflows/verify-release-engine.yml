@@ -7,6 +7,12 @@ on:
         description: Exact release tag to test, not the moving branch head
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact release tag to test, not the moving branch head
+        required: true
+        type: string
 
 permissions:
   contents: read

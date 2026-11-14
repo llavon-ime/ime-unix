@@ -7,6 +7,19 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - "packaging/aur/**"
+      - "scripts/install-licenses.cmake"
+      - "vcpkg-configuration.json"
+      - "engine/vcpkg.json"
+      - "fcitx5/vcpkg.json"
+      - "ime-unix-service/vcpkg.json"
+      - "ime-unix-service/vcpkg-configuration.json"
+      - "ime-unix-service/triplets/**"
+      - "ime-core"
+      - "lora-trainer"
+      - ".github/workflows/sync-aur-fcitx5.yml"
+      - ".github/workflows/verify-aur-install.yml"
   workflow_dispatch:
 
 permissions:
@@ -101,7 +114,19 @@ jobs:
 
       - name: Clone AUR package repository
         run: |
-          git clone "${AUR_REPOSITORY}" aur-repo
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if git clone "${AUR_REPOSITORY}" aur-repo; then
+              break
+            fi
+            rm -rf aur-repo
+            if [[ "${attempt}" -eq 3 ]]; then
+              echo "Failed to clone the AUR package repository after 3 attempts." >&2
+              exit 1
+            fi
+            echo "Clone attempt ${attempt} failed; retrying." >&2
+            sleep 15
+          done
           # A clone can leave a detached HEAD when the remote HEAD ref is
           # stale, so always base the update on the current master tip.
           git -C aur-repo checkout -B master origin/master
@@ -142,4 +167,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Update llavon-ime-fcitx5-git to ${PKGVER}"
-          git push origin HEAD:master
+          for attempt in 1 2 3; do
+            if git push origin HEAD:master; then
+              exit 0
+            fi
+            if [[ "${attempt}" -eq 3 ]]; then
+              echo "Failed to push the AUR package update after 3 attempts." >&2
+              exit 1
+            fi
+            echo "Push attempt ${attempt} failed; retrying." >&2
+            sleep 15
+          done

@@ -1,0 +1,133 @@
+name: Warm release vcpkg cache
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "vcpkg-configuration.json"
+      - "engine/vcpkg.json"
+      - "fcitx5/vcpkg.json"
+      - "ime-unix-service/vcpkg.json"
+      - "ime-unix-service/vcpkg-configuration.json"
+      - "ime-unix-service/triplets/**"
+      - "ime-core"
+      - ".github/actions/vcpkg-cache/**"
+      - ".github/workflows/warm-release-vcpkg.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: warm-release-vcpkg
+  cancel-in-progress: false
+
+# Release tags can read caches created on the default branch, but not caches
+# from other tags. Populate the same keys as release-linux.yml on main so a
+# tagged package build can restore them instead of rebuilding every port.
+jobs:
+  warm-vcpkg:
+    name: Warm ${{ matrix.format }} vcpkg cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: deb
+            image: debian:13
+          - format: rpm
+            image: fedora:43
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Install Debian build dependencies
+        if: matrix.format == 'deb'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            autoconf autoconf-archive automake libtool \
+            binutils build-essential ca-certificates cmake curl dbus-daemon dpkg-dev fcitx5-modules \
+            fcitx5-modules-dev file g++ gcc git \
+            libatspi2.0-dev libfcitx5core-dev libglib2.0-dev libsqlite3-dev libvulkan1 ninja-build patchelf \
+            pkg-config python3 tar unzip zip qt6-base-dev qt6-qpa-plugins qt6-wayland
+
+      - name: Install Fedora build dependencies
+        if: matrix.format == 'rpm'
+        run: |
+          set -euo pipefail
+          dnf install -y \
+            autoconf autoconf-archive automake libtool \
+            at-spi2-core-devel binutils ca-certificates cmake curl dbus-daemon dbus-tools fcitx5 fcitx5-data \
+            fcitx5-devel file gcc-c++ git glib2-devel ninja-build patchelf pkgconf-pkg-config sqlite-devel \
+            python3 rpm-build tar unzip vulkan-loader zip qt6-qtbase-devel qt6-qtwayland
+
+      - name: Checkout ime-unix
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Trust container checkout
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}/vcpkg"
+
+      - name: Cache vcpkg tool and downloads
+        uses: ./.github/actions/vcpkg-cache
+        with:
+          downloads-key: release
+
+      - name: Bootstrap vcpkg
+        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /root/.cache/vcpkg/archives
+          key: linux-${{ matrix.format }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
+          restore-keys: |
+            linux-${{ matrix.format }}-vcpkg-
+
+      # Only install ports; the release job compiles the project itself.
+      - name: Install release vcpkg dependencies
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,/root/.cache/vcpkg/archives,readwrite
+        run: |
+          set -euo pipefail
+          cmake -S ime-unix-service -B build/warm-service -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux-llavon-prebuilt \
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/ime-unix-service/triplets" \
+            -DVCPKG_MANIFEST_FEATURES=llama-vulkan \
+            -DIME_UNIX_SERVICE_BUILD_TESTS=ON
+
+          cmake -S fcitx5 -B build/warm-addon -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-linux-llavon-prebuilt \
+            -DVCPKG_OVERLAY_TRIPLETS="$PWD/ime-unix-service/triplets" \
+            -DLLAVON_IME_BUILD_TESTS=ON \
+            -DLLAVON_IME_REQUIRE_ATSPI=ON \
+            -DLLAVON_IME_DISPLAY_VERSION=0.0.0
+
+      # Keep the ports installed before a later configure failure; vcpkg
+      # verifies every archive on reuse, so a partial cache is safe.
+      - name: Save vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /root/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
