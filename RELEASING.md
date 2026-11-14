@@ -139,7 +139,8 @@ tag push 後必須等待相關 workflow 完成，不可在執行中宣稱發布�
 
 - `Release macOS package`
 - `Release Linux packages`
-- 共用 engine 與 raw-key release tests
+
+Engine 與 raw-key suites 已由 release preflight 要求的 main CI 覆蓋，tag 後不再重跑；需要時可手動執行 `Verify release input behavior`。
 
 確認 GitHub Release：
 
