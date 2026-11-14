@@ -3,7 +3,7 @@ Linux Fcitx5 與 macOS 前端共用 `engine/` 的輸入行為；架構見 `READM
 ## 驗證
 - 全部 engine 測試：`scripts/verify-engine-tests.sh`；單一 suite：`build/engine-tests/tests/llavon_ime_rawkey_tests "名稱片段"`。其他元件的指令見 `.github/workflows/`。
 - 改按鍵、組字、選字、提交、焦點切換或預測行為，要在 `engine/tests/rawkey/` 加或改情境。
-- 這些 CI 不涵蓋，改到相關程式要在本機跑：`macos/scripts/verify-core.sh`（C ABI、`macos/Core/`，只在 release 跑）、`macos/scripts/verify-settings-*.sh`、`macos/scripts/verify-input-source-lifecycle.sh`。
+- 這些只有 macOS CI 會跑，改到相關程式要先在本機跑：`macos/scripts/verify-core.sh`（C ABI、`macos/Core/`）、`macos/scripts/verify-settings-*.sh`、`macos/scripts/verify-input-source-lifecycle.sh`。
 - `[skip]` 和沒跑的項目要在回報中明說。
 
 ## 不要

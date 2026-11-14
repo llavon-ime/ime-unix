@@ -80,6 +80,19 @@ jobs:
       - name: Verify update feed signatures and installation gating
         run: bash macos/scripts/verify-updates.sh
 
+      # The release workflows repeat this on the tagged source. Running it here
+      # reports a broken C ABI or Swift core before a version number is spent.
+      - name: Verify Swift and C ABI integration
+        run: bash macos/scripts/verify-core.sh
+
+      # Links the engine archive and the Sparkle framework that the two steps
+      # above prepared.
+      - name: Verify the input menu and settings entry points
+        run: bash macos/scripts/verify-settings-entry.sh
+
+      - name: Verify the input-source lifecycle around a bundle replacement
+        run: bash macos/scripts/verify-input-source-lifecycle.sh
+
       - name: Fetch vcpkg version history
         run: |
           if [[ "$(git -C vcpkg rev-parse --is-shallow-repository)" == "true" ]]; then
@@ -97,6 +110,11 @@ jobs:
             -DIME_UNIX_SERVICE_BUILD_TESTS=ON
           cmake --build build/ime-unix-service-macos-ci --parallel 4
           ctest --test-dir build/ime-unix-service-macos-ci --output-on-failure --timeout 60
+
+      - name: Verify settings requests between the settings program and the input method
+        env:
+          LLAVON_TEST_HOST_HELPER: ${{ github.workspace }}/build/ime-unix-service-macos-ci/src/training/native/llavon-ime-lora-gui.app/Contents/MacOS/llavon-ime-lora-gui
+        run: bash macos/scripts/verify-settings-host.sh
 
       - name: Build the app
         run: macos/scripts/build-native-app.sh
