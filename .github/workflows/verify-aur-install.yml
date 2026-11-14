@@ -35,7 +35,11 @@ jobs:
           persist-credentials: false
 
       - name: Check out ime-core for the vcpkg cache key
-        run: git submodule update --init ime-core
+        run: |
+          set -euo pipefail
+          # The container runs as a different owner than the checkout.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          git submodule update --init ime-core
 
       - name: Prepare unprivileged package builder
         run: |
