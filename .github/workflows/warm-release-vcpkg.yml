@@ -76,6 +76,12 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Fetch vcpkg version history
+        run: |
+          if [[ "$(git -C vcpkg rev-parse --is-shallow-repository)" == "true" ]]; then
+            git -C vcpkg fetch --unshallow
+          fi
+
       - name: Trust container checkout
         run: |
           set -euo pipefail
