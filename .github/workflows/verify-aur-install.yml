@@ -65,7 +65,8 @@ jobs:
         run: echo "week=$(date -u +%G-%V)" >> "${GITHUB_OUTPUT}"
 
       - name: Cache vcpkg binary cache
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: /home/builder/.cache/vcpkg/archives
           key: archlinux-vcpkg-aur-${{ steps.vcpkg-cache-bucket.outputs.week }}-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
@@ -76,7 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           install -d -o builder -g builder /home/builder/.cache/vcpkg/archives
-          chown -R builder:builder /home/builder/.cache/vcpkg
+          chown -R builder:builder /home/builder/.cache
 
       - name: Check AUR metadata
         run: |
@@ -134,6 +135,15 @@ jobs:
             /home/builder/aur-package/src/ime-unix/vcpkg/buildtrees/**/*.log
           if-no-files-found: warn
           retention-days: 14
+
+      # Keep the packages built before a later failure; vcpkg verifies every
+      # archive on reuse, so a partial cache is safe.
+      - name: Save vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /home/builder/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
   verify-clean-install:
     name: Verify clean AUR install
