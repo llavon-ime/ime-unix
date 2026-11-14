@@ -50,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 

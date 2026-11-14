@@ -138,17 +138,18 @@ jobs:
           fi
           echo /tmp/cmake-4.4.3/bin >> "${GITHUB_PATH}"
       - name: Save pinned package-build CMake
-        if: (success() || failure()) && steps.cmake-cache.outputs.cache-hit != 'true'
+        if: (success() || failure()) && github.ref_type != 'tag' && steps.cmake-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: /tmp/cmake-4.4.3
           key: ${{ runner.os }}-cmake-4.4.3-linux-x86_64
 
-      - name: Cache vcpkg binary cache
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: /root/.cache/vcpkg/archives
-          key: linux-${{ matrix.format }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json', 'ime-unix-service/triplets/x64-linux-llavon-prebuilt.cmake') }}
+          key: linux-${{ matrix.format }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
           restore-keys: |
             linux-${{ matrix.format }}-vcpkg-
 
@@ -216,6 +217,15 @@ jobs:
             build/package-linux-${{ matrix.format }}/addon/engine/tests/llavon_ime_tests
           if-no-files-found: error
           retention-days: 14
+
+      # Tag-scoped caches are invisible to later releases and only consume the
+      # repository cache quota, so a release tag never writes a new one.
+      - name: Save vcpkg binary cache
+        if: success() && github.ref_type != 'tag' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /root/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
   verify-clean-install:
     name: Verify clean ${{ matrix.format }} install

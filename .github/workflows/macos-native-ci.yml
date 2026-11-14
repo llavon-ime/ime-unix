@@ -32,11 +32,18 @@ jobs:
         with:
           submodules: recursive
 
+      # vcpkg package ABI hashes change with the runner toolchain, and an
+      # existing cache key cannot be overwritten. Rotate weekly so a runner
+      # update produces a new key that can store the rebuilt packages.
+      - name: Resolve weekly vcpkg cache bucket
+        id: vcpkg-cache-bucket
+        run: echo "week=$(date -u +%G-%V)" >> "${GITHUB_OUTPUT}"
+
       - name: Cache vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-native-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-native-${{ steps.vcpkg-cache-bucket.outputs.week }}-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 

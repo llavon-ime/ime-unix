@@ -67,6 +67,13 @@ jobs:
           lfs: true
           fetch-depth: 0
 
+      # vcpkg package ABI hashes change with the runner toolchain, and an
+      # existing cache key cannot be overwritten. Rotate weekly so a runner
+      # update produces a new key that can store the rebuilt packages.
+      - name: Resolve weekly vcpkg cache bucket
+        id: vcpkg-cache-bucket
+        run: echo "week=$(date -u +%G-%V)" >> "${GITHUB_OUTPUT}"
+
       - name: Cache vcpkg and Sparkle downloads
         uses: ./.github/actions/vcpkg-cache
         with:
@@ -171,11 +178,12 @@ jobs:
           brew update
           brew install autoconf autoconf-archive automake libtool cmake ninja pkg-config qtbase
 
-      - name: Cache vcpkg binary cache
-        uses: actions/cache@v4
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/vcpkg/archives
-          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-core/vcpkg.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-vcpkg-release-${{ steps.vcpkg-cache-bucket.outputs.week }}-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-vcpkg-
 
@@ -393,3 +401,12 @@ jobs:
           done
           echo "Published appcast still differs from the signed feed; refusing to report success." >&2
           exit 1
+
+      # Tag-scoped caches are invisible to later releases and only consume the
+      # repository cache quota, so a release tag never writes a new one.
+      - name: Save vcpkg binary cache
+        if: success() && github.ref_type != 'tag' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}

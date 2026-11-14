@@ -34,6 +34,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check out ime-core for the vcpkg cache key
+        run: git submodule update --init ime-core
+
       - name: Prepare unprivileged package builder
         run: |
           set -euo pipefail
@@ -50,6 +53,26 @@ jobs:
           printf 'builder ALL=(root) NOPASSWD: /usr/bin/pacman\n' > /etc/sudoers.d/aur-builder
           chmod 440 /etc/sudoers.d/aur-builder
           visudo -cf /etc/sudoers.d/aur-builder
+
+      # The Arch container rolls continuously, so rotate the cache key weekly;
+      # otherwise packages rebuilt after a toolchain update could not be saved.
+      - name: Resolve weekly vcpkg cache bucket
+        id: vcpkg-cache-bucket
+        run: echo "week=$(date -u +%G-%V)" >> "${GITHUB_OUTPUT}"
+
+      - name: Cache vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: /home/builder/.cache/vcpkg/archives
+          key: archlinux-vcpkg-aur-${{ steps.vcpkg-cache-bucket.outputs.week }}-${{ hashFiles('vcpkg-configuration.json', 'engine/vcpkg.json', 'fcitx5/vcpkg.json', 'ime-unix-service/vcpkg.json', 'ime-unix-service/vcpkg-configuration.json', 'ime-unix-service/triplets/**', 'ime-core/vcpkg.json', 'ime-core/vcpkg-configuration.json', 'ime-core/vcpkg-ports/**') }}
+          restore-keys: |
+            archlinux-vcpkg-aur-
+
+      - name: Give the package builder the restored cache
+        run: |
+          set -euo pipefail
+          install -d -o builder -g builder /home/builder/.cache/vcpkg/archives
+          chown -R builder:builder /home/builder/.cache/vcpkg
 
       - name: Check AUR metadata
         run: |
@@ -75,6 +98,7 @@ jobs:
             set -euo pipefail
             cd /home/builder/aur-package
             export CMAKE_BUILD_PARALLEL_LEVEL=2 VCPKG_MAX_CONCURRENCY=2
+            export VCPKG_BINARY_SOURCES="clear;files,/home/builder/.cache/vcpkg/archives,readwrite"
             makepkg --syncdeps --noconfirm --cleanbuild --log
           '
 
