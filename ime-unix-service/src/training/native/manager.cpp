@@ -49,6 +49,8 @@
 
 namespace llavon::lora {
 namespace {
+// After the seven navigation pages.
+constexpr int appearancePageIndex = 7;
 class SentenceDelegate final : public QStyledItemDelegate {
 public:
     explicit SentenceDelegate(QObject* parent) : QStyledItemDelegate(parent) {}
@@ -160,28 +162,16 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
     navigation->setSpacing(2);
     navigation->setMinimumHeight(300);
     side->addWidget(navigation, 1);
-    // The app's own look, kept apart from the input method settings.
-    side->addWidget(label(QStringLiteral("外觀"), "help"));
-    side->addSpacing(4);
-    auto* lookRow = new QHBoxLayout; lookRow->setSpacing(6); lookRow->setContentsMargins(0, 0, 0, 0);
-    auto* looks = new QButtonGroup(this);
-    const QList<std::array<QString, 4>> lookChoices{
-        {QStringLiteral("keycap"), QStringLiteral("鍵帽"), QStringLiteral("lookKeycap"), QStringLiteral("像鍵盤一樣的按鍵")},
-        {QStringLiteral("workbook"), QStringLiteral("作業簿"), QStringLiteral("lookWorkbook"), QStringLiteral("國語作業簿的方格與楷書；需要已安裝的楷書字型")}};
-    for (const auto& [value, text, name, tip] : lookChoices) {
-        auto* option = new QPushButton(text); option->setObjectName(name); option->setCheckable(true);
-        option->setAutoDefault(false); option->setProperty("segment", true); option->setProperty("value", value);
-        option->setToolTip(tip); option->setAccessibleDescription(tip); option->setMinimumHeight(30);
-        option->setChecked(value == UiPreferences::look());
-        looks->addButton(option); lookRow->addWidget(option, 1);
-    }
-    connect(looks, &QButtonGroup::buttonClicked, this, [this](QAbstractButton* option) { setLook(option->property("value").toString()); });
-    side->addLayout(lookRow);
     side->addSpacing(10);
     guideButton_ = button(QStringLiteral("使用指南"), "openGuide");
     guideButton_->setProperty("quiet", true);
     side->addWidget(guideButton_);
     connect(guideButton_, &QPushButton::clicked, this, [this] { showPage("guide"); });
+    // The app's own look is kept apart from the input method settings.
+    auto* lookButton = button(QStringLiteral("外觀"), "openAppearance");
+    lookButton->setProperty("quiet", true);
+    side->addWidget(lookButton);
+    connect(lookButton, &QPushButton::clicked, this, [this] { showPage("appearance"); });
     horizontal->addWidget(sidebar);
     auto* content = new QWidget;
     auto* layout = new QVBoxLayout(content);
@@ -218,9 +208,10 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
 #endif
     auto* hostStatus = new HostSettingsPage(false, nullptr, hostHelper); hostStatus->setObjectName("hostDiagnostics");
     pages_->addWidget(hostStatus);
+    pages_->addWidget(appearancePage());
     horizontal->addWidget(content, 1);
     setCentralWidget(shell);
-    connect(navigation, &QListWidget::currentRowChanged, this, [this, navigation](int row) {
+    const auto openSection = [this, navigation](int row) {
         if (row < 0) return;
         const int index = navigation->item(row)->data(Qt::UserRole).toInt();
         // Settings and phrases have their own reload; status pages poll.
@@ -241,6 +232,12 @@ Manager::Manager(Backend* backend, const QString& hostHelper, const QString& ini
         if (index == 3 && !settings_->isDirty()) settings_->reload();
         if (index == 4 && !firstPhraseVisit && !phrases_->isDirty()) phrases_->reload();
         if (auto* host = qobject_cast<HostSettingsPage*>(pages_->currentWidget())) host->refresh();
+    };
+    connect(navigation, &QListWidget::currentRowChanged, this, openSection);
+    // The appearance page keeps the current row but clears its highlight, so a
+    // click on that same row must also return to it.
+    connect(navigation, &QListWidget::itemClicked, this, [this, navigation, openSection](QListWidgetItem* item) {
+        if (pages_->currentIndex() == appearancePageIndex) openSection(navigation->row(item));
     });
     connect(refreshButton_, &QPushButton::clicked, this, &Manager::refresh);
     connect(settings_, &SettingsPage::dirtyChanged, this, [this](bool dirty) { markUnsaved(3, dirty); });
@@ -345,11 +342,56 @@ void Manager::showPage(const QString& page) {
         guide_->show(); guide_->raise(); guide_->activateWindow();
         return;
     }
+    auto* navigation = findChild<QListWidget*>("navigation");
+    if (page == "appearance") {
+        // Not a navigation entry. Only the highlight is cleared: without a
+        // current row the list would pick its first entry when it next gains
+        // focus and leave this page.
+        navigation->clearSelection();
+        refreshButton_->setVisible(false);
+        pages_->setCurrentIndex(appearancePageIndex);
+        heading_->setText(QStringLiteral("外觀"));
+        return;
+    }
     const QStringList names{"records", "training", "history", "settings", "phrases", "updates", "about"};
     const auto index = names.indexOf(page);
-    auto* navigation = findChild<QListWidget*>("navigation");
+    if (index >= 0 && pages_->currentIndex() == appearancePageIndex) {
+        // The current row may already be the destination; leave it without
+        // switching pages so that selecting it switches.
+        const QSignalBlocker blocker(navigation);
+        navigation->setCurrentRow(-1);
+    }
     for (int row = 0; row < navigation->count(); ++row)
         if (index >= 0 && navigation->item(row)->data(Qt::UserRole).toInt() == index) navigation->setCurrentRow(row);
+}
+
+QWidget* Manager::appearancePage() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(10);
+    layout->addWidget(label(QStringLiteral("只改變這個設定程式的樣式，不影響輸入法；選了立即套用。"), "muted"));
+    auto* card = new QFrame; card->setObjectName("settingsCard");
+    auto* row = new QHBoxLayout(card); row->setContentsMargins(16, 9, 16, 9); row->setSpacing(16);
+    auto* heading = new QVBoxLayout; heading->setSpacing(2);
+    heading->addWidget(new QLabel(QStringLiteral("樣式")));
+    heading->addWidget(label(QStringLiteral("「作業簿」使用國語作業簿的方格與楷書，需要已安裝的楷書字型。"), "help"));
+    row->addLayout(heading, 1);
+    auto* looks = new QButtonGroup(page);
+    const QList<std::array<QString, 4>> lookChoices{
+        {QStringLiteral("keycap"), QStringLiteral("鍵帽"), QStringLiteral("lookKeycap"), QStringLiteral("像鍵盤一樣的按鍵")},
+        {QStringLiteral("workbook"), QStringLiteral("作業簿"), QStringLiteral("lookWorkbook"), QStringLiteral("國語作業簿的方格與楷書；需要已安裝的楷書字型")}};
+    for (const auto& [value, text, name, tip] : lookChoices) {
+        auto* option = new QPushButton(text); option->setObjectName(name); option->setCheckable(true);
+        option->setAutoDefault(false); option->setProperty("segment", true); option->setProperty("value", value);
+        option->setToolTip(tip); option->setAccessibleDescription(tip); option->setMinimumSize(96, 30);
+        option->setChecked(value == UiPreferences::look());
+        looks->addButton(option); row->addWidget(option);
+    }
+    connect(looks, &QButtonGroup::buttonClicked, this, [this](QAbstractButton* option) { setLook(option->property("value").toString()); });
+    layout->addWidget(card);
+    layout->addStretch();
+    return page;
 }
 
 QWidget* Manager::recordsPage() {

@@ -1128,6 +1128,24 @@ void NativeTests::lookSwitching() {
         // The keyboard look is the default.
         QCOMPARE(llavon::lora::UiPreferences::look(), QStringLiteral("keycap"));
         QCOMPARE(llavon::lora::theme(), Theme::Keycap);
+        // The look has its own page, opened from the bottom of the sidebar.
+        QVERIFY(!widget<QPushButton>(window, "lookKeycap")->isVisible());
+        QVERIFY(!widget<QWidget>(window, "sidebar")->isAncestorOf(widget<QPushButton>(window, "lookKeycap")));
+        QVERIFY(!window.findChild<llavon::lora::SettingsPage*>()->isAncestorOf(widget<QPushButton>(window, "lookKeycap")));
+        auto* navigation = widget<QListWidget>(window, "navigation");
+        const int settingsRow = navigation->currentRow();
+        click(window, "openAppearance");
+        // The sidebar list gaining focus must not pull the window back to a section.
+        navigation->setFocus(Qt::ActiveWindowFocusReason); QTest::qWait(50);
+        QVERIFY(widget<QPushButton>(window, "lookKeycap")->isVisible());
+        QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("外觀"));
+        QVERIFY(navigation->selectedItems().isEmpty());
+        // The section that was open is still reachable with one click.
+        QTest::mouseClick(navigation->viewport(), Qt::LeftButton, {}, navigation->visualItemRect(navigation->item(settingsRow)).center());
+        QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("輸入法設定"));
+        window.showPage("appearance"); window.showPage("settings");
+        QCOMPARE(widget<QLabel>(window, "pageHeading")->text(), QStringLiteral("輸入法設定"));
+        click(window, "openAppearance");
         QVERIFY(widget<QPushButton>(window, "lookKeycap")->isChecked());
         auto* heading = widget<QLabel>(window, "pageHeading");
         const auto keycapHeading = heading->sizeHint();
@@ -1156,6 +1174,7 @@ void NativeTests::lookSwitching() {
         Manager window(&backend, {}, "settings"); window.show();
         QCOMPARE(llavon::lora::theme(), Theme::Workbook);
         QVERIFY(widget<QPushButton>(window, "lookWorkbook")->isChecked());
+        click(window, "openAppearance");
         click(window, "lookKeycap");
         QCOMPARE(llavon::lora::theme(), Theme::Keycap);
         QCOMPARE(llavon::lora::UiPreferences::look(), QStringLiteral("keycap"));

@@ -71,6 +71,7 @@ private:
     QWidget* recordsPage();
     QWidget* trainingPage();
     QWidget* historyPage();
+    QWidget* appearancePage();
     void ensurePersonalizationPages();
     void setLook(const QString& look);
     void refreshAppearance();

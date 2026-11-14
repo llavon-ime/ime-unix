@@ -108,7 +108,7 @@ void applyAppearance(QWidget* window) {
         QLabel[role="eyebrow"] { font-size: 11px; }
         QLabel#notice { color: $secondary; font-size: 12px; padding: 4px 10px; }
         QLabel#notice[tone="error"] { color: $error; background: $dangerSurface; border-radius: 7px; }
-        QPushButton#openGuide { text-align: left; padding-left: 10px; }
+        QPushButton#openGuide, QPushButton#openAppearance { text-align: left; padding-left: 10px; }
         QListWidget#navigation { background: transparent; border: none; outline: none; }
         QListWidget#navigation::item { padding: 8px; border-radius: 6px; }
         QListWidget#navigation::item:hover { background: $selection; }
